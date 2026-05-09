@@ -5,7 +5,10 @@ import {
   LlmProvider,
   LlmRequest,
   LlmStreamEvent,
+  ModelInfo,
   NetworkPolicy,
+  OpenAiBackendKind,
+  OpenAiEndpointInspection,
   ProviderCapabilities,
   ProviderProfile,
   TokenUsage,
@@ -101,6 +104,10 @@ export class OpenAiCompatibleProvider implements LlmProvider {
   }
 
   async listModels(signal?: AbortSignal): Promise<readonly string[]> {
+    return (await this.inspectEndpoint(signal)).models.map((model) => model.id);
+  }
+
+  async inspectEndpoint(signal?: AbortSignal): Promise<OpenAiEndpointInspection> {
     const url = this.endpoint("models");
     assertUrlAllowed(url, this.policy);
 
@@ -110,11 +117,23 @@ export class OpenAiCompatibleProvider implements LlmProvider {
     });
 
     if (!response.ok) {
-      return [];
+      throw new Error(`Model discovery failed at ${url}: HTTP ${response.status}: ${await safeResponseText(response)}`);
     }
 
-    const body = (await response.json()) as { readonly data?: ReadonlyArray<{ readonly id?: string }> };
-    return body.data?.map((model) => model.id).filter((id): id is string => typeof id === "string" && id.length > 0) ?? [];
+    const body = await response.json();
+    let models = modelsFromBody(body);
+    let backend = detectBackend(response.headers, body, models);
+    const auxiliaryInspection = await this.inspectAuxiliaryEndpoint(signal).catch(() => undefined);
+    if (auxiliaryInspection) {
+      models = mergeModelInfo(models, auxiliaryInspection.models);
+      backend = auxiliaryInspection.backend;
+    }
+    models = models.filter((model) => !isEmbeddingModel(model));
+    return {
+      backend,
+      backendLabel: backendLabel(backend),
+      models
+    };
   }
 
   async probeCapabilities(model: string, signal?: AbortSignal): Promise<ProviderCapabilities> {
@@ -219,7 +238,59 @@ export class OpenAiCompatibleProvider implements LlmProvider {
   }
 
   private endpoint(path: string): string {
-    return `${this.profile.baseUrl.replace(/\/+$/, "")}/${path}`;
+    return `${this.openAiBaseUrl()}/${path}`;
+  }
+
+  private openAiBaseUrl(): string {
+    const trimmed = this.profile.baseUrl.trim().replace(/\/+$/, "");
+    try {
+      const url = new URL(trimmed);
+      const pathname = url.pathname.replace(/\/+$/, "");
+      if (!pathname) {
+        url.pathname = "/v1";
+      } else if (!pathname.endsWith("/v1")) {
+        url.pathname = `${pathname}/v1`;
+      } else {
+        url.pathname = pathname;
+      }
+      url.search = "";
+      url.hash = "";
+      return url.toString().replace(/\/+$/, "");
+    } catch {
+      return trimmed.endsWith("/v1") ? trimmed : `${trimmed}/v1`;
+    }
+  }
+
+  private auxiliaryEndpoint(path: string): string {
+    const url = new URL(this.openAiBaseUrl());
+    url.pathname = path;
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  }
+
+  private async inspectAuxiliaryEndpoint(signal?: AbortSignal): Promise<OpenAiEndpointInspection | undefined> {
+    const lmStudioUrl = this.auxiliaryEndpoint("/api/v0/models");
+    assertUrlAllowed(lmStudioUrl, this.policy);
+    const response = await fetch(lmStudioUrl, {
+      headers: this.headers(false),
+      signal
+    });
+    if (!response.ok) {
+      return undefined;
+    }
+
+    const body = await response.json();
+    const models = modelsFromBody(body);
+    if (models.length === 0) {
+      return undefined;
+    }
+
+    return {
+      backend: "lmstudio",
+      backendLabel: backendLabel("lmstudio"),
+      models
+    };
   }
 
   private fetchChatStream(url: string, request: LlmRequest, includeUsage: boolean): Promise<Response> {
@@ -239,7 +310,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
   }
 }
 
-function toOpenAiMessage(message: ChatMessage): Record<string, string> {
+function toOpenAiMessage(message: ChatMessage): Record<string, unknown> {
   if (message.role === "tool") {
     return {
       role: "tool",
@@ -248,11 +319,24 @@ function toOpenAiMessage(message: ChatMessage): Record<string, string> {
     };
   }
 
-  return {
+  const result: Record<string, unknown> = {
     role: message.role,
     content: message.content,
     ...(message.name ? { name: message.name } : {})
   };
+
+  if (message.role === "assistant" && message.toolCalls && message.toolCalls.length > 0) {
+    result.tool_calls = message.toolCalls.map((toolCall) => ({
+      id: toolCall.id,
+      type: "function",
+      function: {
+        name: toolCall.name,
+        arguments: toolCall.argumentsJson
+      }
+    }));
+  }
+
+  return result;
 }
 
 function toOpenAiTool(tool: ToolDefinition): Record<string, unknown> {
@@ -284,4 +368,213 @@ async function safeResponseText(response: Response): Promise<string> {
   } catch {
     return response.statusText;
   }
+}
+
+function modelsFromBody(body: unknown): readonly ModelInfo[] {
+  if (!isRecord(body) || !Array.isArray(body.data)) {
+    return [];
+  }
+  return body.data
+    .map((model): ModelInfo | undefined => {
+      if (!isRecord(model) || typeof model.id !== "string" || !model.id) {
+        return undefined;
+      }
+      return {
+        id: model.id,
+        type: typeof model.type === "string" ? model.type : undefined,
+        contextLength: findPositiveInteger(model, [
+          "context_length",
+          "contextLength",
+          "max_context_length",
+          "maxContextLength",
+          "max_model_len",
+          "maxModelLen",
+          "max_sequence_length",
+          "maxSequenceLength",
+          "max_seq_len",
+          "maxSeqLen",
+          "context_window",
+          "contextWindow",
+          "n_ctx",
+          "num_ctx",
+          "ctx_size",
+          "max_position_embeddings"
+        ]),
+        maxOutputTokens: findPositiveInteger(model, [
+          "max_output_tokens",
+          "maxOutputTokens",
+          "max_completion_tokens",
+          "maxCompletionTokens",
+          "max_tokens",
+          "maxTokens"
+        ]),
+        supportsReasoning: detectsReasoning(model, model.id)
+      };
+    })
+    .filter((model): model is ModelInfo => Boolean(model));
+}
+
+function mergeModelInfo(primary: readonly ModelInfo[], secondary: readonly ModelInfo[]): readonly ModelInfo[] {
+  const byId = new Map<string, ModelInfo>();
+  for (const model of secondary) {
+    byId.set(model.id, model);
+  }
+  for (const model of primary) {
+    byId.set(model.id, {
+      ...byId.get(model.id),
+      ...model,
+      contextLength: model.contextLength ?? byId.get(model.id)?.contextLength,
+      maxOutputTokens: model.maxOutputTokens ?? byId.get(model.id)?.maxOutputTokens,
+      supportsReasoning: model.supportsReasoning ?? byId.get(model.id)?.supportsReasoning,
+      type: model.type ?? byId.get(model.id)?.type
+    });
+  }
+  return [...byId.values()];
+}
+
+function isEmbeddingModel(model: ModelInfo): boolean {
+  const fingerprint = `${model.id}\n${model.type ?? ""}`.toLowerCase();
+  return fingerprint.includes("embedding") || fingerprint.includes("embed");
+}
+
+function detectBackend(headers: Headers, body: unknown, models: readonly ModelInfo[]): OpenAiBackendKind {
+  const headersText = headersToText(headers).toLowerCase();
+  const bodyText = safeJson(body).toLowerCase();
+  const modelText = models.map((model) => model.id).join("\n").toLowerCase();
+  const fingerprint = `${headersText}\n${bodyText}\n${modelText}`;
+
+  if (fingerprint.includes("lm studio") || fingerprint.includes("lmstudio")) {
+    return "lmstudio";
+  }
+  if (fingerprint.includes("litellm")) {
+    return "litellm";
+  }
+  if (fingerprint.includes("\"owned_by\":\"vllm\"") || fingerprint.includes("\"owned_by\": \"vllm\"") || fingerprint.includes("vllm")) {
+    return "vllm";
+  }
+  return "openai-api";
+}
+
+function backendLabel(backend: OpenAiBackendKind): string {
+  switch (backend) {
+    case "litellm":
+      return "LiteLLM";
+    case "vllm":
+      return "vLLM";
+    case "lmstudio":
+      return "LM Studio";
+    case "openai-api":
+      return "OpenAI API compatible";
+  }
+}
+
+function safeJson(value: unknown): string {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return "";
+  }
+}
+
+function headersToText(headers: Headers): string {
+  const lines: string[] = [];
+  headers.forEach((value, key) => {
+    lines.push(`${key}: ${value}`);
+  });
+  return lines.join("\n");
+}
+
+function findPositiveInteger(value: unknown, keys: readonly string[], depth = 0): number | undefined {
+  if (depth > 4 || !isRecord(value)) {
+    return undefined;
+  }
+
+  for (const key of keys) {
+    const parsed = toPositiveInteger(value[key]);
+    if (parsed !== undefined) {
+      return parsed;
+    }
+  }
+
+  for (const nested of Object.values(value)) {
+    const parsed = findPositiveInteger(nested, keys, depth + 1);
+    if (parsed !== undefined) {
+      return parsed;
+    }
+  }
+  return undefined;
+}
+
+function detectsReasoning(model: Record<string, unknown>, id: string): boolean | undefined {
+  const explicit = findBoolean(model, [
+    "supports_reasoning",
+    "supportsReasoning",
+    "supports_thinking",
+    "supportsThinking",
+    "reasoning",
+    "thinking",
+    "is_reasoning_model",
+    "isReasoningModel"
+  ]);
+  if (explicit !== undefined) {
+    return explicit;
+  }
+
+  const fingerprint = `${id}\n${safeJson(model)}`.toLowerCase();
+  if (/\b(reasoning|thinking)\b/.test(fingerprint)) {
+    return true;
+  }
+  if (/(^|[-_./:])(r1|o1|o3|o4|qwq)([-_./:]|$)/.test(id.toLowerCase())) {
+    return true;
+  }
+  return undefined;
+}
+
+function findBoolean(value: unknown, keys: readonly string[], depth = 0): boolean | undefined {
+  if (depth > 4 || !isRecord(value)) {
+    return undefined;
+  }
+
+  for (const key of keys) {
+    const parsed = toBoolean(value[key]);
+    if (parsed !== undefined) {
+      return parsed;
+    }
+  }
+
+  for (const nested of Object.values(value)) {
+    const parsed = findBoolean(nested, keys, depth + 1);
+    if (parsed !== undefined) {
+      return parsed;
+    }
+  }
+  return undefined;
+}
+
+function toPositiveInteger(value: unknown): number | undefined {
+  const parsed = typeof value === "number"
+    ? value
+    : typeof value === "string"
+      ? Number(value)
+      : Number.NaN;
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function toBoolean(value: unknown): boolean | undefined {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "string") {
+    if (value.toLowerCase() === "true") {
+      return true;
+    }
+    if (value.toLowerCase() === "false") {
+      return false;
+    }
+  }
+  return undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }

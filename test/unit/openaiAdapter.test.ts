@@ -46,3 +46,98 @@ test("streams OpenAI-compatible chat completion chunks", async () => {
     globalThis.fetch = originalFetch;
   }
 });
+
+test("serializes assistant tool calls and tool results", async () => {
+  const originalFetch = globalThis.fetch;
+  let postedBody = "";
+  globalThis.fetch = async (_input: string | URL | Request, init?: RequestInit) => {
+    postedBody = String(init?.body ?? "");
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("data: [DONE]\n\n"));
+        controller.close();
+      }
+    });
+    return new Response(stream, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" }
+    });
+  };
+
+  try {
+    const provider = new OpenAiCompatibleProvider(
+      { id: "test", label: "Test", baseUrl: "http://127.0.0.1:4000/v1" },
+      { allowlist: [] }
+    );
+    for await (const event of provider.streamChat({
+      model: "local-model",
+      messages: [
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "call-1", name: "read_file", argumentsJson: "{\"path\":\"README.md\"}" }]
+        },
+        { role: "tool", content: "read_file README.md\n\n# CodeForge", name: "read_file", toolCallId: "call-1" }
+      ]
+    })) {
+      assert.ok(event.type);
+    }
+
+    const body = JSON.parse(postedBody) as { readonly messages: readonly Record<string, unknown>[] };
+    assert.deepEqual(body.messages[0].tool_calls, [
+      {
+        id: "call-1",
+        type: "function",
+        function: { name: "read_file", arguments: "{\"path\":\"README.md\"}" }
+      }
+    ]);
+    assert.equal(body.messages[1].tool_call_id, "call-1");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("merges LM Studio metadata into OpenAI API model discovery", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input: string | URL | Request) => {
+    const url = input instanceof Request ? input.url : String(input);
+    if (url.endsWith("/v1/models")) {
+      return new Response(JSON.stringify({
+        data: [
+          { id: "google/gemma-4-e4b", object: "model", owned_by: "organization_owner" },
+          { id: "text-embedding-nomic-embed-text-v1.5", object: "model", owned_by: "organization_owner" }
+        ]
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (url.endsWith("/api/v0/models")) {
+      return new Response(JSON.stringify({
+        data: [
+          { id: "google/gemma-4-e4b", object: "model", type: "vlm", max_context_length: 131072 },
+          { id: "text-embedding-nomic-embed-text-v1.5", object: "model", type: "embeddings", max_context_length: 2048 }
+        ]
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response("not found", { status: 404 });
+  };
+
+  try {
+    const provider = new OpenAiCompatibleProvider(
+      { id: "test", label: "Test", baseUrl: "http://127.0.0.1:1234" },
+      { allowlist: [] }
+    );
+    const inspection = await provider.inspectEndpoint();
+    assert.equal(inspection.backendLabel, "LM Studio");
+    assert.deepEqual(inspection.models, [
+      {
+        id: "google/gemma-4-e4b",
+        type: "vlm",
+        contextLength: 131072,
+        maxOutputTokens: undefined,
+        supportsReasoning: undefined
+      }
+    ]);
+    assert.deepEqual(await provider.listModels(), ["google/gemma-4-e4b"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

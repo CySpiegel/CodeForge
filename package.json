@@ -17,11 +17,13 @@
   "activationEvents": [
     "onView:codeforge.chatView",
     "onCommand:codeforge.openChat",
-    "onCommand:codeforge.configureEndpoint",
     "onCommand:codeforge.openSettings",
     "onCommand:codeforge.askSelection",
     "onCommand:codeforge.editSelection",
     "onCommand:codeforge.explainFile",
+    "onCommand:codeforge.generateTests",
+    "onCommand:codeforge.fixDiagnostics",
+    "onCommand:codeforge.cancel",
     "onCommand:codeforge.resetSession"
   ],
   "main": "./out/extension.js",
@@ -30,11 +32,6 @@
       {
         "command": "codeforge.openChat",
         "title": "CodeForge: Open Chat",
-        "category": "CodeForge"
-      },
-      {
-        "command": "codeforge.configureEndpoint",
-        "title": "CodeForge: Configure Self-Hosted Endpoint",
         "category": "CodeForge"
       },
       {
@@ -55,6 +52,21 @@
       {
         "command": "codeforge.explainFile",
         "title": "CodeForge: Explain Current File",
+        "category": "CodeForge"
+      },
+      {
+        "command": "codeforge.generateTests",
+        "title": "CodeForge: Generate Tests",
+        "category": "CodeForge"
+      },
+      {
+        "command": "codeforge.fixDiagnostics",
+        "title": "CodeForge: Fix Diagnostics",
+        "category": "CodeForge"
+      },
+      {
+        "command": "codeforge.cancel",
+        "title": "CodeForge: Stop Current Request",
         "category": "CodeForge"
       },
       {
@@ -87,7 +99,7 @@
         "codeforge.profiles": {
           "type": "array",
           "default": [],
-          "description": "Self-hosted OpenAI-compatible endpoint profiles. API keys are stored separately in VS Code SecretStorage.",
+          "description": "Local and on-prem OpenAI API profiles. API keys are stored separately in VS Code SecretStorage.",
           "items": {
             "type": "object",
             "required": [
@@ -122,8 +134,8 @@
         },
         "codeforge.activeProfile": {
           "type": "string",
-          "default": "litellm-local",
-          "description": "Active CodeForge endpoint profile ID."
+          "default": "openai-api-local",
+          "description": "Active CodeForge OpenAI API profile ID."
         },
         "codeforge.model": {
           "type": "string",
@@ -133,9 +145,67 @@
         "codeforge.network.allowlist": {
           "type": "array",
           "default": [],
-          "description": "Explicit public network allowlist. Entries may be origins, hostnames, wildcard hostnames like *.example.com, or IPv4 CIDR ranges.",
+          "description": "Explicit on-prem hostname allowlist for local/private LLM endpoints. Public IP destinations remain blocked.",
           "items": {
             "type": "string"
+          }
+        },
+        "codeforge.permissions.mode": {
+          "type": "string",
+          "default": "default",
+          "enum": [
+            "default",
+            "review",
+            "acceptEdits",
+            "readOnly",
+            "workspaceTrusted"
+          ],
+          "description": "Permission mode for local tools. Default allows reads and asks for edits/commands."
+        },
+        "codeforge.permissions.rules": {
+          "type": "array",
+          "default": [],
+          "description": "Permission rules. Each rule has kind, pattern, behavior, scope, and optional description.",
+          "items": {
+            "type": "object",
+            "required": [
+              "kind",
+              "pattern",
+              "behavior"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "tool",
+                  "path",
+                  "command",
+                  "endpoint"
+                ]
+              },
+              "pattern": {
+                "type": "string"
+              },
+              "behavior": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "ask",
+                  "deny"
+                ]
+              },
+              "scope": {
+                "type": "string",
+                "enum": [
+                  "workspace",
+                  "user"
+                ],
+                "default": "workspace"
+              },
+              "description": {
+                "type": "string"
+              }
+            }
           }
         },
         "codeforge.context.maxFiles": {
@@ -158,6 +228,13 @@
           "minimum": 5,
           "maximum": 1800,
           "description": "Maximum execution time for approved shell commands."
+        },
+        "codeforge.commands.outputLimitBytes": {
+          "type": "number",
+          "default": 200000,
+          "minimum": 16000,
+          "maximum": 2000000,
+          "description": "Maximum stdout and stderr bytes retained per approved shell command stream."
         }
       }
     },
@@ -172,6 +249,15 @@
           "command": "codeforge.editSelection",
           "when": "editorHasSelection",
           "group": "navigation@11"
+        },
+        {
+          "command": "codeforge.generateTests",
+          "when": "editorHasSelection",
+          "group": "navigation@12"
+        },
+        {
+          "command": "codeforge.fixDiagnostics",
+          "group": "navigation@13"
         }
       ],
       "explorer/context": [

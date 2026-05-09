@@ -1,5 +1,7 @@
 import * as vscode from "vscode";
-import { ContextLimits, NetworkPolicy, ProviderProfile } from "../core/types";
+import { assertUrlAllowed } from "../core/networkPolicy";
+import { normalizePermissionPolicy, parsePermissionRules } from "../core/permissions";
+import { ContextLimits, NetworkPolicy, PermissionMode, PermissionPolicy, PermissionRule, ProviderProfile } from "../core/types";
 
 const sectionName = "codeforge";
 
@@ -18,13 +20,23 @@ export class CodeForgeConfigService {
 
   getContextLimits(): ContextLimits {
     return {
-      maxFiles: this.config().get<number>("context.maxFiles", 24),
-      maxBytes: this.config().get<number>("context.maxBytes", 120000)
+      maxFiles: clampNumber(this.config().get<number>("context.maxFiles", 24), 1, 200, 24),
+      maxBytes: clampNumber(this.config().get<number>("context.maxBytes", 120000), 8000, 2_000_000, 120000)
     };
   }
 
   getCommandTimeoutSeconds(): number {
-    return this.config().get<number>("commands.timeoutSeconds", 120);
+    return clampNumber(this.config().get<number>("commands.timeoutSeconds", 120), 5, 1800, 120);
+  }
+
+  getCommandOutputLimitBytes(): number {
+    return clampNumber(this.config().get<number>("commands.outputLimitBytes", 200000), 16000, 2_000_000, 200000);
+  }
+
+  getPermissionPolicy(): PermissionPolicy {
+    const mode = this.config().get<PermissionMode>("permissions.mode", "default");
+    const rules = parsePermissionRules(this.config().get<readonly unknown[]>("permissions.rules", []), "workspace");
+    return normalizePermissionPolicy({ mode, rules });
   }
 
   getConfiguredModel(): string {
@@ -32,7 +44,7 @@ export class CodeForgeConfigService {
   }
 
   getActiveProfileId(): string {
-    return this.config().get<string>("activeProfile", "litellm-local");
+    return this.config().get<string>("activeProfile", "openai-api-local");
   }
 
   async getActiveProfile(): Promise<ProviderProfile> {
@@ -67,109 +79,152 @@ export class CodeForgeConfigService {
 
   async updateSettings(settings: Partial<CodeForgeSettingsUpdate>): Promise<void> {
     const config = this.config();
-    if (settings.activeProfileId) {
-      await config.update("activeProfile", settings.activeProfileId, vscode.ConfigurationTarget.Global);
+    const allowlist = settings.allowlist ?? this.getNetworkPolicy().allowlist;
+    const baseUrl = settings.baseUrl?.trim();
+    const model = settings.model?.trim() || undefined;
+    const profileLabel = settings.profileLabel?.trim() || "OpenAI API";
+    if (settings.baseUrl !== undefined) {
+      if (!baseUrl) {
+        throw new Error("OpenAI API Base URL is required.");
+      }
+      assertUrlAllowed(baseUrl, { allowlist });
+    }
+
+    let activeProfileId = settings.activeProfileId || this.getActiveProfileId();
+    if (settings.createProfile) {
+      if (!baseUrl) {
+        throw new Error("OpenAI API Base URL is required.");
+      }
+      activeProfileId = await this.createOpenAiProfile({
+        label: profileLabel,
+        baseUrl,
+        defaultModel: model,
+        apiKey: settings.apiKey?.trim() || undefined
+      });
+    } else {
+      if (settings.activeProfileId) {
+        await config.update("activeProfile", settings.activeProfileId, vscode.ConfigurationTarget.Global);
+      }
+      await this.updateOpenAiProfile(activeProfileId, {
+        label: settings.profileLabel,
+        baseUrl,
+        defaultModel: model,
+        apiKey: settings.apiKey?.trim() || undefined
+      });
     }
     if (settings.model !== undefined) {
-      await config.update("model", settings.model, vscode.ConfigurationTarget.Workspace);
+      await config.update("model", settings.model.trim(), vscode.ConfigurationTarget.Workspace);
     }
     if (settings.allowlist) {
       await config.update("network.allowlist", settings.allowlist, vscode.ConfigurationTarget.Global);
     }
     if (settings.maxFiles !== undefined) {
-      await config.update("context.maxFiles", settings.maxFiles, vscode.ConfigurationTarget.Global);
+      await config.update("context.maxFiles", clampNumber(settings.maxFiles, 1, 200, 24), vscode.ConfigurationTarget.Global);
     }
     if (settings.maxBytes !== undefined) {
-      await config.update("context.maxBytes", settings.maxBytes, vscode.ConfigurationTarget.Global);
+      await config.update("context.maxBytes", clampNumber(settings.maxBytes, 8000, 2_000_000, 120000), vscode.ConfigurationTarget.Global);
     }
     if (settings.commandTimeoutSeconds !== undefined) {
-      await config.update("commands.timeoutSeconds", settings.commandTimeoutSeconds, vscode.ConfigurationTarget.Global);
+      await config.update("commands.timeoutSeconds", clampNumber(settings.commandTimeoutSeconds, 5, 1800, 120), vscode.ConfigurationTarget.Global);
     }
-  }
-
-  async configureEndpoint(): Promise<void> {
-    const preset = await vscode.window.showQuickPick(
-      [
-        { label: "LiteLLM local", id: "litellm-local", baseUrl: "http://127.0.0.1:4000/v1" },
-        { label: "vLLM local", id: "vllm-local", baseUrl: "http://127.0.0.1:8000/v1" },
-        { label: "Custom OpenAI-compatible endpoint", id: "custom", baseUrl: "" }
-      ],
-      { title: "Choose a self-hosted endpoint preset" }
-    );
-    if (!preset) {
-      return;
+    if (settings.commandOutputLimitBytes !== undefined) {
+      await config.update("commands.outputLimitBytes", clampNumber(settings.commandOutputLimitBytes, 16000, 2_000_000, 200000), vscode.ConfigurationTarget.Global);
     }
-
-    const baseUrl = await vscode.window.showInputBox({
-      title: "OpenAI-compatible base URL",
-      prompt: "Use a /v1 base URL, for example http://127.0.0.1:4000/v1",
-      value: preset.baseUrl,
-      ignoreFocusOut: true
-    });
-    if (!baseUrl) {
-      return;
+    if (settings.permissionMode !== undefined) {
+      await config.update("permissions.mode", settings.permissionMode, vscode.ConfigurationTarget.Workspace);
     }
-
-    const model = await vscode.window.showInputBox({
-      title: "Default model",
-      prompt: "Model ID exposed by the endpoint. Leave empty to discover models later.",
-      ignoreFocusOut: true
-    });
-
-    const apiKey = await vscode.window.showInputBox({
-      title: "API key",
-      prompt: "Optional. Stored in VS Code SecretStorage.",
-      password: true,
-      ignoreFocusOut: true
-    });
-
-    const profileId = preset.id === "custom" ? `custom-${Date.now()}` : preset.id;
-    const apiKeySecretName = apiKey ? `${profileId}.apiKey` : undefined;
-    if (apiKey && apiKeySecretName) {
-      await this.secrets.store(secretKey(apiKeySecretName), apiKey);
-    }
-
-    const nextProfile: ProviderProfile = {
-      id: profileId,
-      label: preset.label,
-      baseUrl,
-      defaultModel: model?.trim() || undefined,
-      apiKeySecretName
-    };
-
-    const configured = this.config().get<readonly ProviderProfile[]>("profiles", []);
-    const withoutPreset = configured.filter((profile) => profile.id !== profileId);
-    await this.config().update("profiles", [...withoutPreset, nextProfile], vscode.ConfigurationTarget.Global);
-    await this.config().update("activeProfile", profileId, vscode.ConfigurationTarget.Global);
-    if (model?.trim()) {
-      await this.config().update("model", model.trim(), vscode.ConfigurationTarget.Workspace);
+    if (settings.permissionRules !== undefined) {
+      await config.update("permissions.rules", settings.permissionRules, vscode.ConfigurationTarget.Workspace);
     }
   }
 
   private config(): vscode.WorkspaceConfiguration {
     return vscode.workspace.getConfiguration(sectionName);
   }
+
+  private async createOpenAiProfile(profile: {
+    readonly label: string;
+    readonly baseUrl: string;
+    readonly defaultModel?: string;
+    readonly apiKey?: string;
+  }): Promise<string> {
+    const profileId = uniqueProfileId(this.getProfiles(), profile.label);
+    const apiKeySecretName = profile.apiKey ? `${profileId}.apiKey` : undefined;
+    if (profile.apiKey && apiKeySecretName) {
+      await this.secrets.store(secretKey(apiKeySecretName), profile.apiKey);
+    }
+
+    const nextProfile: ProviderProfile = {
+      id: profileId,
+      label: profile.label,
+      baseUrl: profile.baseUrl,
+      defaultModel: profile.defaultModel,
+      apiKeySecretName
+    };
+    const configured = this.config().get<readonly ProviderProfile[]>("profiles", []);
+    await this.config().update("profiles", [...configured, nextProfile], vscode.ConfigurationTarget.Global);
+    await this.config().update("activeProfile", profileId, vscode.ConfigurationTarget.Global);
+    return profileId;
+  }
+
+  private async updateOpenAiProfile(profileId: string, changes: {
+    readonly label?: string;
+    readonly baseUrl?: string;
+    readonly defaultModel?: string;
+    readonly apiKey?: string;
+  }): Promise<void> {
+    const profile = this.getProfiles().find((item) => item.id === profileId);
+    if (!profile) {
+      throw new Error(`Unknown OpenAI API profile: ${profileId}`);
+    }
+
+    let apiKeySecretName = profile.apiKeySecretName;
+    if (changes.apiKey) {
+      apiKeySecretName = apiKeySecretName || `${profileId}.apiKey`;
+      await this.secrets.store(secretKey(apiKeySecretName), changes.apiKey);
+    }
+
+    const nextProfile: ProviderProfile = {
+      ...profile,
+      label: changes.label?.trim() || profile.label,
+      baseUrl: changes.baseUrl?.trim() || profile.baseUrl,
+      defaultModel: changes.defaultModel,
+      apiKeySecretName
+    };
+    const configured = this.config().get<readonly ProviderProfile[]>("profiles", []);
+    const existingIndex = configured.findIndex((item) => item.id === profileId);
+    const nextProfiles = [...configured];
+    if (existingIndex >= 0) {
+      nextProfiles[existingIndex] = nextProfile;
+    } else {
+      nextProfiles.push(nextProfile);
+    }
+    await this.config().update("profiles", nextProfiles, vscode.ConfigurationTarget.Global);
+  }
 }
 
 export interface CodeForgeSettingsUpdate {
   readonly activeProfileId: string;
+  readonly createProfile: boolean;
+  readonly profileLabel: string;
+  readonly baseUrl: string;
+  readonly apiKey: string;
   readonly model: string;
   readonly allowlist: readonly string[];
   readonly maxFiles: number;
   readonly maxBytes: number;
   readonly commandTimeoutSeconds: number;
+  readonly commandOutputLimitBytes: number;
+  readonly permissionMode: PermissionMode;
+  readonly permissionRules: readonly PermissionRule[];
 }
 
 const defaultProfiles: readonly ProviderProfile[] = [
   {
-    id: "litellm-local",
-    label: "LiteLLM local",
-    baseUrl: "http://127.0.0.1:4000/v1"
-  },
-  {
-    id: "vllm-local",
-    label: "vLLM local",
-    baseUrl: "http://127.0.0.1:8000/v1"
+    id: "openai-api-local",
+    label: "OpenAI API",
+    baseUrl: "http://127.0.0.1:1234",
+    defaultModel: "google/gemma-4-e4b"
   }
 ];
 
@@ -179,4 +234,23 @@ function isValidProfile(profile: ProviderProfile): boolean {
 
 function secretKey(name: string): string {
   return `codeforge.profile.${name}`;
+}
+
+function uniqueProfileId(existingProfiles: readonly ProviderProfile[], label: string): string {
+  const slug = label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "openai-api";
+  let id = `openai-api-${slug}`;
+  let suffix = 2;
+  const existingIds = new Set(existingProfiles.map((profile) => profile.id));
+  while (existingIds.has(id)) {
+    id = `openai-api-${slug}-${suffix}`;
+    suffix += 1;
+  }
+  return id;
+}
+
+function clampNumber(value: number | undefined, min: number, max: number, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, Math.round(value)));
 }

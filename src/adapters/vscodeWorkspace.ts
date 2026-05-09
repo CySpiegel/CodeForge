@@ -1,15 +1,29 @@
 import * as vscode from "vscode";
-import { ContextItem, SearchResult, WorkspacePort } from "../core/types";
+import { ContextItem, DiagnosticSeverity, SearchResult, WorkspaceDiagnostic, WorkspacePort } from "../core/types";
+import { validateWorkspaceGlob, validateWorkspacePath } from "../core/toolRegistry";
 
 const excludePattern = "{**/.git/**,**/node_modules/**,**/out/**,**/dist/**,**/build/**,**/.vscode-test/**,**/*.png,**/*.jpg,**/*.jpeg,**/*.gif,**/*.webp,**/*.pdf,**/*.zip,**/*.wasm}";
 
 export class VsCodeWorkspacePort implements WorkspacePort {
   async listTextFiles(limit: number, signal?: AbortSignal): Promise<readonly string[]> {
-    const files = await vscode.workspace.findFiles("**/*", excludePattern, limit);
+    return this.listFiles(undefined, limit, signal);
+  }
+
+  async listFiles(pattern: string | undefined, limit: number, signal?: AbortSignal): Promise<readonly string[]> {
+    const include = pattern?.trim() || "**/*";
+    const validation = validateWorkspaceGlob(include);
+    if (!validation.ok) {
+      throw new Error(validation.message);
+    }
+    const files = await vscode.workspace.findFiles(include, excludePattern, limit);
     if (signal?.aborted) {
       throw new Error("Context collection was cancelled.");
     }
     return files.map(toWorkspacePath).filter((path): path is string => Boolean(path)).sort();
+  }
+
+  async globFiles(pattern: string, limit: number, signal?: AbortSignal): Promise<readonly string[]> {
+    return this.listFiles(pattern, limit, signal);
   }
 
   async readTextFile(path: string, maxBytes: number, signal?: AbortSignal): Promise<string> {
@@ -19,6 +33,23 @@ export class VsCodeWorkspacePort implements WorkspacePort {
     const uri = resolveWorkspaceUri(path);
     const bytes = await vscode.workspace.fs.readFile(uri);
     return Buffer.from(bytes).subarray(0, maxBytes).toString("utf8");
+  }
+
+  async getActiveTextDocument(maxBytes: number): Promise<ContextItem | undefined> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || isIgnoredDocument(editor.document)) {
+      return undefined;
+    }
+
+    const workspacePath = toWorkspacePath(editor.document.uri);
+    const label = workspacePath ?? unsavedDocumentLabel(editor.document);
+    const text = editor.document.getText();
+    const content = text || emptyActiveDocumentNote(editor.document, workspacePath);
+    return {
+      kind: "activeFile",
+      label,
+      content: trim(content, maxBytes)
+    };
   }
 
   async getOpenTextDocuments(maxBytesPerDocument: number): Promise<readonly ContextItem[]> {
@@ -55,7 +86,16 @@ export class VsCodeWorkspacePort implements WorkspacePort {
   }
 
   async searchText(query: string, limit: number, signal?: AbortSignal): Promise<readonly SearchResult[]> {
-    const files = await vscode.workspace.findFiles("**/*", excludePattern, 500);
+    return this.grepText(query, undefined, limit, signal);
+  }
+
+  async grepText(query: string, include: string | undefined, limit: number, signal?: AbortSignal): Promise<readonly SearchResult[]> {
+    const pattern = include?.trim() || "**/*";
+    const validation = validateWorkspaceGlob(pattern);
+    if (!validation.ok) {
+      throw new Error(validation.message);
+    }
+    const files = await vscode.workspace.findFiles(pattern, excludePattern, Math.max(500, limit * 20));
     const results: SearchResult[] = [];
     const lowered = query.toLowerCase();
 
@@ -82,6 +122,41 @@ export class VsCodeWorkspacePort implements WorkspacePort {
 
     return results;
   }
+
+  async getDiagnostics(path: string | undefined, limit: number, signal?: AbortSignal): Promise<readonly WorkspaceDiagnostic[]> {
+    if (signal?.aborted) {
+      throw new Error("Diagnostics read was cancelled.");
+    }
+    const target = path ? resolveWorkspaceUri(path).toString() : undefined;
+    const diagnostics: WorkspaceDiagnostic[] = [];
+    for (const [uri, items] of vscode.languages.getDiagnostics()) {
+      if (signal?.aborted || diagnostics.length >= limit) {
+        break;
+      }
+      if (target && uri.toString() !== target) {
+        continue;
+      }
+      const workspacePath = toWorkspacePath(uri);
+      if (!workspacePath) {
+        continue;
+      }
+      for (const diagnostic of items) {
+        if (diagnostics.length >= limit) {
+          break;
+        }
+        diagnostics.push({
+          path: workspacePath,
+          line: diagnostic.range.start.line + 1,
+          character: diagnostic.range.start.character + 1,
+          severity: diagnosticSeverity(diagnostic.severity),
+          message: diagnostic.message,
+          source: diagnostic.source,
+          code: diagnostic.code === undefined ? undefined : String(typeof diagnostic.code === "object" ? diagnostic.code.value : diagnostic.code)
+        });
+      }
+    }
+    return diagnostics.sort(compareDiagnostics);
+  }
 }
 
 export function resolveWorkspaceUri(path: string): vscode.Uri {
@@ -91,8 +166,9 @@ export function resolveWorkspaceUri(path: string): vscode.Uri {
   }
 
   const cleanPath = path.replace(/\\/g, "/").replace(/^\/+/, "");
-  if (cleanPath.includes("../") || cleanPath === "..") {
-    throw new Error(`Refusing to access path outside the workspace: ${path}`);
+  const validation = validateWorkspacePath(path);
+  if (!validation.ok) {
+    throw new Error(validation.message ?? `Refusing to access unsafe workspace path: ${path}`);
   }
 
   return vscode.Uri.joinPath(workspaceFolder.uri, cleanPath);
@@ -110,9 +186,57 @@ function isIgnoredDocument(document: vscode.TextDocument): boolean {
   return document.languageId === "Log" || document.uri.path.includes("/node_modules/");
 }
 
+function unsavedDocumentLabel(document: vscode.TextDocument): string {
+  const language = document.languageId && document.languageId !== "plaintext" ? ` ${document.languageId}` : "";
+  const name = document.fileName || "Untitled";
+  return `Unsaved active${language} editor: ${name}`;
+}
+
+function emptyActiveDocumentNote(document: vscode.TextDocument, workspacePath: string | undefined): string {
+  if (workspacePath) {
+    return `[CodeForge active file is empty. Use write_file with path "${workspacePath}" when the user asks you to write content into this file.]`;
+  }
+
+  const language = document.languageId && document.languageId !== "plaintext" ? ` ${document.languageId}` : "";
+  return `[CodeForge active${language} editor is unsaved and has no workspace path. Ask the user to save it inside the workspace before using write_file or edit_file.]`;
+}
+
 function trim(value: string, maxBytes: number): string {
   if (Buffer.byteLength(value, "utf8") <= maxBytes) {
     return value;
   }
   return `${Buffer.from(value).subarray(0, maxBytes).toString("utf8")}\n\n[CodeForge clipped this content.]`;
+}
+
+function diagnosticSeverity(severity: vscode.DiagnosticSeverity): DiagnosticSeverity {
+  switch (severity) {
+    case vscode.DiagnosticSeverity.Error:
+      return "error";
+    case vscode.DiagnosticSeverity.Warning:
+      return "warning";
+    case vscode.DiagnosticSeverity.Information:
+      return "information";
+    case vscode.DiagnosticSeverity.Hint:
+      return "hint";
+  }
+}
+
+function compareDiagnostics(left: WorkspaceDiagnostic, right: WorkspaceDiagnostic): number {
+  return severityRank(left.severity) - severityRank(right.severity)
+    || left.path.localeCompare(right.path)
+    || left.line - right.line
+    || left.character - right.character;
+}
+
+function severityRank(severity: DiagnosticSeverity): number {
+  switch (severity) {
+    case "error":
+      return 0;
+    case "warning":
+      return 1;
+    case "information":
+      return 2;
+    case "hint":
+      return 3;
+  }
 }

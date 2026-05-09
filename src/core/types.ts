@@ -5,6 +5,7 @@ export interface ChatMessage {
   readonly content: string;
   readonly name?: string;
   readonly toolCallId?: string;
+  readonly toolCalls?: readonly ToolCall[];
 }
 
 export interface ToolDefinition {
@@ -45,10 +46,27 @@ export interface ProviderCapabilities {
   readonly nativeToolCalls: boolean;
 }
 
+export type OpenAiBackendKind = "openai-api" | "litellm" | "vllm" | "lmstudio";
+
+export interface ModelInfo {
+  readonly id: string;
+  readonly type?: string;
+  readonly contextLength?: number;
+  readonly maxOutputTokens?: number;
+  readonly supportsReasoning?: boolean;
+}
+
+export interface OpenAiEndpointInspection {
+  readonly backend: OpenAiBackendKind;
+  readonly backendLabel: string;
+  readonly models: readonly ModelInfo[];
+}
+
 export interface LlmProvider {
   readonly profile: ProviderProfile;
   streamChat(request: LlmRequest): AsyncIterable<LlmStreamEvent>;
   listModels(signal?: AbortSignal): Promise<readonly string[]>;
+  inspectEndpoint(signal?: AbortSignal): Promise<OpenAiEndpointInspection>;
   probeCapabilities(model: string, signal?: AbortSignal): Promise<ProviderCapabilities>;
 }
 
@@ -66,23 +84,53 @@ export interface NetworkPolicy {
   readonly allowlist: readonly string[];
 }
 
+export type PermissionMode = "default" | "review" | "acceptEdits" | "readOnly" | "workspaceTrusted";
+export type PermissionBehavior = "allow" | "ask" | "deny";
+export type PermissionRuleKind = "tool" | "path" | "command" | "endpoint";
+export type PermissionRuleScope = "session" | "workspace" | "user";
+
+export interface PermissionRule {
+  readonly kind: PermissionRuleKind;
+  readonly pattern: string;
+  readonly behavior: PermissionBehavior;
+  readonly scope: PermissionRuleScope;
+  readonly description?: string;
+}
+
+export interface PermissionPolicy {
+  readonly mode: PermissionMode;
+  readonly rules: readonly PermissionRule[];
+}
+
+export interface PermissionDecision {
+  readonly behavior: PermissionBehavior;
+  readonly source: "rule" | "mode" | "default";
+  readonly reason: string;
+  readonly rule?: PermissionRule;
+}
+
 export interface ContextLimits {
   readonly maxFiles: number;
   readonly maxBytes: number;
 }
 
 export interface ContextItem {
-  readonly kind: "selection" | "openFile" | "fileTree" | "file";
+  readonly kind: "activeFile" | "selection" | "openFile" | "fileTree" | "file" | "projectInstructions" | "memory";
   readonly label: string;
   readonly content: string;
 }
 
 export interface WorkspacePort {
   listTextFiles(limit: number, signal?: AbortSignal): Promise<readonly string[]>;
+  listFiles(pattern: string | undefined, limit: number, signal?: AbortSignal): Promise<readonly string[]>;
+  globFiles(pattern: string, limit: number, signal?: AbortSignal): Promise<readonly string[]>;
   readTextFile(path: string, maxBytes: number, signal?: AbortSignal): Promise<string>;
+  getActiveTextDocument(maxBytes: number): Promise<ContextItem | undefined>;
   getOpenTextDocuments(maxBytesPerDocument: number): Promise<readonly ContextItem[]>;
   getActiveSelection(maxBytes: number): Promise<ContextItem | undefined>;
   searchText(query: string, limit: number, signal?: AbortSignal): Promise<readonly SearchResult[]>;
+  grepText(query: string, include: string | undefined, limit: number, signal?: AbortSignal): Promise<readonly SearchResult[]>;
+  getDiagnostics(path: string | undefined, limit: number, signal?: AbortSignal): Promise<readonly WorkspaceDiagnostic[]>;
 }
 
 export interface SearchResult {
@@ -91,11 +139,44 @@ export interface SearchResult {
   readonly preview: string;
 }
 
+export type DiagnosticSeverity = "error" | "warning" | "information" | "hint";
+
+export interface WorkspaceDiagnostic {
+  readonly path: string;
+  readonly line: number;
+  readonly character: number;
+  readonly severity: DiagnosticSeverity;
+  readonly message: string;
+  readonly source?: string;
+  readonly code?: string;
+}
+
 export type AgentAction =
+  | ListFilesAction
+  | GlobFilesAction
   | ReadFileAction
   | SearchTextAction
+  | GrepTextAction
+  | ListDiagnosticsAction
   | ProposePatchAction
+  | WriteFileAction
+  | EditFileAction
+  | OpenDiffAction
   | RunCommandAction;
+
+export interface ListFilesAction {
+  readonly type: "list_files";
+  readonly pattern?: string;
+  readonly limit?: number;
+  readonly reason?: string;
+}
+
+export interface GlobFilesAction {
+  readonly type: "glob_files";
+  readonly pattern: string;
+  readonly limit?: number;
+  readonly reason?: string;
+}
 
 export interface ReadFileAction {
   readonly type: "read_file";
@@ -109,8 +190,45 @@ export interface SearchTextAction {
   readonly reason?: string;
 }
 
+export interface GrepTextAction {
+  readonly type: "grep_text";
+  readonly query: string;
+  readonly include?: string;
+  readonly limit?: number;
+  readonly reason?: string;
+}
+
+export interface ListDiagnosticsAction {
+  readonly type: "list_diagnostics";
+  readonly path?: string;
+  readonly limit?: number;
+  readonly reason?: string;
+}
+
 export interface ProposePatchAction {
   readonly type: "propose_patch";
+  readonly patch: string;
+  readonly reason?: string;
+}
+
+export interface WriteFileAction {
+  readonly type: "write_file";
+  readonly path: string;
+  readonly content: string;
+  readonly reason?: string;
+}
+
+export interface EditFileAction {
+  readonly type: "edit_file";
+  readonly path: string;
+  readonly oldText: string;
+  readonly newText: string;
+  readonly replaceAll?: boolean;
+  readonly reason?: string;
+}
+
+export interface OpenDiffAction {
+  readonly type: "open_diff";
   readonly patch: string;
   readonly reason?: string;
 }
@@ -122,14 +240,20 @@ export interface RunCommandAction {
   readonly reason?: string;
 }
 
-export type ApprovalKind = "edit" | "command";
+export type ApprovalKind = "read" | "search" | "edit" | "preview" | "command";
 
 export interface ApprovalRequest {
   readonly id: string;
   readonly kind: ApprovalKind;
   readonly title: string;
   readonly summary: string;
-  readonly action: ProposePatchAction | RunCommandAction;
+  readonly detail?: string;
+  readonly risk?: string;
+  readonly permissionReason?: string;
+  readonly permissionSource?: PermissionDecision["source"];
+  readonly toolCallId?: string;
+  readonly toolName?: string;
+  readonly action: AgentAction;
   readonly createdAt: number;
 }
 
@@ -139,4 +263,11 @@ export interface CommandResult {
   readonly stdout: string;
   readonly stderr: string;
   readonly timedOut: boolean;
+  readonly cancelled: boolean;
+  readonly stdoutTruncated: boolean;
+  readonly stderrTruncated: boolean;
+  readonly outputLimitBytes: number;
+  readonly cwd: string;
+  readonly startedAt: number;
+  readonly endedAt: number;
 }

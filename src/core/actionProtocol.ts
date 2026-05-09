@@ -1,4 +1,5 @@
-import { AgentAction, ToolDefinition } from "./types";
+import { parseAction, toolDefinitions } from "./toolRegistry";
+import { AgentAction } from "./types";
 
 interface ActionEnvelope {
   readonly actions?: readonly unknown[];
@@ -10,70 +11,23 @@ Prefer concise answers. When you need workspace data, request one or more action
 
 {
   "actions": [
+    { "type": "list_files", "pattern": "src/**/*.ts", "limit": 100, "reason": "why" },
+    { "type": "glob_files", "pattern": "src/**/*.ts", "limit": 100, "reason": "why" },
     { "type": "read_file", "path": "relative/path.ts", "reason": "why" },
     { "type": "search_text", "query": "symbol or text", "reason": "why" },
+    { "type": "grep_text", "query": "symbol or text", "include": "src/**/*.ts", "limit": 50, "reason": "why" },
+    { "type": "list_diagnostics", "path": "relative/path.ts", "limit": 50, "reason": "why" },
+    { "type": "write_file", "path": "relative/path.ts", "content": "full file text", "reason": "why" },
+    { "type": "edit_file", "path": "relative/path.ts", "oldText": "exact text", "newText": "replacement text", "reason": "why" },
+    { "type": "open_diff", "patch": "unified diff", "reason": "why" },
     { "type": "propose_patch", "patch": "unified diff", "reason": "why" },
     { "type": "run_command", "command": "npm test", "cwd": ".", "reason": "why" }
   ]
 }
 
-Edits must be unified diffs. Do not claim that edits or commands were applied; CodeForge will ask the user to approve them.`;
+Prefer VS Code-native list/glob/grep/read/diagnostics/edit/write tools over shell commands for workspace file work. When the user refers to "this file", "the current file", or "the file I have open", use the activeFile context item label as the target path. If the activeFile label says it is unsaved, explain that it must be saved inside the workspace before write_file or edit_file can apply. For an empty active workspace file, prefer write_file with the full file content. Do not claim that edits or commands were applied; CodeForge will ask the user to approve them when policy requires it.`;
 
-export const toolDefinitions: readonly ToolDefinition[] = [
-  {
-    name: "read_file",
-    description: "Read a bounded text file from the current workspace.",
-    parameters: {
-      type: "object",
-      properties: {
-        path: { type: "string" },
-        reason: { type: "string" }
-      },
-      required: ["path"],
-      additionalProperties: false
-    }
-  },
-  {
-    name: "search_text",
-    description: "Search text in the current workspace.",
-    parameters: {
-      type: "object",
-      properties: {
-        query: { type: "string" },
-        reason: { type: "string" }
-      },
-      required: ["query"],
-      additionalProperties: false
-    }
-  },
-  {
-    name: "propose_patch",
-    description: "Propose a unified diff patch for user review.",
-    parameters: {
-      type: "object",
-      properties: {
-        patch: { type: "string" },
-        reason: { type: "string" }
-      },
-      required: ["patch"],
-      additionalProperties: false
-    }
-  },
-  {
-    name: "run_command",
-    description: "Propose a shell command to run after user approval.",
-    parameters: {
-      type: "object",
-      properties: {
-        command: { type: "string" },
-        cwd: { type: "string" },
-        reason: { type: "string" }
-      },
-      required: ["command"],
-      additionalProperties: false
-    }
-  }
-];
+export { toolDefinitions };
 
 export function parseActionsFromAssistantText(text: string): readonly AgentAction[] {
   const candidates = extractJsonCandidates(text);
@@ -131,26 +85,7 @@ function normalizeAction(value: unknown): AgentAction | undefined {
     return undefined;
   }
 
-  const reason = typeof value.reason === "string" ? value.reason : undefined;
-  switch (value.type) {
-    case "read_file":
-      return typeof value.path === "string" ? { type: "read_file", path: value.path, reason } : undefined;
-    case "search_text":
-      return typeof value.query === "string" ? { type: "search_text", query: value.query, reason } : undefined;
-    case "propose_patch":
-      return typeof value.patch === "string" ? { type: "propose_patch", patch: value.patch, reason } : undefined;
-    case "run_command":
-      return typeof value.command === "string"
-        ? {
-          type: "run_command",
-          command: value.command,
-          cwd: typeof value.cwd === "string" ? value.cwd : undefined,
-          reason
-        }
-        : undefined;
-    default:
-      return undefined;
-  }
+  return parseAction(value.type, value);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

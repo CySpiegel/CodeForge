@@ -29,6 +29,13 @@ export function isUrlAllowed(rawUrl: string, policy: NetworkPolicy): UrlPolicyRe
     return { allowed: true };
   }
 
+  if (parseIpv4(host) !== undefined) {
+    return {
+      allowed: false,
+      reason: `Blocked public IP network destination ${url.origin}. CodeForge only permits localhost, private IP ranges, and explicitly configured on-prem hostnames.`
+    };
+  }
+
   for (const entry of policy.allowlist) {
     if (matchesAllowlistEntry(url, host, entry.trim())) {
       return { allowed: true };
@@ -37,7 +44,7 @@ export function isUrlAllowed(rawUrl: string, policy: NetworkPolicy): UrlPolicyRe
 
   return {
     allowed: false,
-    reason: `Blocked public network destination ${url.origin}. Add it to codeforge.network.allowlist to permit it.`
+    reason: `Blocked network destination ${url.origin}. Add an on-prem hostname to codeforge.network.allowlist only when it resolves inside your private network.`
   };
 }
 

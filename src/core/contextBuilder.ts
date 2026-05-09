@@ -1,17 +1,47 @@
 import { ContextItem, ContextLimits, WorkspacePort } from "./types";
+import { formatMemories, MemoryEntry } from "./memory";
+
+export interface ContextBuilderSources {
+  readonly memories?: readonly MemoryEntry[];
+}
 
 export class ContextBuilder {
   private readonly workspace: WorkspacePort;
   private readonly limits: ContextLimits;
+  private readonly sources: ContextBuilderSources;
 
-  constructor(workspace: WorkspacePort, limits: ContextLimits) {
+  constructor(workspace: WorkspacePort, limits: ContextLimits, sources: ContextBuilderSources = {}) {
     this.workspace = workspace;
     this.limits = limits;
+    this.sources = sources;
   }
 
   async build(signal?: AbortSignal): Promise<readonly ContextItem[]> {
     const items: ContextItem[] = [];
     let budget = this.limits.maxBytes;
+
+    for (const item of await this.loadProjectInstructions(Math.min(32000, Math.max(0, budget)), signal)) {
+      const trimmed = trimToBudget(item.content, budget);
+      if (trimmed) {
+        items.push({ ...item, content: trimmed });
+        budget -= byteLength(trimmed);
+      }
+    }
+
+    const memoryItem = this.memoryContextItem(Math.min(16000, Math.max(0, budget)));
+    if (memoryItem && budget > 0) {
+      items.push(memoryItem);
+      budget -= byteLength(memoryItem.content);
+    }
+
+    const activeDocument = await this.workspace.getActiveTextDocument(Math.min(32000, budget));
+    if (activeDocument && budget > 0) {
+      const trimmed = trimToBudget(activeDocument.content, budget);
+      if (trimmed) {
+        items.push({ ...activeDocument, content: trimmed });
+        budget -= byteLength(trimmed);
+      }
+    }
 
     const selection = await this.workspace.getActiveSelection(Math.min(16000, budget));
     if (selection && budget > 0) {
@@ -23,6 +53,9 @@ export class ContextBuilder {
     for (const item of openDocuments) {
       if (items.length >= this.limits.maxFiles || budget <= 0) {
         break;
+      }
+      if (activeDocument?.label === item.label) {
+        continue;
       }
       const trimmed = trimToBudget(item.content, budget);
       if (trimmed) {
@@ -52,10 +85,49 @@ export class ContextBuilder {
       return "No workspace context is currently attached.";
     }
 
-    return items.map((item) => {
-      return `### ${item.kind}: ${item.label}\n\n${item.content}`;
-    }).join("\n\n");
+    return items.map(formatContextItem).join("\n\n");
   }
+
+  private async loadProjectInstructions(maxBytes: number, signal?: AbortSignal): Promise<readonly ContextItem[]> {
+    if (maxBytes <= 0) {
+      return [];
+    }
+
+    const instructionFiles = ["CODEFORGE.md", "CLAUDE.md"];
+    const items: ContextItem[] = [];
+    let remaining = maxBytes;
+    for (const path of instructionFiles) {
+      if (remaining <= 0) {
+        break;
+      }
+      try {
+        const content = await this.workspace.readTextFile(path, remaining, signal);
+        const trimmed = trimToBudget(content.trim(), remaining);
+        if (trimmed) {
+          items.push({ kind: "projectInstructions", label: path, content: trimmed });
+          remaining -= byteLength(trimmed);
+        }
+      } catch {
+        // Project instruction files are optional.
+      }
+    }
+    return items;
+  }
+
+  private memoryContextItem(maxBytes: number): ContextItem | undefined {
+    if (!this.sources.memories || this.sources.memories.length === 0 || maxBytes <= 0) {
+      return undefined;
+    }
+
+    const content = trimToBudget(formatMemories(this.sources.memories), maxBytes);
+    return content
+      ? { kind: "memory", label: "CodeForge local memories", content }
+      : undefined;
+  }
+}
+
+export function formatContextItem(item: ContextItem): string {
+  return `### ${item.kind}: ${item.label}\n\n${item.content}`;
 }
 
 function trimToBudget(value: string, maxBytes: number): string {
@@ -66,8 +138,14 @@ function trimToBudget(value: string, maxBytes: number): string {
     return value;
   }
 
-  const clipped = Buffer.from(value).subarray(0, maxBytes).toString("utf8");
-  return `${clipped}\n\n[CodeForge clipped this context item to fit the local context budget.]`;
+  const suffix = "\n\n[CodeForge clipped this context item to fit the local context budget.]";
+  const suffixBytes = byteLength(suffix);
+  if (suffixBytes >= maxBytes) {
+    return Buffer.from(suffix).subarray(0, maxBytes).toString("utf8");
+  }
+  const contentBudget = Math.max(0, maxBytes - suffixBytes);
+  const clipped = Buffer.from(value).subarray(0, contentBudget).toString("utf8");
+  return `${clipped}${suffix}`;
 }
 
 function byteLength(value: string): number {

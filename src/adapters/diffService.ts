@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { EditFileAction, WriteFileAction } from "../core/types";
 import { applyFilePatch, parseUnifiedDiff, targetPath } from "../core/unifiedDiff";
 import { resolveWorkspaceUri } from "./vscodeWorkspace";
 
@@ -44,6 +45,17 @@ export class DiffService {
     }
   }
 
+  async previewWriteFile(action: WriteFileAction): Promise<void> {
+    await this.previewTextChange(action.path, action.content, `CodeForge Preview: ${action.path}`);
+  }
+
+  async previewEditFile(action: EditFileAction): Promise<void> {
+    const uri = resolveWorkspaceUri(action.path);
+    const original = await readFileIfExists(uri);
+    const proposed = applyTextEdit(original, action);
+    await this.previewTextChange(action.path, proposed, `CodeForge Preview: ${action.path}`);
+  }
+
   async applyPatch(patch: string): Promise<readonly string[]> {
     const filePatches = parseUnifiedDiff(patch);
     const edit = new vscode.WorkspaceEdit();
@@ -68,6 +80,39 @@ export class DiffService {
     }
     return changedPaths;
   }
+
+  async applyWriteFile(action: WriteFileAction): Promise<readonly string[]> {
+    await this.applyTextChange(action.path, action.content);
+    return [action.path];
+  }
+
+  async applyEditFile(action: EditFileAction): Promise<readonly string[]> {
+    const uri = resolveWorkspaceUri(action.path);
+    const original = await readFileIfExists(uri);
+    await this.applyTextChange(action.path, applyTextEdit(original, action));
+    return [action.path];
+  }
+
+  private async previewTextChange(path: string, proposed: string, title: string): Promise<void> {
+    const originalUri = resolveWorkspaceUri(path);
+    const previewUri = vscode.Uri.parse(`codeforge-preview:/${encodeURIComponent(path)}?${Date.now()}`);
+    this.previews.set(previewUri, proposed);
+    await vscode.commands.executeCommand("vscode.diff", originalUri, previewUri, title);
+  }
+
+  private async applyTextChange(path: string, proposed: string): Promise<void> {
+    const uri = resolveWorkspaceUri(path);
+    const original = await readFileIfExists(uri);
+    const edit = new vscode.WorkspaceEdit();
+    if (original.length === 0) {
+      edit.createFile(uri, { ignoreIfExists: true, overwrite: false });
+    }
+    edit.replace(uri, fullDocumentRange(original), proposed);
+    const applied = await vscode.workspace.applyEdit(edit);
+    if (!applied) {
+      throw new Error("VS Code rejected the workspace edit.");
+    }
+  }
 }
 
 async function readFileIfExists(uri: vscode.Uri): Promise<string> {
@@ -82,4 +127,30 @@ function fullDocumentRange(text: string): vscode.Range {
   const lines = text.split(/\r?\n/);
   const lastLine = Math.max(0, lines.length - 1);
   return new vscode.Range(new vscode.Position(0, 0), new vscode.Position(lastLine, lines[lastLine].length));
+}
+
+function applyTextEdit(original: string, action: EditFileAction): string {
+  const occurrences = countOccurrences(original, action.oldText);
+  if (occurrences === 0) {
+    throw new Error(`edit_file oldText was not found in ${action.path}.`);
+  }
+  if (!action.replaceAll && occurrences > 1) {
+    throw new Error(`edit_file oldText appears ${occurrences} times in ${action.path}. Set replaceAll to true or provide a more specific oldText.`);
+  }
+  return action.replaceAll
+    ? original.split(action.oldText).join(action.newText)
+    : original.replace(action.oldText, action.newText);
+}
+
+function countOccurrences(value: string, search: string): number {
+  if (!search) {
+    return 0;
+  }
+  let count = 0;
+  let index = value.indexOf(search);
+  while (index !== -1) {
+    count++;
+    index = value.indexOf(search, index + search.length);
+  }
+  return count;
 }
