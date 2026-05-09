@@ -1,0 +1,194 @@
+{
+  "name": "codeforge",
+  "displayName": "CodeForge",
+  "description": "A self-hosted-first coding harness extension for Visual Studio Code.",
+  "version": "0.0.1",
+  "publisher": "codeforge",
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": "^1.90.0",
+    "node": ">=18"
+  },
+  "categories": [
+    "AI",
+    "Programming Languages",
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:codeforge.chatView",
+    "onCommand:codeforge.openChat",
+    "onCommand:codeforge.configureEndpoint",
+    "onCommand:codeforge.askSelection",
+    "onCommand:codeforge.editSelection",
+    "onCommand:codeforge.explainFile",
+    "onCommand:codeforge.resetSession"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "codeforge.openChat",
+        "title": "CodeForge: Open Chat",
+        "category": "CodeForge"
+      },
+      {
+        "command": "codeforge.configureEndpoint",
+        "title": "CodeForge: Configure Self-Hosted Endpoint",
+        "category": "CodeForge"
+      },
+      {
+        "command": "codeforge.askSelection",
+        "title": "CodeForge: Ask About Selection",
+        "category": "CodeForge"
+      },
+      {
+        "command": "codeforge.editSelection",
+        "title": "CodeForge: Edit Selection",
+        "category": "CodeForge"
+      },
+      {
+        "command": "codeforge.explainFile",
+        "title": "CodeForge: Explain Current File",
+        "category": "CodeForge"
+      },
+      {
+        "command": "codeforge.resetSession",
+        "title": "CodeForge: Reset Session",
+        "category": "CodeForge"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "codeforge",
+          "title": "CodeForge",
+          "icon": "media/codeforge.svg"
+        }
+      ]
+    },
+    "views": {
+      "codeforge": [
+        {
+          "id": "codeforge.chatView",
+          "name": "Chat",
+          "type": "webview"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "CodeForge",
+      "properties": {
+        "codeforge.profiles": {
+          "type": "array",
+          "default": [],
+          "description": "Self-hosted OpenAI-compatible endpoint profiles. API keys are stored separately in VS Code SecretStorage.",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "label",
+              "baseUrl"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              },
+              "baseUrl": {
+                "type": "string"
+              },
+              "defaultModel": {
+                "type": "string"
+              },
+              "apiKeySecretName": {
+                "type": "string"
+              },
+              "extraHeaders": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "codeforge.activeProfile": {
+          "type": "string",
+          "default": "litellm-local",
+          "description": "Active CodeForge endpoint profile ID."
+        },
+        "codeforge.model": {
+          "type": "string",
+          "default": "",
+          "description": "Model ID to send to the active endpoint. If empty, the active profile defaultModel is used."
+        },
+        "codeforge.network.allowlist": {
+          "type": "array",
+          "default": [],
+          "description": "Explicit public network allowlist. Entries may be origins, hostnames, wildcard hostnames like *.example.com, or IPv4 CIDR ranges.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "codeforge.context.maxFiles": {
+          "type": "number",
+          "default": 24,
+          "minimum": 1,
+          "maximum": 200,
+          "description": "Maximum number of workspace context files CodeForge may include."
+        },
+        "codeforge.context.maxBytes": {
+          "type": "number",
+          "default": 120000,
+          "minimum": 8000,
+          "maximum": 2000000,
+          "description": "Maximum bytes of local context included in one model request."
+        },
+        "codeforge.commands.timeoutSeconds": {
+          "type": "number",
+          "default": 120,
+          "minimum": 5,
+          "maximum": 1800,
+          "description": "Maximum execution time for approved shell commands."
+        }
+      }
+    },
+    "menus": {
+      "editor/context": [
+        {
+          "command": "codeforge.askSelection",
+          "when": "editorHasSelection",
+          "group": "navigation@10"
+        },
+        {
+          "command": "codeforge.editSelection",
+          "when": "editorHasSelection",
+          "group": "navigation@11"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "codeforge.explainFile",
+          "group": "navigation@20"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./tsconfig.json",
+    "watch": "tsc -watch -p ./",
+    "compile:tests": "tsc -p ./tsconfig.test.json",
+    "test": "npm run compile:tests && node --test out-test/test/unit/*.test.js",
+    "vscode:test": "npm run compile && npm run compile:tests && node ./out-test/test/runTest.js",
+    "package": "npm run compile && vsce package --allow-missing-repository --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.10",
+    "@types/vscode": "^1.90.0",
+    "@vscode/test-electron": "^2.4.1",
+    "@vscode/vsce": "^2.15.0",
+    "typescript": "^5.7.2"
+  }
+}

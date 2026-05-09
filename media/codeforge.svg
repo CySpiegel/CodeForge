@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="CodeForge">
+  <path fill="#f2f2f2" d="M12 14h40a4 4 0 0 1 4 4v28a4 4 0 0 1-4 4H12a4 4 0 0 1-4-4V18a4 4 0 0 1 4-4Z"/>
+  <path fill="#424242" d="m24 24-8 8 8 8 3-3-5-5 5-5-3-3Zm16 0-3 3 5 5-5 5 3 3 8-8-8-8Zm-5 0h-4l-2 16h4l2-16Z"/>
+</svg>
