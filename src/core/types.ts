@@ -84,6 +84,7 @@ export interface NetworkPolicy {
   readonly allowlist: readonly string[];
 }
 
+export type AgentMode = "auto" | "plan";
 export type PermissionMode = "default" | "review" | "acceptEdits" | "readOnly" | "workspaceTrusted";
 export type PermissionBehavior = "allow" | "ask" | "deny";
 export type PermissionRuleKind = "tool" | "path" | "command" | "endpoint";

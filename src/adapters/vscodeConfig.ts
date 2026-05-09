@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import { assertUrlAllowed } from "../core/networkPolicy";
 import { normalizePermissionPolicy, parsePermissionRules } from "../core/permissions";
-import { ContextLimits, NetworkPolicy, PermissionMode, PermissionPolicy, PermissionRule, ProviderProfile } from "../core/types";
+import { AgentMode, ContextLimits, NetworkPolicy, PermissionMode, PermissionPolicy, PermissionRule, ProviderProfile } from "../core/types";
 
 const sectionName = "codeforge";
 
@@ -37,6 +37,11 @@ export class CodeForgeConfigService {
     const mode = this.config().get<PermissionMode>("permissions.mode", "default");
     const rules = parsePermissionRules(this.config().get<readonly unknown[]>("permissions.rules", []), "workspace");
     return normalizePermissionPolicy({ mode, rules });
+  }
+
+  getAgentMode(): AgentMode {
+    const mode = this.config().get<AgentMode>("agent.mode", "auto");
+    return isAgentMode(mode) ? mode : "auto";
   }
 
   getConfiguredModel(): string {
@@ -75,6 +80,10 @@ export class CodeForgeConfigService {
 
   async setModel(model: string): Promise<void> {
     await this.config().update("model", model, vscode.ConfigurationTarget.Workspace);
+  }
+
+  async setAgentMode(mode: AgentMode): Promise<void> {
+    await this.config().update("agent.mode", mode, vscode.ConfigurationTarget.Workspace);
   }
 
   async updateSettings(settings: Partial<CodeForgeSettingsUpdate>): Promise<void> {
@@ -230,6 +239,10 @@ const defaultProfiles: readonly ProviderProfile[] = [
 
 function isValidProfile(profile: ProviderProfile): boolean {
   return Boolean(profile.id && profile.label && profile.baseUrl);
+}
+
+function isAgentMode(value: unknown): value is AgentMode {
+  return value === "auto" || value === "plan";
 }
 
 function secretKey(name: string): string {

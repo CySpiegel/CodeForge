@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import { AgentController, AgentUiEvent } from "../agent/agentController";
 import { parsePermissionRules } from "../core/permissions";
-import { PermissionMode } from "../core/types";
+import { AgentMode, PermissionMode } from "../core/types";
 
 export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
   static readonly viewType = "codeforge.chatView";
@@ -77,6 +77,13 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
       await this.controller.selectProfile(message.profileId);
     } else if (message.type === "refreshCommands") {
       await this.controller.publishState();
+    } else if (message.type === "refreshModels") {
+      await this.controller.refreshModels();
+    } else if (message.type === "setAgentMode") {
+      const agentMode = parseAgentMode(message.agentMode);
+      if (agentMode) {
+        await this.controller.setAgentMode(agentMode);
+      }
     } else if (message.type === "setPermissionMode") {
       const permissionMode = parsePermissionMode(message.permissionMode);
       if (permissionMode) {
@@ -128,17 +135,6 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
     <header class="toolbar">
       <div class="brand">CodeForge</div>
     </header>
-    <section class="model-row" aria-label="Model and context controls">
-      <div class="combo" data-combo="model">
-        <button id="modelButton" class="combo-button" type="button" aria-haspopup="listbox" aria-expanded="false">Model</button>
-        <div id="modelMenu" class="combo-menu hidden" role="listbox" aria-label="Model"></div>
-        <select id="modelSelect" class="native-select" tabindex="-1" aria-hidden="true"></select>
-      </div>
-      <button id="compactContext" class="context-pill" aria-label="Compact context" aria-describedby="contextTooltip">
-        <span id="contextValue">0%</span>
-      </button>
-      <div id="contextTooltip" class="context-tooltip hidden" role="tooltip"></div>
-    </section>
     <section id="settingsPanel" class="settings hidden" aria-label="CodeForge settings">
       <div class="settings-grid">
         <label class="wide">OpenAI API profile
@@ -161,19 +157,6 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
         <label>Context bytes<input id="maxBytes" type="number" min="8000" max="2000000"></label>
         <label>Command timeout<input id="commandTimeout" type="number" min="5" max="1800"></label>
         <label>Command output<input id="commandOutputLimit" type="number" min="16000" max="2000000"></label>
-        <label>Permission mode
-          <div class="combo settings-combo" data-combo="permission">
-            <button id="permissionModeButton" class="combo-button" type="button" aria-haspopup="listbox" aria-expanded="false">Default</button>
-            <div id="permissionModeMenu" class="combo-menu hidden" role="listbox" aria-label="Permission mode"></div>
-            <select id="permissionMode" class="native-select" tabindex="-1" aria-hidden="true">
-              <option value="default">Default</option>
-              <option value="review">Review</option>
-              <option value="acceptEdits">Accept edits</option>
-              <option value="readOnly">Read only</option>
-              <option value="workspaceTrusted">Workspace trusted</option>
-            </select>
-          </div>
-        </label>
         <label class="wide">Network allowlist<textarea id="allowlist" rows="3" placeholder="one host, origin, or CIDR per line"></textarea></label>
         <label class="wide">Permission rules<textarea id="permissionRules" rows="5" placeholder='[{"kind":"command","pattern":"npm test","behavior":"allow","scope":"workspace"}]'></textarea></label>
       </div>
@@ -185,17 +168,36 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
     <section id="approvals" class="approvals" aria-label="Pending approvals"></section>
     <footer class="composer">
       <form id="promptForm" class="prompt">
-        <div class="prompt-input-wrap">
-          <textarea id="promptInput" rows="1" placeholder="Message CodeForge..." aria-controls="slashCommandMenu" aria-autocomplete="list"></textarea>
-          <div id="slashCommandMenu" class="slash-command-menu hidden" role="listbox" aria-label="Slash commands"></div>
-        </div>
-        <div class="prompt-actions">
-          <button id="settingsToggle" class="icon-button settings-button" type="button" title="Settings" aria-label="Settings"><span aria-hidden="true">&#9881;</span><span class="sr-only">Settings</span></button>
-          <div class="combo composer-permission-combo" data-combo="permission-composer">
-            <button id="composerPermissionModeButton" class="combo-button" type="button" aria-haspopup="listbox" aria-expanded="false">Mode: Default</button>
-            <div id="composerPermissionModeMenu" class="combo-menu hidden" role="listbox" aria-label="Permission mode"></div>
+        <div class="composer-card">
+          <div class="composer-tip"><strong>CodeForge</strong> Local OpenAI API</div>
+          <div class="prompt-input-wrap">
+            <textarea id="promptInput" rows="1" placeholder="Describe what to build" aria-controls="slashCommandMenu" aria-autocomplete="list"></textarea>
+            <div id="slashCommandMenu" class="slash-command-menu hidden" role="listbox" aria-label="Slash commands"></div>
           </div>
-          <button id="stopRun" type="button" class="secondary">Stop</button>
+          <div class="prompt-actions">
+            <button id="settingsToggle" class="icon-button settings-button" type="button" title="Settings" aria-label="Settings"><span aria-hidden="true">&#9881;</span><span class="sr-only">Settings</span></button>
+            <div class="agent-mode-picker">
+              <button id="agentModeButton" class="agent-mode-button" type="button" title="Agent mode" aria-label="Agent mode" aria-haspopup="listbox" aria-expanded="false"><span id="agentModeIcon" aria-hidden="true">&#11042;</span><span class="sr-only">Agent mode</span></button>
+              <div id="agentModeMenu" class="agent-mode-menu hidden" role="listbox" aria-label="Agent mode"></div>
+            </div>
+            <div class="model-picker">
+              <button id="modelPickerButton" class="model-picker-button" type="button" title="Model" aria-label="Model" aria-haspopup="listbox" aria-expanded="false">Auto</button>
+              <div id="modelPickerMenu" class="model-picker-menu hidden" role="listbox" aria-label="Model"></div>
+            </div>
+            <button id="stopRun" type="button" class="secondary stop-button">Stop</button>
+            <button id="submitPrompt" class="send-button" type="submit" title="Send" aria-label="Send"><span aria-hidden="true">&#8593;</span></button>
+          </div>
+        </div>
+        <div class="composer-status-row">
+          <div class="endpoint-picker">
+            <button id="endpointPickerButton" class="endpoint-picker-button" type="button" title="Endpoint" aria-label="Endpoint" aria-haspopup="listbox" aria-expanded="false"><span class="endpoint-icon" aria-hidden="true"></span><span id="endpointPickerLabel">Local</span></button>
+            <div id="endpointPickerMenu" class="endpoint-picker-menu hidden" role="listbox" aria-label="Endpoint"></div>
+          </div>
+          <span id="modeStatus" class="mode-status status-item" aria-live="polite">Default Approvals</span>
+          <button id="compactContext" class="context-ring" type="button" aria-label="Compact context" aria-describedby="contextTooltip">
+            <span id="contextValue">0%</span>
+          </button>
+          <div id="contextTooltip" class="context-tooltip hidden" role="tooltip"></div>
         </div>
       </form>
     </footer>
@@ -219,6 +221,7 @@ interface WebviewMessage {
   readonly baseUrl?: string;
   readonly apiKey?: string;
   readonly allowlist?: readonly unknown[];
+  readonly agentMode?: string;
   readonly permissionMode?: string;
   readonly permissionRules?: readonly unknown[];
   readonly maxFiles?: number;
@@ -231,6 +234,16 @@ function parsePermissionMode(value: unknown): PermissionMode | undefined {
   return value === "default" || value === "review" || value === "acceptEdits" || value === "readOnly" || value === "workspaceTrusted"
     ? value
     : undefined;
+}
+
+function parseAgentMode(value: unknown): AgentMode | undefined {
+  switch (value) {
+    case "auto":
+    case "plan":
+      return value;
+    default:
+      return undefined;
+  }
 }
 
 function errorMessage(error: unknown): string {

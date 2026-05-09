@@ -9,13 +9,18 @@
     stopRun: document.getElementById("stopRun"),
     settingsToggle: document.getElementById("settingsToggle"),
     settingsPanel: document.getElementById("settingsPanel"),
+    endpointPickerButton: document.getElementById("endpointPickerButton"),
+    endpointPickerMenu: document.getElementById("endpointPickerMenu"),
+    endpointPickerLabel: document.getElementById("endpointPickerLabel"),
+    agentModeButton: document.getElementById("agentModeButton"),
+    agentModeMenu: document.getElementById("agentModeMenu"),
+    agentModeIcon: document.getElementById("agentModeIcon"),
+    modelPickerButton: document.getElementById("modelPickerButton"),
+    modelPickerMenu: document.getElementById("modelPickerMenu"),
     profileButton: document.getElementById("profileButton"),
     profileMenu: document.getElementById("profileMenu"),
     profileSelect: document.getElementById("profileSelect"),
     addProfile: document.getElementById("addProfile"),
-    modelButton: document.getElementById("modelButton"),
-    modelMenu: document.getElementById("modelMenu"),
-    modelSelect: document.getElementById("modelSelect"),
     compactContext: document.getElementById("compactContext"),
     contextValue: document.getElementById("contextValue"),
     contextTooltip: document.getElementById("contextTooltip"),
@@ -29,11 +34,7 @@
     maxBytes: document.getElementById("maxBytes"),
     commandTimeout: document.getElementById("commandTimeout"),
     commandOutputLimit: document.getElementById("commandOutputLimit"),
-    permissionModeButton: document.getElementById("permissionModeButton"),
-    permissionModeMenu: document.getElementById("permissionModeMenu"),
-    composerPermissionModeButton: document.getElementById("composerPermissionModeButton"),
-    composerPermissionModeMenu: document.getElementById("composerPermissionModeMenu"),
-    permissionMode: document.getElementById("permissionMode"),
+    modeStatus: document.getElementById("modeStatus"),
     permissionRules: document.getElementById("permissionRules"),
     allowlist: document.getElementById("allowlist"),
     saveSettings: document.getElementById("saveSettings")
@@ -46,6 +47,7 @@
   let slashCommandItems = [];
   let slashCommandIndex = 0;
   let lastCommandRefreshAt = 0;
+  let lastModelRefreshAt = 0;
   let contextTooltipText = "Context used: 0 / 0 tokens (0%)\nClick to compact context.";
   const builtInSlashCommands = [
     { name: "compact", description: "Compact the current session context", argumentHint: "[focus]" },
@@ -65,6 +67,14 @@
     { name: "diff", description: "Show recorded edit and command checkpoints", argumentHint: "[session-id]" },
     { name: "export", description: "Export a local session", argumentHint: "[session-id]" },
     { name: "model", description: "Show or set the active model", argumentHint: "[model-id]" },
+    { name: "models", description: "Select an available model from the active endpoint" },
+    { name: "auto", description: "Switch agent mode to Auto" },
+    { name: "plan", description: "Switch agent mode to Plan", argumentHint: "[task]" },
+    { name: "default", description: "Set permission mode to Default" },
+    { name: "review", description: "Set permission mode to Review" },
+    { name: "accept-edits", description: "Set permission mode to Accept edits" },
+    { name: "read-only", description: "Set permission mode to Read only" },
+    { name: "workspace-trusted", description: "Set permission mode to Workspace trusted" },
     { name: "config", description: "Open CodeForge settings" },
     { name: "settings", description: "Open CodeForge settings" },
     { name: "reset", description: "Reset the current chat session" },
@@ -76,6 +86,10 @@
     { value: "acceptEdits", label: "Accept edits" },
     { value: "readOnly", label: "Read only" },
     { value: "workspaceTrusted", label: "Workspace trusted" }
+  ];
+  const agentModeOptions = [
+    { value: "auto", label: "Auto", icon: "⬢", description: "Implement with approved local actions" },
+    { value: "plan", label: "Plan", icon: "⏸", description: "Read-only planning before implementation" }
   ];
 
   on(elements.form, "submit", (event) => {
@@ -144,10 +158,6 @@
     vscode.postMessage({ type: "cancel" });
   });
 
-  on(elements.modelButton, "click", () => {
-    toggleComboMenu(elements.modelMenu, elements.modelButton);
-  });
-
   on(elements.profileButton, "click", () => {
     toggleComboMenu(elements.profileMenu, elements.profileButton);
   });
@@ -156,12 +166,20 @@
     startNewProfileDraft();
   });
 
-  on(elements.permissionModeButton, "click", () => {
-    toggleComboMenu(elements.permissionModeMenu, elements.permissionModeButton);
+  on(elements.endpointPickerButton, "click", () => {
+    renderEndpointPicker();
+    toggleComboMenu(elements.endpointPickerMenu, elements.endpointPickerButton);
   });
 
-  on(elements.composerPermissionModeButton, "click", () => {
-    toggleComboMenu(elements.composerPermissionModeMenu, elements.composerPermissionModeButton);
+  on(elements.agentModeButton, "click", () => {
+    renderAgentModePicker();
+    toggleComboMenu(elements.agentModeMenu, elements.agentModeButton);
+  });
+
+  on(elements.modelPickerButton, "click", () => {
+    requestModelRefreshIfNeeded();
+    renderModelPicker();
+    toggleComboMenu(elements.modelPickerMenu, elements.modelPickerButton);
   });
 
   on(elements.settingsToggle, "click", () => {
@@ -176,21 +194,12 @@
     vscode.postMessage({ type: "selectProfile", profileId: elements.profileSelect?.value || "" });
   });
 
-  on(elements.modelSelect, "change", () => {
-    const model = elements.modelSelect?.value || "";
-    setValue(elements.modelInput, model);
-    renderModels();
-    vscode.postMessage({ type: "selectModel", model });
-  });
-
   window.addEventListener("click", (event) => {
     const target = event.target;
-    if (!(target instanceof Element) || !target.closest(".combo")) {
-      closeMenus();
-    }
-    if (target instanceof Element && (target === elements.input || target.closest(".slash-command-menu"))) {
+    if (target instanceof Element && (target === elements.input || target.closest(".slash-command-menu") || target.closest(".combo") || target.closest(".endpoint-picker") || target.closest(".agent-mode-picker") || target.closest(".model-picker"))) {
       return;
     }
+    closeMenus();
     hideSlashCommandMenu();
   });
 
@@ -201,7 +210,7 @@
   });
   window.addEventListener("scroll", (event) => {
     const target = event.target;
-    if (target instanceof Element && (target.closest(".combo-menu") || target.closest(".slash-command-menu"))) {
+    if (target instanceof Element && (target.closest(".combo-menu") || target.closest(".slash-command-menu") || target.closest(".endpoint-picker-menu") || target.closest(".agent-mode-menu") || target.closest(".model-picker-menu"))) {
       return;
     }
     closeMenus();
@@ -266,7 +275,6 @@
       maxBytes: Number(elements.maxBytes?.value),
       commandTimeoutSeconds: Number(elements.commandTimeout?.value),
       commandOutputLimitBytes: Number(elements.commandOutputLimit?.value),
-      permissionMode: elements.permissionMode?.value,
       permissionRules
     });
   });
@@ -299,9 +307,13 @@
         state.activeBackendLabel = message.backendLabel;
       }
       state.selectedModelInfo = findModelInfo(state.selectedModel);
-      renderModels(message.error);
+      renderModelRefreshStatus(message.error);
       renderEndpointMeta();
       renderModelMeta();
+      renderModelPicker();
+      if (isSlashCommandMenuOpen()) {
+        renderSlashCommandMenu();
+      }
     } else if (message.type === "contextUsage") {
       state = { ...(state || {}), contextUsage: message.usage };
       renderContextUsage(message.usage);
@@ -348,10 +360,12 @@
       return;
     }
     renderProfiles();
-    renderModels();
     renderSettings();
     renderEndpointMeta();
     renderModelMeta();
+    renderEndpointPicker();
+    renderAgentModePicker();
+    renderModelPicker();
     renderContextUsage(state.contextUsage);
     if (isSlashCommandMenuOpen()) {
       renderSlashCommandMenu();
@@ -381,26 +395,7 @@
     }
   }
 
-  function renderModels(error) {
-    const models = state?.models || [];
-    const selectedModel = state?.selectedModel || "";
-    const options = models.length > 0
-      ? models.map((model) => ({ value: model, label: formatModelOption(model) }))
-      : [{ value: selectedModel, label: selectedModel || "No models found" }];
-    const selected = replaceOptions(elements.modelSelect, options, selectedModel);
-    renderComboMenu(elements.modelMenu, elements.modelButton, options, selected, "Model", (value) => {
-      setValue(elements.modelSelect, value);
-      setValue(elements.modelInput, value);
-      if (state) {
-        state = { ...state, selectedModel: value, selectedModelInfo: findModelInfo(value) };
-      }
-      renderModels();
-      renderModelMeta();
-      vscode.postMessage({ type: "selectModel", model: value });
-    });
-    if (elements.modelSelect) {
-      elements.modelSelect.disabled = false;
-    }
+  function renderModelRefreshStatus(error) {
     if (error) {
       addStatus(`Model refresh failed: ${error}`);
     }
@@ -415,9 +410,7 @@
     setValue(elements.maxBytes, String(state.settings?.maxBytes ?? 120000));
     setValue(elements.commandTimeout, String(state.settings?.commandTimeoutSeconds ?? 120));
     setValue(elements.commandOutputLimit, String(state.settings?.commandOutputLimitBytes ?? 200000));
-    const permissionMode = state.settings?.permissionMode || elements.permissionMode?.value || "default";
-    setValue(elements.permissionMode, permissionMode);
-    renderPermissionModeMenus(permissionMode);
+    renderPermissionModeStatus(state.settings?.permissionMode || "default");
     setValue(elements.permissionRules, JSON.stringify(state.settings?.permissionRules || [], null, 2));
     setValue(elements.allowlist, (state.settings?.allowlist || []).join("\n"));
   }
@@ -496,31 +489,6 @@
     return (state?.modelInfo || []).find((model) => model.id === modelId);
   }
 
-  function formatModelOption(modelId) {
-    const model = findModelInfo(modelId);
-    if (!model) {
-      return modelId;
-    }
-    const suffix = [];
-    if (model.contextLength) {
-      suffix.push(`${formatCompactNumber(model.contextLength)} ctx`);
-    }
-    if (model.supportsReasoning) {
-      suffix.push("thinking");
-    }
-    return suffix.length > 0 ? `${modelId} (${suffix.join(", ")})` : modelId;
-  }
-
-  function formatCompactNumber(value) {
-    if (value >= 1000000) {
-      return `${Math.round(value / 100000) / 10}M`;
-    }
-    if (value >= 1000) {
-      return `${Math.round(value / 100) / 10}K`;
-    }
-    return String(value);
-  }
-
   function formatNumber(value) {
     return new Intl.NumberFormat().format(value);
   }
@@ -534,6 +502,7 @@
     if (elements.compactContext) {
       contextTooltipText = contextTooltip(safeUsage, percent);
       elements.compactContext.setAttribute("aria-label", contextTooltipText.replace(/\n/g, ". "));
+      elements.compactContext.style.setProperty("--context-progress", `${percent * 3.6}deg`);
       if (elements.contextTooltip && !elements.contextTooltip.classList.contains("hidden")) {
         elements.contextTooltip.textContent = contextTooltipText;
         positionContextTooltip();
@@ -643,55 +612,96 @@
     return nextValue;
   }
 
-  function renderPermissionModeMenus(selectedValue) {
-    renderComboMenu(
-      elements.permissionModeMenu,
-      elements.permissionModeButton,
-      permissionModeOptions,
-      selectedValue,
-      "Default",
-      (value) => {
-        choosePermissionMode(value);
-      }
-    );
-    renderComboMenu(
-      elements.composerPermissionModeMenu,
-      elements.composerPermissionModeButton,
-      permissionModeOptions,
-      selectedValue,
-      "Mode: Default",
-      (value) => {
-        choosePermissionMode(value);
-      }
-    );
+  function renderPermissionModeStatus(selectedValue) {
     const selectedOption = permissionModeOptions.find((option) => option.value === selectedValue) || permissionModeOptions[0];
-    if (elements.composerPermissionModeButton) {
-      elements.composerPermissionModeButton.textContent = `Mode: ${selectedOption.label}`;
+    if (elements.modeStatus) {
+      elements.modeStatus.textContent = `${selectedOption.label} Approvals`;
     }
   }
 
-  function choosePermissionMode(value) {
-    setValue(elements.permissionMode, value);
+  function renderAgentModePicker() {
+    const selectedValue = state?.settings?.agentMode || "auto";
+    const selectedOption = agentModeOptions.find((option) => option.value === selectedValue) || agentModeOptions[0];
+    if (elements.agentModeIcon) {
+      elements.agentModeIcon.textContent = selectedOption.icon;
+    }
+    if (elements.agentModeButton) {
+      elements.agentModeButton.title = `Agent mode: ${selectedOption.label}`;
+      elements.agentModeButton.setAttribute("aria-label", `Agent mode: ${selectedOption.label}`);
+      elements.agentModeButton.dataset.mode = selectedOption.value;
+    }
+    renderComboMenu(elements.agentModeMenu, elements.agentModeButton, agentModeOptions, selectedOption.value, "Auto", chooseAgentMode, { preserveButtonText: true, includeDescription: true });
+  }
+
+  function chooseAgentMode(value) {
+    const nextMode = agentModeOptions.some((option) => option.value === value) ? value : "auto";
     if (state) {
       state = {
         ...state,
         settings: {
           ...(state.settings || {}),
-          permissionMode: value
+          agentMode: nextMode
         }
       };
     }
-    renderPermissionModeMenus(value);
-    vscode.postMessage({ type: "setPermissionMode", permissionMode: value });
+    renderAgentModePicker();
+    vscode.postMessage({ type: "setAgentMode", agentMode: nextMode });
   }
 
-  function renderComboMenu(menu, button, options, selectedValue, fallbackLabel, onChoose) {
+  function renderEndpointPicker() {
+    const profiles = state?.profiles || [];
+    const options = profiles.map((profile) => ({
+      value: profile.id,
+      label: profile.label,
+      description: profile.baseUrl
+    }));
+    const selectedProfile = profiles.find((profile) => profile.id === state?.activeProfileId);
+    if (elements.endpointPickerLabel) {
+      elements.endpointPickerLabel.textContent = selectedProfile?.label || state?.activeProfileLabel || "Local";
+    }
+    renderComboMenu(elements.endpointPickerMenu, elements.endpointPickerButton, options, state?.activeProfileId || "", "Local", chooseEndpoint, { preserveButtonText: true, includeDescription: true });
+  }
+
+  function chooseEndpoint(value) {
+    if (!value) {
+      return;
+    }
+    if (state) {
+      state = { ...state, activeProfileId: value };
+    }
+    renderEndpointPicker();
+    renderProfiles();
+    renderEndpointFields();
+    vscode.postMessage({ type: "selectProfile", profileId: value });
+  }
+
+  function renderModelPicker() {
+    const models = modelEntries();
+    const selectedModel = state?.selectedModel || "";
+    const options = models.length > 0
+      ? models.map((model) => ({
+        value: model.id,
+        label: model.id,
+        description: formatModelDetails(model)
+      }))
+      : [{ value: selectedModel, label: selectedModel || "No models found", description: "Current active endpoint did not return models" }];
+    const selectedOption = options.find((option) => option.value === selectedModel) || options[0];
+    if (elements.modelPickerButton) {
+      elements.modelPickerButton.textContent = selectedOption?.label || "Model";
+      elements.modelPickerButton.title = selectedOption?.value ? `Model: ${selectedOption.value}` : "Model";
+    }
+    renderComboMenu(elements.modelPickerMenu, elements.modelPickerButton, options, selectedModel, "Model", selectModelFromPicker, { preserveButtonText: true, includeDescription: true });
+  }
+
+  function renderComboMenu(menu, button, options, selectedValue, fallbackLabel, onChoose, settings = {}) {
     if (!menu || !button) {
       return;
     }
 
     const selectedOption = options.find((option) => option.value === selectedValue) || options[0];
-    button.textContent = selectedOption?.label || fallbackLabel;
+    if (!settings.preserveButtonText) {
+      button.textContent = selectedOption?.label || fallbackLabel;
+    }
     menu.replaceChildren();
 
     for (const option of options) {
@@ -700,7 +710,17 @@
       item.className = "combo-option";
       item.setAttribute("role", "option");
       item.setAttribute("aria-selected", option.value === selectedValue ? "true" : "false");
-      item.textContent = option.label || option.value || "";
+      if (settings.includeDescription) {
+        const label = document.createElement("span");
+        label.className = "combo-option-label";
+        label.textContent = option.label || option.value || "";
+        const description = document.createElement("span");
+        description.className = "combo-option-description";
+        description.textContent = option.description || "";
+        item.append(label, description);
+      } else {
+        item.textContent = option.label || option.value || "";
+      }
       item.addEventListener("click", () => {
         onChoose(option.value || "");
         closeMenus();
@@ -714,6 +734,7 @@
       return;
     }
     const shouldOpen = menu.classList.contains("hidden");
+    hideSlashCommandMenu();
     closeMenus();
     if (shouldOpen) {
       positionComboMenu(menu, button);
@@ -727,7 +748,7 @@
     const rect = button.getBoundingClientRect();
     const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
     const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
-    const width = Math.min(rect.width, Math.max(120, viewportWidth - margin * 2));
+    const width = Math.min(Math.max(rect.width, 180), Math.max(120, viewportWidth - margin * 2));
     const left = Math.min(Math.max(margin, rect.left), Math.max(margin, viewportWidth - width - margin));
     const availableBelow = viewportHeight - rect.bottom - margin;
     const availableAbove = rect.top - margin;
@@ -748,10 +769,10 @@
 
   function closeMenus() {
     const combos = [
-      [elements.modelButton, elements.modelMenu],
       [elements.profileButton, elements.profileMenu],
-      [elements.permissionModeButton, elements.permissionModeMenu],
-      [elements.composerPermissionModeButton, elements.composerPermissionModeMenu]
+      [elements.endpointPickerButton, elements.endpointPickerMenu],
+      [elements.agentModeButton, elements.agentModeMenu],
+      [elements.modelPickerButton, elements.modelPickerMenu]
     ];
     for (const [button, menu] of combos) {
       menu?.classList.add("hidden");
@@ -766,8 +787,13 @@
       return;
     }
 
-    requestCommandRefreshIfNeeded();
-    slashCommandItems = commandSuggestions(context.query);
+    if (context.kind === "models") {
+      requestModelRefreshIfNeeded();
+      slashCommandItems = modelSuggestions(context.query);
+    } else {
+      requestCommandRefreshIfNeeded();
+      slashCommandItems = commandSuggestions(context.query);
+    }
     slashCommandIndex = Math.min(Math.max(0, slashCommandIndex), Math.max(0, slashCommandItems.length - 1));
     elements.slashCommandMenu.replaceChildren();
 
@@ -783,15 +809,22 @@
       item.id = `slash-command-${index}`;
       item.setAttribute("role", "option");
       item.setAttribute("aria-selected", index === slashCommandIndex ? "true" : "false");
+      if (command.kind === "empty") {
+        item.setAttribute("aria-disabled", "true");
+      }
       const name = document.createElement("span");
       name.className = "slash-command-name";
-      name.textContent = `/${command.name}${command.argumentHint ? ` ${command.argumentHint}` : ""}`;
+      name.textContent = command.kind === "model" || command.kind === "empty"
+        ? command.name
+        : `/${command.name}${command.argumentHint ? ` ${command.argumentHint}` : ""}`;
       const description = document.createElement("span");
       description.className = "slash-command-description";
       description.textContent = command.description || command.path || command.source;
       const source = document.createElement("span");
       source.className = "slash-command-source";
-      source.textContent = command.source === "workspace" ? "workspace" : "built-in";
+      source.textContent = command.kind === "model" || command.kind === "empty"
+        ? command.source
+        : command.source === "workspace" ? "workspace" : "built-in";
       item.append(name, description, source);
       item.addEventListener("pointerenter", () => {
         slashCommandIndex = index;
@@ -820,10 +853,23 @@
     }
     const firstWhitespace = value.search(/\s/);
     const commandEnd = firstWhitespace === -1 ? value.length : firstWhitespace;
+    const commandName = value.slice(1, commandEnd).toLowerCase();
+    if (commandName === "models") {
+      if (value.slice(0, cursor).includes("\n") || cursor < commandEnd) {
+        return undefined;
+      }
+      const queryStart = firstWhitespace === -1 ? commandEnd : firstWhitespace + 1;
+      return {
+        kind: "models",
+        query: value.slice(queryStart, cursor).trimStart().toLowerCase(),
+        commandEnd
+      };
+    }
     if (cursor > commandEnd || value.slice(0, cursor).includes("\n")) {
       return undefined;
     }
     return {
+      kind: "commands",
       query: value.slice(1, commandEnd).toLowerCase(),
       commandEnd
     };
@@ -850,6 +896,56 @@
       .slice(0, 12);
   }
 
+  function modelSuggestions(query) {
+    const models = modelEntries();
+    const normalizedQuery = (query || "").toLowerCase();
+    if (models.length === 0) {
+      return [{
+        kind: "empty",
+        name: "No models found",
+        description: "The active OpenAI API endpoint did not return any models.",
+        source: "endpoint"
+      }];
+    }
+    const matches = models
+      .filter((model) => model.id.toLowerCase().includes(normalizedQuery))
+      .map((model) => ({
+        kind: "model",
+        name: model.id,
+        value: model.id,
+        description: formatModelDetails(model),
+        source: model.id === state?.selectedModel ? "current" : "model"
+      }))
+      .slice(0, 20);
+    return matches.length > 0 ? matches : [{
+      kind: "empty",
+      name: "No matching models",
+      description: "Keep typing to filter the current endpoint model list.",
+      source: "endpoint"
+    }];
+  }
+
+  function modelEntries() {
+    if (state?.modelInfo?.length > 0) {
+      return state.modelInfo;
+    }
+    return (state?.models || []).map((id) => ({ id }));
+  }
+
+  function formatModelDetails(model) {
+    const details = [];
+    if (model.contextLength) {
+      details.push(`${formatNumber(model.contextLength)} ctx`);
+    }
+    if (model.maxOutputTokens) {
+      details.push(`${formatNumber(model.maxOutputTokens)} output`);
+    }
+    if (model.supportsReasoning) {
+      details.push("thinking");
+    }
+    return details.length > 0 ? details.join(", ") : "Available on current endpoint";
+  }
+
   function requestCommandRefreshIfNeeded() {
     const now = Date.now();
     if (now - lastCommandRefreshAt < 2000) {
@@ -857,6 +953,15 @@
     }
     lastCommandRefreshAt = now;
     vscode.postMessage({ type: "refreshCommands" });
+  }
+
+  function requestModelRefreshIfNeeded() {
+    const now = Date.now();
+    if (now - lastModelRefreshAt < 2000) {
+      return;
+    }
+    lastModelRefreshAt = now;
+    vscode.postMessage({ type: "refreshModels" });
   }
 
   function moveSlashCommandSelection(delta) {
@@ -889,14 +994,53 @@
       hideSlashCommandMenu();
       return;
     }
+    if (command.kind === "model") {
+      selectModelFromPicker(command.value || command.name);
+      return;
+    }
+    if (command.kind === "empty") {
+      return;
+    }
     const suffix = elements.input.value.slice(context.commandEnd);
     const needsSpace = suffix.startsWith(" ") || suffix.length === 0;
     elements.input.value = `/${command.name}${needsSpace ? " " : ""}${suffix.replace(/^\s*/, "")}`;
+    if (command.name === "models") {
+      slashCommandIndex = 0;
+      resizePromptInput();
+      elements.input.focus();
+      const cursor = elements.input.value.length;
+      elements.input.setSelectionRange(cursor, cursor);
+      renderSlashCommandMenu();
+      return;
+    }
     hideSlashCommandMenu();
     resizePromptInput();
     elements.input.focus();
     const cursor = Math.min(elements.input.value.length, command.name.length + 2);
     elements.input.setSelectionRange(cursor, cursor);
+  }
+
+  function selectModelFromPicker(model) {
+    if (!model || !elements.input) {
+      hideSlashCommandMenu();
+      return;
+    }
+    if (state) {
+      state = {
+        ...state,
+        selectedModel: model,
+        selectedModelInfo: findModelInfo(model)
+      };
+    }
+    setValue(elements.modelInput, model);
+    renderModelMeta();
+    renderModelPicker();
+    elements.input.value = "";
+    resizePromptInput();
+    hideSlashCommandMenu();
+    elements.input.focus();
+    addStatus(`Model set to ${model}.`);
+    vscode.postMessage({ type: "selectModel", model });
   }
 
   function hideSlashCommandMenu() {

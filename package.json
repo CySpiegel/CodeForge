@@ -142,6 +142,15 @@
           "default": "",
           "description": "Model ID to send to the active endpoint. If empty, the active profile defaultModel is used."
         },
+        "codeforge.agent.mode": {
+          "type": "string",
+          "default": "auto",
+          "enum": [
+            "auto",
+            "plan"
+          ],
+          "description": "Active CodeForge agent mode. Auto can implement with approved local actions; Plan is read-only planning."
+        },
         "codeforge.network.allowlist": {
           "type": "array",
           "default": [],

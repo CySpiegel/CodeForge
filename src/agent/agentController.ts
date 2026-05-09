@@ -18,11 +18,12 @@ import {
 import { executeLocalReadOnlyTools, LocalToolProgress } from "../core/localToolExecutor";
 import { MemoryStore } from "../core/memory";
 import { OpenAiCompatibleProvider } from "../core/openaiAdapter";
-import { evaluateActionPermission } from "../core/permissions";
+import { evaluateActionPermission, permissionModeLabel } from "../core/permissions";
 import { SessionRecord, SessionSnapshot, SessionStore, SessionSummary } from "../core/session";
 import { classifyShellCommand } from "../core/shellSemantics";
 import {
   AgentAction,
+  AgentMode,
   ApprovalRequest,
   ChatMessage,
   CommandResult,
@@ -97,6 +98,7 @@ export interface AgentLocalCommandSummary {
 }
 
 export interface AgentSettingsSummary {
+  readonly agentMode: string;
   readonly allowlist: readonly string[];
   readonly maxFiles: number;
   readonly maxBytes: number;
@@ -236,6 +238,12 @@ export class AgentController {
     await this.config.setModel(model);
     this.lastTokenUsage = undefined;
     this.emitContextUsage();
+    await this.publishState();
+  }
+
+  async setAgentMode(mode: AgentMode): Promise<void> {
+    await this.config.setAgentMode(mode);
+    this.emit({ type: "status", text: `Agent mode set to ${agentModeLabel(mode)}.` });
     await this.publishState();
   }
 
@@ -458,6 +466,7 @@ export class AgentController {
       this.compactOldToolResultsIfNeeded();
       this.emit({ type: "status", text: `Calling ${provider.profile.label} / ${model}` });
       const capabilities = await this.capabilities(provider, model, abort.signal);
+      const agentMode = this.config.getAgentMode();
       let assistantText = "";
       const nativeToolCalls: ToolCall[] = [];
       const invocations: ToolInvocation[] = [];
@@ -467,7 +476,7 @@ export class AgentController {
       for await (const event of provider.streamChat({
         model,
         messages: this.messages,
-        tools: capabilities.nativeToolCalls ? toolDefinitions : undefined,
+        tools: capabilities.nativeToolCalls ? toolDefinitionsForAgentMode(agentMode) : undefined,
         signal: abort.signal
       })) {
         if (event.type === "content") {
@@ -528,6 +537,7 @@ export class AgentController {
     let index = 0;
     let continuedWithLocalContext = false;
     const permissionPolicy = this.config.getPermissionPolicy();
+    const agentMode = this.config.getAgentMode();
 
     while (index < invocations.length) {
       const localBatch: ToolInvocation[] = [];
@@ -582,6 +592,13 @@ export class AgentController {
       const validation = validateAction(invocation.action);
       if (!validation.ok) {
         this.appendDeniedOrInvalidToolResult(invocation, validation.message ?? "Tool input failed validation.");
+        continuedWithLocalContext = true;
+        index++;
+        continue;
+      }
+
+      if (agentMode === "plan") {
+        this.appendDeniedOrInvalidToolResult(invocation, "Plan mode is read-only. Explore the workspace and present an implementation plan before switching back to Auto.");
         continuedWithLocalContext = true;
         index++;
         continue;
@@ -881,17 +898,20 @@ export class AgentController {
   }
 
   private ensureSystemMessage(): void {
-    if (this.messages.some((message) => message.role === "system")) {
+    const nextSystemMessage = this.systemMessage();
+    const existingIndex = this.messages.findIndex((message) => message.role === "system");
+    if (existingIndex >= 0) {
+      this.messages[existingIndex] = nextSystemMessage;
       return;
     }
 
-    this.appendMessage(this.systemMessage());
+    this.appendMessage(nextSystemMessage);
   }
 
   private systemMessage(): ChatMessage {
     return {
       role: "system",
-      content: `${actionProtocolInstructions}\n\nNetwork policy: CodeForge is local/offline first and only talks to configured local or on-prem vLLM/LiteLLM-compatible endpoints. Never suggest sending workspace data to a public service.`
+      content: `${actionProtocolInstructions}\n\n${agentModeInstructions(this.config.getAgentMode())}\n\nNetwork policy: CodeForge is local/offline first and only talks to configured local or on-prem vLLM/LiteLLM-compatible endpoints. Never suggest sending workspace data to a public service.`
     };
   }
 
@@ -1020,6 +1040,11 @@ export class AgentController {
     const [commandWithSlash, ...args] = rawPrompt.trim().split(/\s+/);
     const command = commandWithSlash.toLowerCase();
     const rest = args.join(" ");
+    const permissionMode = permissionModeFromSlashCommand(command);
+    if (permissionMode) {
+      await this.setPermissionModeFromSlash(permissionMode);
+      return;
+    }
 
     switch (command) {
       case "/clear":
@@ -1074,12 +1099,22 @@ export class AgentController {
         await this.publishState();
         return;
       case "/model":
+      case "/models":
         if (rest) {
           await this.selectModel(rest);
           this.emit({ type: "message", role: "system", text: `Model set to ${rest}.` });
         } else {
           await this.refreshModels();
-          this.emit({ type: "message", role: "system", text: "Refreshed endpoint model list." });
+          this.emit({ type: "message", role: "system", text: this.formatModelReport() });
+        }
+        return;
+      case "/auto":
+        await this.setAgentMode("auto");
+        return;
+      case "/plan":
+        await this.setAgentMode("plan");
+        if (rest) {
+          await this.runPrompt(rest, rest);
         }
         return;
       default:
@@ -1089,9 +1124,14 @@ export class AgentController {
         this.emit({
           type: "message",
           role: "system",
-          text: `Unknown command ${command}. Available commands: /new, /compact, /context, /commands, /skills, /skill, /memory, /clear, /stop, /history, /resume, /fork, /diff, /export, /model, /config.`
+          text: `Unknown command ${command}. Available commands: /new, /compact, /context, /commands, /skills, /skill, /memory, /clear, /stop, /history, /resume, /fork, /diff, /export, /model, /models, /auto, /plan, /default, /review, /accept-edits, /read-only, /workspace-trusted, /config.`
         });
     }
+  }
+
+  private async setPermissionModeFromSlash(mode: PermissionMode): Promise<void> {
+    await this.setPermissionMode(mode);
+    this.emit({ type: "message", role: "system", text: `Permission mode set to ${permissionModeLabel(mode)}.` });
   }
 
   private async showLocalCommands(): Promise<void> {
@@ -1277,6 +1317,36 @@ export class AgentController {
     return lines.join("\n");
   }
 
+  private formatModelReport(): string {
+    const activeProfileId = this.config.getActiveProfileId();
+    const profile = this.config.getProfiles().find((item) => item.id === activeProfileId);
+    const inspection = this.endpointCache.get(activeProfileId);
+    const selectedModel = this.config.getConfiguredModel() || profile?.defaultModel || inspection?.models[0]?.id || "";
+    const lines = [
+      `Active model: ${selectedModel || "(not configured)"}.`,
+      inspection?.backendLabel ? `Detected backend: ${inspection.backendLabel}.` : undefined,
+      "",
+      "Available models:"
+    ].filter((line): line is string => line !== undefined);
+
+    if (!inspection || inspection.models.length === 0) {
+      lines.push("- No models found. Check the OpenAI API endpoint settings.");
+      return lines.join("\n");
+    }
+
+    for (const model of inspection.models) {
+      const details = [
+        model.contextLength ? `${model.contextLength.toLocaleString("en-US")} ctx` : undefined,
+        model.maxOutputTokens ? `${model.maxOutputTokens.toLocaleString("en-US")} output` : undefined,
+        model.supportsReasoning ? "thinking" : undefined
+      ].filter((item): item is string => Boolean(item));
+      const marker = model.id === selectedModel ? "*" : "-";
+      lines.push(`${marker} ${model.id}${details.length > 0 ? ` (${details.join(", ")})` : ""}`);
+    }
+    lines.push("", "Use `/models` to pick from the active endpoint or `/model <model-id>` to switch directly.");
+    return lines.join("\n");
+  }
+
   private async handleMemoryCommand(rest: string): Promise<void> {
     if (!this.memoryStore) {
       this.emit({ type: "message", role: "system", text: "Local memory is not available in this environment." });
@@ -1333,6 +1403,7 @@ export class AgentController {
     const contextLimits = this.config.getContextLimits();
     const networkPolicy = this.config.getNetworkPolicy();
     const permissionPolicy = this.config.getPermissionPolicy();
+    const agentMode = this.config.getAgentMode();
     const profiles = this.config.getProfiles().map((profile): AgentProfileSummary => ({
       id: profile.id,
       label: profile.label,
@@ -1357,6 +1428,7 @@ export class AgentController {
       contextUsage: this.currentContextUsage(),
       localCommands: await this.localCommandSummaries(),
       settings: {
+        agentMode,
         allowlist: networkPolicy.allowlist,
         maxFiles: contextLimits.maxFiles,
         maxBytes: contextLimits.maxBytes,
@@ -1502,6 +1574,51 @@ function contextItemKindLabel(kind: ContextItem["kind"]): string {
     case "file":
       return "Workspace file";
   }
+}
+
+function permissionModeFromSlashCommand(command: string): PermissionMode | undefined {
+  switch (command) {
+    case "/default":
+      return "default";
+    case "/review":
+      return "review";
+    case "/accept-edits":
+    case "/acceptedits":
+      return "acceptEdits";
+    case "/read-only":
+    case "/readonly":
+      return "readOnly";
+    case "/workspace-trusted":
+    case "/workspacetrusted":
+      return "workspaceTrusted";
+    default:
+      return undefined;
+  }
+}
+
+function agentModeLabel(mode: AgentMode): string {
+  return mode === "plan" ? "Plan" : "Auto";
+}
+
+function toolDefinitionsForAgentMode(mode: AgentMode): typeof toolDefinitions {
+  if (mode !== "plan") {
+    return toolDefinitions;
+  }
+  const allowedInPlan = new Set(["list_files", "glob_files", "read_file", "search_text", "grep_text", "list_diagnostics"]);
+  return toolDefinitions.filter((tool) => allowedInPlan.has(tool.name));
+}
+
+function agentModeInstructions(mode: AgentMode): string {
+  if (mode !== "plan") {
+    return "Agent mode: Auto. You may explore, propose edits, and request approved local actions as needed to complete the user's task.";
+  }
+  return [
+    "Agent mode: Plan.",
+    "Focus on exploring the workspace and designing an implementation approach before coding.",
+    "Do not write files, edit files, propose patches, open diffs, or run commands in Plan mode.",
+    "Use read-only workspace tools to inspect relevant files, identify existing patterns, consider tradeoffs, and produce a concrete plan.",
+    "When the plan is ready, present it clearly for user review and tell the user to switch back to Auto before implementation."
+  ].join("\n");
 }
 
 function formatCommandResult(action: RunCommandAction, result: CommandResult): string {
