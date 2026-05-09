@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { NetworkPolicy, ProviderProfile } from "../core/types";
+import { ContextLimits, NetworkPolicy, ProviderProfile } from "../core/types";
 
 const sectionName = "codeforge";
 
@@ -16,7 +16,7 @@ export class CodeForgeConfigService {
     };
   }
 
-  getContextLimits(): { readonly maxFiles: number; readonly maxBytes: number } {
+  getContextLimits(): ContextLimits {
     return {
       maxFiles: this.config().get<number>("context.maxFiles", 24),
       maxBytes: this.config().get<number>("context.maxBytes", 120000)
@@ -31,9 +31,13 @@ export class CodeForgeConfigService {
     return this.config().get<string>("model", "").trim();
   }
 
+  getActiveProfileId(): string {
+    return this.config().get<string>("activeProfile", "litellm-local");
+  }
+
   async getActiveProfile(): Promise<ProviderProfile> {
     const profiles = this.getProfiles();
-    const activeProfileId = this.config().get<string>("activeProfile", "litellm-local");
+    const activeProfileId = this.getActiveProfileId();
     const profile = profiles.find((item) => item.id === activeProfileId) ?? profiles[0];
     const apiKey = profile.apiKeySecretName ? await this.secrets.get(secretKey(profile.apiKeySecretName)) : undefined;
     return { ...profile, apiKey };
@@ -41,7 +45,46 @@ export class CodeForgeConfigService {
 
   getProfiles(): readonly ProviderProfile[] {
     const configured = this.config().get<readonly ProviderProfile[]>("profiles", []);
-    return [...defaultProfiles, ...configured].filter(isValidProfile);
+    const byId = new Map<string, ProviderProfile>();
+    for (const profile of defaultProfiles) {
+      byId.set(profile.id, profile);
+    }
+    for (const profile of configured) {
+      if (isValidProfile(profile)) {
+        byId.set(profile.id, profile);
+      }
+    }
+    return [...byId.values()].filter(isValidProfile);
+  }
+
+  async setActiveProfile(profileId: string): Promise<void> {
+    await this.config().update("activeProfile", profileId, vscode.ConfigurationTarget.Global);
+  }
+
+  async setModel(model: string): Promise<void> {
+    await this.config().update("model", model, vscode.ConfigurationTarget.Workspace);
+  }
+
+  async updateSettings(settings: Partial<CodeForgeSettingsUpdate>): Promise<void> {
+    const config = this.config();
+    if (settings.activeProfileId) {
+      await config.update("activeProfile", settings.activeProfileId, vscode.ConfigurationTarget.Global);
+    }
+    if (settings.model !== undefined) {
+      await config.update("model", settings.model, vscode.ConfigurationTarget.Workspace);
+    }
+    if (settings.allowlist) {
+      await config.update("network.allowlist", settings.allowlist, vscode.ConfigurationTarget.Global);
+    }
+    if (settings.maxFiles !== undefined) {
+      await config.update("context.maxFiles", settings.maxFiles, vscode.ConfigurationTarget.Global);
+    }
+    if (settings.maxBytes !== undefined) {
+      await config.update("context.maxBytes", settings.maxBytes, vscode.ConfigurationTarget.Global);
+    }
+    if (settings.commandTimeoutSeconds !== undefined) {
+      await config.update("commands.timeoutSeconds", settings.commandTimeoutSeconds, vscode.ConfigurationTarget.Global);
+    }
   }
 
   async configureEndpoint(): Promise<void> {
@@ -106,6 +149,15 @@ export class CodeForgeConfigService {
   private config(): vscode.WorkspaceConfiguration {
     return vscode.workspace.getConfiguration(sectionName);
   }
+}
+
+export interface CodeForgeSettingsUpdate {
+  readonly activeProfileId: string;
+  readonly model: string;
+  readonly allowlist: readonly string[];
+  readonly maxFiles: number;
+  readonly maxBytes: number;
+  readonly commandTimeoutSeconds: number;
 }
 
 const defaultProfiles: readonly ProviderProfile[] = [

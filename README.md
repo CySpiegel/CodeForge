@@ -28,6 +28,7 @@ npm run package
 Open the project in VS Code and run the extension host launch configuration, or use the `CodeForge: Open Chat` command after installation.
 
 See `ARCHITECTURE.md` for the design boundaries and patterns used in the implementation.
+See `docs/claude-code-clean-room-parity.md` for the clean-room Claude Code parity review and roadmap.
 
 ## Source Boundary
 

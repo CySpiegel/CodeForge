@@ -18,6 +18,7 @@
     "onView:codeforge.chatView",
     "onCommand:codeforge.openChat",
     "onCommand:codeforge.configureEndpoint",
+    "onCommand:codeforge.openSettings",
     "onCommand:codeforge.askSelection",
     "onCommand:codeforge.editSelection",
     "onCommand:codeforge.explainFile",
@@ -34,6 +35,11 @@
       {
         "command": "codeforge.configureEndpoint",
         "title": "CodeForge: Configure Self-Hosted Endpoint",
+        "category": "CodeForge"
+      },
+      {
+        "command": "codeforge.openSettings",
+        "title": "CodeForge: Open Settings",
         "category": "CodeForge"
       },
       {

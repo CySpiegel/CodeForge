@@ -19,6 +19,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.workspace.registerTextDocumentContentProvider("codeforge-preview", previewProvider),
     vscode.window.registerWebviewViewProvider(CodeForgeViewProvider.viewType, viewProvider),
     vscode.commands.registerCommand("codeforge.openChat", () => viewProvider.focus()),
+    vscode.commands.registerCommand("codeforge.openSettings", () => viewProvider.openSettings()),
     vscode.commands.registerCommand("codeforge.configureEndpoint", async () => {
       await config.configureEndpoint();
       await viewProvider.focus();
