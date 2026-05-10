@@ -238,7 +238,8 @@ function parsePermissionMode(value: unknown): PermissionMode | undefined {
 
 function parseAgentMode(value: unknown): AgentMode | undefined {
   switch (value) {
-    case "auto":
+    case "agent":
+    case "ask":
     case "plan":
       return value;
     default:

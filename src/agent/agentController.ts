@@ -597,8 +597,8 @@ export class AgentController {
         continue;
       }
 
-      if (agentMode === "plan") {
-        this.appendDeniedOrInvalidToolResult(invocation, "Plan mode is read-only. Explore the workspace and present an implementation plan before switching back to Auto.");
+      if (agentMode !== "agent") {
+        this.appendDeniedOrInvalidToolResult(invocation, `${agentModeLabel(agentMode)} mode is read-only. Use read-only workspace context and switch to Agent mode before applying edits or running commands.`);
         continuedWithLocalContext = true;
         index++;
         continue;
@@ -1108,8 +1108,18 @@ export class AgentController {
           this.emit({ type: "message", role: "system", text: this.formatModelReport() });
         }
         return;
+      case "/agent":
       case "/auto":
-        await this.setAgentMode("auto");
+        await this.setAgentMode("agent");
+        if (rest) {
+          await this.runPrompt(rest, rest);
+        }
+        return;
+      case "/ask":
+        await this.setAgentMode("ask");
+        if (rest) {
+          await this.runPrompt(rest, rest);
+        }
         return;
       case "/plan":
         await this.setAgentMode("plan");
@@ -1124,7 +1134,7 @@ export class AgentController {
         this.emit({
           type: "message",
           role: "system",
-          text: `Unknown command ${command}. Available commands: /new, /compact, /context, /commands, /skills, /skill, /memory, /clear, /stop, /history, /resume, /fork, /diff, /export, /model, /models, /auto, /plan, /default, /review, /accept-edits, /read-only, /workspace-trusted, /config.`
+          text: `Unknown command ${command}. Available commands: /new, /compact, /context, /commands, /skills, /skill, /memory, /clear, /stop, /history, /resume, /fork, /diff, /export, /model, /models, /agent, /ask, /plan, /default, /review, /accept-edits, /read-only, /workspace-trusted, /config.`
         });
     }
   }
@@ -1597,29 +1607,50 @@ function permissionModeFromSlashCommand(command: string): PermissionMode | undef
 }
 
 function agentModeLabel(mode: AgentMode): string {
-  return mode === "plan" ? "Plan" : "Auto";
+  switch (mode) {
+    case "ask":
+      return "Ask";
+    case "plan":
+      return "Plan";
+    default:
+      return "Agent";
+  }
 }
 
 function toolDefinitionsForAgentMode(mode: AgentMode): typeof toolDefinitions {
-  if (mode !== "plan") {
+  if (mode === "agent") {
     return toolDefinitions;
   }
-  const allowedInPlan = new Set(["list_files", "glob_files", "read_file", "search_text", "grep_text", "list_diagnostics"]);
-  return toolDefinitions.filter((tool) => allowedInPlan.has(tool.name));
+  return toolDefinitions.filter((tool) => readOnlyToolNames.has(tool.name));
 }
 
 function agentModeInstructions(mode: AgentMode): string {
-  if (mode !== "plan") {
-    return "Agent mode: Auto. You may explore, propose edits, and request approved local actions as needed to complete the user's task.";
+  if (mode === "agent") {
+    return [
+      "Agent mode: Agent.",
+      "Act as an autonomous coding agent inside the user's repo.",
+      "You may explore multiple files, make coordinated edits, create files, run approved terminal commands, iterate on errors, and complete multi-step engineering workflows."
+    ].join("\n");
+  }
+  if (mode === "ask") {
+    return [
+      "Agent mode: Ask.",
+      "Act like a traditional chatbot inside VS Code for quick answers, explanations, debugging help, and code snippets.",
+      "Use the active file and read-only workspace context when it helps answer the question.",
+      "Do not edit files, create files, run terminal commands, or execute autonomous multi-step workflows in Ask mode.",
+      "If the user asks you to implement changes, explain the approach and tell them to switch to Agent mode before applying edits."
+    ].join("\n");
   }
   return [
     "Agent mode: Plan.",
-    "Focus on exploring the workspace and designing an implementation approach before coding.",
-    "Do not write files, edit files, propose patches, open diffs, or run commands in Plan mode.",
-    "Use read-only workspace tools to inspect relevant files, identify existing patterns, consider tradeoffs, and produce a concrete plan.",
-    "When the plan is ready, present it clearly for user review and tell the user to switch back to Auto before implementation."
+    "Analyze the codebase and reason through larger work before implementation.",
+    "Use read-only workspace tools to inspect relevant files, identify existing patterns, break the task into steps, and call out risks or dependencies.",
+    "Do not edit files, create files, propose patches, open diffs, or run terminal commands in Plan mode.",
+    "When the plan is ready, present the intended edits clearly and tell the user to switch to Agent mode before implementation."
   ].join("\n");
 }
+
+const readOnlyToolNames = new Set(["list_files", "glob_files", "read_file", "search_text", "grep_text", "list_diagnostics"]);
 
 function formatCommandResult(action: RunCommandAction, result: CommandResult): string {
   const status = result.timedOut

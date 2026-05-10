@@ -40,8 +40,11 @@ export class CodeForgeConfigService {
   }
 
   getAgentMode(): AgentMode {
-    const mode = this.config().get<AgentMode>("agent.mode", "auto");
-    return isAgentMode(mode) ? mode : "auto";
+    const mode = this.config().get<AgentMode | "auto">("agent.mode", "agent");
+    if (mode === "auto") {
+      return "agent";
+    }
+    return isAgentMode(mode) ? mode : "agent";
   }
 
   getConfiguredModel(): string {
@@ -242,7 +245,7 @@ function isValidProfile(profile: ProviderProfile): boolean {
 }
 
 function isAgentMode(value: unknown): value is AgentMode {
-  return value === "auto" || value === "plan";
+  return value === "agent" || value === "ask" || value === "plan";
 }
 
 function secretKey(name: string): string {

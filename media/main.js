@@ -68,8 +68,9 @@
     { name: "export", description: "Export a local session", argumentHint: "[session-id]" },
     { name: "model", description: "Show or set the active model", argumentHint: "[model-id]" },
     { name: "models", description: "Select an available model from the active endpoint" },
-    { name: "auto", description: "Switch agent mode to Auto" },
-    { name: "plan", description: "Switch agent mode to Plan", argumentHint: "[task]" },
+    { name: "agent", description: "Switch to Agent mode", argumentHint: "[task]" },
+    { name: "ask", description: "Switch to Ask mode", argumentHint: "[question]" },
+    { name: "plan", description: "Switch to Plan mode", argumentHint: "[task]" },
     { name: "default", description: "Set permission mode to Default" },
     { name: "review", description: "Set permission mode to Review" },
     { name: "accept-edits", description: "Set permission mode to Accept edits" },
@@ -88,8 +89,9 @@
     { value: "workspaceTrusted", label: "Workspace trusted" }
   ];
   const agentModeOptions = [
-    { value: "auto", label: "Auto", icon: "⬢", description: "Implement with approved local actions" },
-    { value: "plan", label: "Plan", icon: "⏸", description: "Read-only planning before implementation" }
+    { value: "agent", label: "Agent", icon: "⬢", description: "Autonomous coding with approved local actions" },
+    { value: "ask", label: "Ask", icon: "?", description: "Quick answers and code help with read-only context" },
+    { value: "plan", label: "Plan", icon: "▤", description: "Analyze and outline before implementation" }
   ];
 
   on(elements.form, "submit", (event) => {
@@ -620,7 +622,7 @@
   }
 
   function renderAgentModePicker() {
-    const selectedValue = state?.settings?.agentMode || "auto";
+    const selectedValue = normalizeAgentMode(state?.settings?.agentMode);
     const selectedOption = agentModeOptions.find((option) => option.value === selectedValue) || agentModeOptions[0];
     if (elements.agentModeIcon) {
       elements.agentModeIcon.textContent = selectedOption.icon;
@@ -630,11 +632,11 @@
       elements.agentModeButton.setAttribute("aria-label", `Agent mode: ${selectedOption.label}`);
       elements.agentModeButton.dataset.mode = selectedOption.value;
     }
-    renderComboMenu(elements.agentModeMenu, elements.agentModeButton, agentModeOptions, selectedOption.value, "Auto", chooseAgentMode, { preserveButtonText: true, includeDescription: true });
+    renderComboMenu(elements.agentModeMenu, elements.agentModeButton, agentModeOptions, selectedOption.value, "Agent", chooseAgentMode, { preserveButtonText: true, includeDescription: true });
   }
 
   function chooseAgentMode(value) {
-    const nextMode = agentModeOptions.some((option) => option.value === value) ? value : "auto";
+    const nextMode = normalizeAgentMode(value);
     if (state) {
       state = {
         ...state,
@@ -646,6 +648,13 @@
     }
     renderAgentModePicker();
     vscode.postMessage({ type: "setAgentMode", agentMode: nextMode });
+  }
+
+  function normalizeAgentMode(value) {
+    if (value === "auto") {
+      return "agent";
+    }
+    return agentModeOptions.some((option) => option.value === value) ? value : "agent";
   }
 
   function renderEndpointPicker() {
@@ -737,14 +746,18 @@
     hideSlashCommandMenu();
     closeMenus();
     if (shouldOpen) {
-      positionComboMenu(menu, button);
+      menu.style.visibility = "hidden";
       menu.classList.remove("hidden");
+      positionComboMenu(menu, button);
+      menu.style.visibility = "";
       button.setAttribute("aria-expanded", "true");
     }
   }
 
   function positionComboMenu(menu, button) {
     const margin = 4;
+    const gap = 3;
+    const maxMenuHeight = 260;
     const rect = button.getBoundingClientRect();
     const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
     const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
@@ -752,12 +765,14 @@
     const left = Math.min(Math.max(margin, rect.left), Math.max(margin, viewportWidth - width - margin));
     const availableBelow = viewportHeight - rect.bottom - margin;
     const availableAbove = rect.top - margin;
-    const openAbove = availableBelow < 120 && availableAbove > availableBelow;
+    const naturalHeight = Math.min(menu.scrollHeight || maxMenuHeight, maxMenuHeight);
+    const openAbove = availableBelow < naturalHeight + gap && availableAbove > availableBelow;
     const availableHeight = Math.max(openAbove ? availableAbove : availableBelow, 80);
-    const maxHeight = Math.min(260, availableHeight);
+    const maxHeight = Math.min(maxMenuHeight, availableHeight);
+    const renderedHeight = Math.min(naturalHeight, maxHeight);
     const top = openAbove
-      ? Math.max(margin, rect.top - maxHeight - 3)
-      : Math.min(rect.bottom + 3, viewportHeight - maxHeight - margin);
+      ? Math.max(margin, rect.top - renderedHeight - gap)
+      : Math.min(rect.bottom + gap, viewportHeight - renderedHeight - margin);
 
     menu.style.position = "fixed";
     menu.style.left = `${left}px`;

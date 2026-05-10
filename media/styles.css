@@ -850,6 +850,10 @@ textarea {
   min-width: 0;
 }
 
+.agent-mode-button[data-mode="ask"] {
+  color: var(--vscode-charts-yellow, var(--vscode-foreground));
+}
+
 .agent-mode-button[data-mode="plan"] {
   color: var(--vscode-charts-blue, var(--vscode-foreground));
 }

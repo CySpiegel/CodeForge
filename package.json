@@ -144,12 +144,13 @@
         },
         "codeforge.agent.mode": {
           "type": "string",
-          "default": "auto",
+          "default": "agent",
           "enum": [
-            "auto",
+            "agent",
+            "ask",
             "plan"
           ],
-          "description": "Active CodeForge agent mode. Auto can implement with approved local actions; Plan is read-only planning."
+          "description": "Active CodeForge agent mode. Agent executes coding tasks with approved local actions; Ask answers with read-only context; Plan analyzes and proposes an implementation plan."
         },
         "codeforge.network.allowlist": {
           "type": "array",
