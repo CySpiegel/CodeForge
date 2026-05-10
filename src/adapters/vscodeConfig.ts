@@ -34,7 +34,7 @@ export class CodeForgeConfigService {
   }
 
   getPermissionPolicy(): PermissionPolicy {
-    const mode = this.config().get<PermissionMode>("permissions.mode", "default");
+    const mode = normalizeConfigPermissionMode(this.config().get<PermissionMode | LegacyPermissionMode>("permissions.mode", "smart"));
     const rules = parsePermissionRules(this.config().get<readonly unknown[]>("permissions.rules", []), "workspace");
     return normalizePermissionPolicy({ mode, rules });
   }
@@ -246,6 +246,25 @@ function isValidProfile(profile: ProviderProfile): boolean {
 
 function isAgentMode(value: unknown): value is AgentMode {
   return value === "agent" || value === "ask" || value === "plan";
+}
+
+type LegacyPermissionMode = "default" | "review" | "acceptEdits" | "readOnly" | "workspaceTrusted";
+
+function normalizeConfigPermissionMode(value: unknown): PermissionMode {
+  switch (value) {
+    case "manual":
+    case "review":
+    case "readOnly":
+      return "manual";
+    case "fullAuto":
+    case "workspaceTrusted":
+      return "fullAuto";
+    case "smart":
+    case "default":
+    case "acceptEdits":
+    default:
+      return "smart";
+  }
 }
 
 function secretKey(name: string): string {

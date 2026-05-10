@@ -7,12 +7,11 @@ import {
   PermissionRule,
   PermissionRuleKind
 } from "./types";
-import { classifyShellCommand } from "./shellSemantics";
 import { findTool, toolSummary } from "./toolRegistry";
 import { parseUnifiedDiff, targetPath } from "./unifiedDiff";
 
 export const defaultPermissionPolicy: PermissionPolicy = {
-  mode: "default",
+  mode: "smart",
   rules: []
 };
 
@@ -48,7 +47,7 @@ export function normalizePermissionPolicy(policy: PermissionPolicy | undefined):
     return defaultPermissionPolicy;
   }
   return {
-    mode: isPermissionMode(policy.mode) ? policy.mode : "default",
+    mode: normalizePermissionMode(policy.mode),
     rules: policy.rules.filter(isValidRule).map((rule) => ({
       ...rule,
       pattern: rule.pattern.trim()
@@ -84,16 +83,12 @@ export function parsePermissionRules(value: unknown, fallbackScope: PermissionRu
 
 export function permissionModeLabel(mode: PermissionMode): string {
   switch (mode) {
-    case "default":
-      return "Default";
-    case "review":
-      return "Review";
-    case "acceptEdits":
-      return "Accept edits";
-    case "readOnly":
-      return "Read only";
-    case "workspaceTrusted":
-      return "Workspace trusted";
+    case "manual":
+      return "Manual";
+    case "smart":
+      return "Smart";
+    case "fullAuto":
+      return "Full Auto";
   }
 }
 
@@ -177,31 +172,28 @@ function commandPatternMatches(pattern: string, command: string): boolean {
 }
 
 function decisionFromModeConstraint(action: AgentAction, mode: PermissionMode): PermissionDecision | undefined {
-  if (mode === "readOnly" && isSideEffectAction(action)) {
-    return {
-      behavior: "deny",
-      source: "mode",
-      reason: "Current permission mode is read only."
-    };
-  }
-
-  if (mode === "review" && isSideEffectAction(action)) {
+  if (mode === "manual" && isSideEffectAction(action)) {
     return {
       behavior: "ask",
       source: "mode",
-      reason: "Current permission mode requires approval for every edit and command."
+      reason: "Manual approval mode asks before edits and local commands."
     };
   }
 
-  if (mode === "workspaceTrusted" && action.type === "run_command") {
-    const semantics = classifyShellCommand(action.command);
-    if (semantics.isDestructive) {
-      return {
-        behavior: "ask",
-        source: "mode",
-        reason: "Workspace trusted mode still requires approval for destructive commands."
-      };
-    }
+  if (mode === "smart" && action.type === "run_command") {
+    return {
+      behavior: "ask",
+      source: "mode",
+      reason: "Smart approval mode asks before terminal commands."
+    };
+  }
+
+  if (mode === "smart" && isRiskyEditAction(action)) {
+    return {
+      behavior: "ask",
+      source: "mode",
+      reason: "Smart approval mode asks before large edits, file creation, or file deletion."
+    };
   }
 
   return undefined;
@@ -216,11 +208,19 @@ function defaultDecision(action: AgentAction, mode: PermissionMode): PermissionD
     };
   }
 
-  if (mode === "acceptEdits" && (action.type === "propose_patch" || action.type === "write_file" || action.type === "edit_file")) {
+  if (mode === "smart" && isSmallEditAction(action)) {
     return {
       behavior: "allow",
       source: "mode",
-      reason: "Current permission mode allows proposed edits after diff validation."
+      reason: "Smart approval mode allows small workspace edits."
+    };
+  }
+
+  if (mode === "fullAuto" && isSideEffectAction(action)) {
+    return {
+      behavior: "allow",
+      source: "mode",
+      reason: "Full Auto approval mode allows edits and local commands without prompting."
     };
   }
 
@@ -248,6 +248,44 @@ function isSideEffectAction(action: AgentAction): boolean {
   return action.type === "propose_patch" || action.type === "write_file" || action.type === "edit_file" || action.type === "run_command";
 }
 
+function isRiskyEditAction(action: AgentAction): boolean {
+  if (action.type === "write_file") {
+    return true;
+  }
+  if (action.type === "edit_file") {
+    return Boolean(action.replaceAll) || changedLineCount(action.oldText, action.newText) > 80;
+  }
+  if (action.type !== "propose_patch") {
+    return false;
+  }
+
+  try {
+    const patches = parseUnifiedDiff(action.patch);
+    if (patches.length > 3) {
+      return true;
+    }
+    return patches.some((patch) => patch.oldPath === "/dev/null" || patch.newPath === "/dev/null" || patchChangedLines(patch) > 80);
+  } catch {
+    return true;
+  }
+}
+
+function isSmallEditAction(action: AgentAction): boolean {
+  return (action.type === "edit_file" || action.type === "propose_patch") && !isRiskyEditAction(action);
+}
+
+function changedLineCount(oldText: string, newText: string): number {
+  return lineCount(oldText) + lineCount(newText);
+}
+
+function lineCount(value: string): number {
+  return value.length === 0 ? 0 : value.replace(/\r\n/g, "\n").split("\n").length;
+}
+
+function patchChangedLines(patch: ReturnType<typeof parseUnifiedDiff>[number]): number {
+  return patch.hunks.reduce((sum, hunk) => sum + hunk.lines.filter((line) => line.type === "add" || line.type === "remove").length, 0);
+}
+
 function wildcardMatch(pattern: string, value: string): boolean {
   const normalizedPattern = pattern.trim();
   if (!normalizedPattern) {
@@ -268,8 +306,21 @@ function isValidRule(rule: PermissionRule): boolean {
   return isRuleKind(rule.kind) && isBehavior(rule.behavior) && isRuleScope(rule.scope) && rule.pattern.trim().length > 0;
 }
 
-function isPermissionMode(value: unknown): value is PermissionMode {
-  return value === "default" || value === "review" || value === "acceptEdits" || value === "readOnly" || value === "workspaceTrusted";
+function normalizePermissionMode(value: unknown): PermissionMode {
+  switch (value) {
+    case "manual":
+    case "review":
+    case "readOnly":
+      return "manual";
+    case "fullAuto":
+    case "workspaceTrusted":
+      return "fullAuto";
+    case "smart":
+    case "default":
+    case "acceptEdits":
+    default:
+      return "smart";
+  }
 }
 
 function isRuleKind(value: unknown): value is PermissionRuleKind {

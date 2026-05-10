@@ -152,39 +152,15 @@ textarea {
   overflow: hidden;
 }
 
-.toolbar,
 .composer {
   flex: 0 0 auto;
   border-color: var(--vscode-sideBarSectionHeader-border);
   background: var(--vscode-sideBar-background);
 }
 
-.toolbar {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 6px;
-  align-items: center;
-  padding: 6px 8px;
-  border-bottom: 1px solid var(--vscode-sideBarSectionHeader-border);
-}
-
-.brand {
-  min-width: 0;
-  color: var(--vscode-foreground);
-  font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .icon-button {
   min-width: 30px;
   padding: 3px 8px;
-}
-
-.settings-button {
-  width: 30px;
-  padding: 3px;
 }
 
 .context-ring {
@@ -255,16 +231,72 @@ textarea {
 }
 
 .settings {
-  flex: 0 0 auto;
-  max-height: min(48vh, 420px);
-  overflow: auto;
-  padding: 8px;
-  border-bottom: 1px solid var(--vscode-sideBarSectionHeader-border);
-  background: var(--vscode-editor-background);
+  position: fixed;
+  z-index: 1002;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 12px;
+  background: rgb(0 0 0 / 35%);
 }
 
 .settings.hidden {
   display: none;
+}
+
+.settings-surface {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  width: min(680px, 100%);
+  max-height: min(720px, calc(100vh - 24px));
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border));
+  border-radius: 6px;
+  background: var(--vscode-editorWidget-background, var(--vscode-sideBar-background));
+  box-shadow: 0 16px 42px rgb(0 0 0 / 45%);
+}
+
+.settings-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+  padding: 12px 12px 10px;
+  border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+.settings-heading {
+  min-width: 0;
+}
+
+.settings-heading h2 {
+  margin: 0;
+  color: var(--vscode-foreground);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.settings-heading p {
+  margin: 3px 0 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.settings-close {
+  width: 28px;
+  min-width: 28px;
+  padding: 0;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.settings-content {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 10px 12px;
 }
 
 .settings-grid {
@@ -306,7 +338,15 @@ textarea {
   display: flex;
   gap: 8px;
   justify-content: flex-end;
-  margin-top: 8px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--vscode-panel-border);
+  background: var(--vscode-editorWidget-background, var(--vscode-sideBar-background));
+}
+
+@media (max-width: 520px) {
+  .settings-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .messages {
@@ -730,11 +770,8 @@ textarea {
 }
 
 .slash-command-menu {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: calc(100% + 6px);
-  z-index: 20;
+  position: fixed;
+  z-index: 1003;
   max-height: min(300px, 46vh);
   overflow-y: auto;
   padding: 4px;
@@ -815,7 +852,6 @@ textarea {
   gap: 6px;
 }
 
-.settings-button,
 .agent-mode-button,
 .model-picker-button,
 .send-button {
@@ -829,7 +865,6 @@ textarea {
   border-color: transparent;
 }
 
-.settings-button:hover,
 .agent-mode-button:hover,
 .model-picker-button:hover,
 .send-button:hover {
@@ -837,7 +872,6 @@ textarea {
   background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
 }
 
-.settings-button,
 .agent-mode-button,
 .send-button {
   width: 28px;
@@ -845,7 +879,8 @@ textarea {
 
 .agent-mode-picker,
 .model-picker,
-.endpoint-picker {
+.endpoint-picker,
+.permission-picker {
   position: relative;
   min-width: 0;
 }
@@ -873,12 +908,13 @@ textarea {
   white-space: nowrap;
 }
 
-.endpoint-picker-button {
+.endpoint-picker-button,
+.permission-mode-button {
   display: inline-flex;
   align-items: center;
   gap: 4px;
   min-height: 22px;
-  max-width: 120px;
+  max-width: 150px;
   padding: 0 2px;
   overflow: hidden;
   color: var(--vscode-descriptionForeground);
@@ -889,9 +925,24 @@ textarea {
   white-space: nowrap;
 }
 
-.endpoint-picker-button:hover {
+.permission-mode-button::after {
+  content: "⌄";
+  flex: 0 0 auto;
+  color: var(--vscode-descriptionForeground);
+}
+
+.endpoint-picker-button:hover,
+.permission-mode-button:hover {
   color: var(--vscode-foreground);
   background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+}
+
+.permission-mode-button[data-mode="manual"] {
+  color: var(--vscode-inputValidation-warningForeground, var(--vscode-charts-yellow));
+}
+
+.permission-mode-button[data-mode="fullAuto"] {
+  color: var(--vscode-testing-iconPassed, var(--vscode-charts-green));
 }
 
 .endpoint-icon {
@@ -916,7 +967,8 @@ textarea {
 
 .agent-mode-menu,
 .model-picker-menu,
-.endpoint-picker-menu {
+.endpoint-picker-menu,
+.permission-mode-menu {
   position: absolute;
   z-index: 1000;
   top: calc(100% + 3px);
@@ -933,7 +985,8 @@ textarea {
 
 .agent-mode-menu.hidden,
 .model-picker-menu.hidden,
-.endpoint-picker-menu.hidden {
+.endpoint-picker-menu.hidden,
+.permission-mode-menu.hidden {
   display: none;
 }
 

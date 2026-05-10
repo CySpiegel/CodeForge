@@ -35,6 +35,7 @@ import {
   PermissionDecision,
   PermissionMode,
   ProviderCapabilities,
+  ProviderProfile,
   RunCommandAction,
   TokenUsage,
   ToolCall,
@@ -136,6 +137,7 @@ export class AgentController {
   private readonly approvals = new ApprovalQueue();
   private readonly capabilityCache = new Map<string, ProviderCapabilities>();
   private readonly endpointCache = new Map<string, OpenAiEndpointInspection>();
+  private readonly selectedModelByProfile = new Map<string, string>();
   private messages: ChatMessage[] = [];
   private lastContextItems: readonly ContextItem[] = [];
   private lastTokenUsage: TokenUsage | undefined;
@@ -205,7 +207,7 @@ export class AgentController {
       const inspection = await provider.inspectEndpoint();
       this.endpointCache.set(provider.profile.id, inspection);
       const models = inspection.models.map((model) => model.id);
-      const selectedModel = this.config.getConfiguredModel() || provider.profile.defaultModel || models[0] || "";
+      const selectedModel = this.selectedModelFor(provider.profile, inspection);
       this.emit({
         type: "models",
         models,
@@ -235,8 +237,11 @@ export class AgentController {
   }
 
   async selectModel(model: string): Promise<void> {
+    const profileId = this.config.getActiveProfileId();
+    this.selectedModelByProfile.set(profileId, model);
     await this.config.setModel(model);
     this.lastTokenUsage = undefined;
+    this.emit({ type: "status", text: `Model set to ${model}.` });
     this.emitContextUsage();
     await this.publishState();
   }
@@ -872,7 +877,8 @@ export class AgentController {
   }
 
   private async resolveModel(provider: LlmProvider, signal: AbortSignal): Promise<string> {
-    const configured = this.config.getConfiguredModel() || provider.profile.defaultModel;
+    const cachedInspection = this.endpointCache.get(provider.profile.id);
+    const configured = this.selectedModelFor(provider.profile, cachedInspection);
     if (configured) {
       return configured;
     }
@@ -882,7 +888,7 @@ export class AgentController {
     if (inspection.models.length === 0) {
       throw new Error("No model is configured and the endpoint did not return any models.");
     }
-    return inspection.models[0].id;
+    return this.selectedModelFor(provider.profile, inspection);
   }
 
   private async capabilities(provider: LlmProvider, model: string, signal: AbortSignal): Promise<ProviderCapabilities> {
@@ -1134,7 +1140,7 @@ export class AgentController {
         this.emit({
           type: "message",
           role: "system",
-          text: `Unknown command ${command}. Available commands: /new, /compact, /context, /commands, /skills, /skill, /memory, /clear, /stop, /history, /resume, /fork, /diff, /export, /model, /models, /agent, /ask, /plan, /default, /review, /accept-edits, /read-only, /workspace-trusted, /config.`
+          text: `Unknown command ${command}. Available commands: /new, /compact, /context, /commands, /skills, /skill, /memory, /clear, /stop, /history, /resume, /fork, /diff, /export, /model, /models, /agent, /ask, /plan, /manual, /smart, /full-auto, /config.`
         });
     }
   }
@@ -1331,7 +1337,7 @@ export class AgentController {
     const activeProfileId = this.config.getActiveProfileId();
     const profile = this.config.getProfiles().find((item) => item.id === activeProfileId);
     const inspection = this.endpointCache.get(activeProfileId);
-    const selectedModel = this.config.getConfiguredModel() || profile?.defaultModel || inspection?.models[0]?.id || "";
+    const selectedModel = profile ? this.selectedModelFor(profile, inspection) : inspection?.models[0]?.id || "";
     const lines = [
       `Active model: ${selectedModel || "(not configured)"}.`,
       inspection?.backendLabel ? `Detected backend: ${inspection.backendLabel}.` : undefined,
@@ -1423,7 +1429,7 @@ export class AgentController {
     const inspection = this.endpointCache.get(activeProfile.id);
     const modelInfo = inspection?.models.map(toAgentModelSummary) ?? [];
     const models = modelInfo.map((model) => model.id);
-    const selectedModel = this.config.getConfiguredModel() || activeProfile.defaultModel || models[0] || "";
+    const selectedModel = this.selectedModelFor(activeProfile, inspection);
     const selectedModelInfo = modelInfo.find((model) => model.id === selectedModel);
     return {
       profiles,
@@ -1502,8 +1508,24 @@ export class AgentController {
     }
 
     const profile = this.config.getProfiles().find((item) => item.id === activeProfileId);
-    const selectedModel = this.config.getConfiguredModel() || profile?.defaultModel || inspection.models[0]?.id || "";
+    const selectedModel = profile ? this.selectedModelFor(profile, inspection) : inspection.models[0]?.id || "";
     return inspection.models.find((model) => model.id === selectedModel);
+  }
+
+  private selectedModelFor(profile: ProviderProfile, inspection?: OpenAiEndpointInspection): string {
+    const selected = this.selectedModelByProfile.get(profile.id);
+    if (selected) {
+      return selected;
+    }
+
+    const configured = this.config.getConfiguredModel() || profile.defaultModel || "";
+    if (!configured || !inspection || inspection.models.length === 0) {
+      return configured || inspection?.models[0]?.id || "";
+    }
+
+    return inspection.models.some((model) => model.id === configured)
+      ? configured
+      : inspection.models[0].id;
   }
 }
 
@@ -1588,19 +1610,21 @@ function contextItemKindLabel(kind: ContextItem["kind"]): string {
 
 function permissionModeFromSlashCommand(command: string): PermissionMode | undefined {
   switch (command) {
-    case "/default":
-      return "default";
+    case "/manual":
     case "/review":
-      return "review";
-    case "/accept-edits":
-    case "/acceptedits":
-      return "acceptEdits";
     case "/read-only":
     case "/readonly":
-      return "readOnly";
+      return "manual";
+    case "/smart":
+    case "/default":
+    case "/accept-edits":
+    case "/acceptedits":
+      return "smart";
+    case "/full-auto":
+    case "/fullauto":
     case "/workspace-trusted":
     case "/workspacetrusted":
-      return "workspaceTrusted";
+      return "fullAuto";
     default:
       return undefined;
   }

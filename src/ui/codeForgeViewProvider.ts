@@ -132,36 +132,45 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
 </head>
 <body>
   <div class="shell">
-    <header class="toolbar">
-      <div class="brand">CodeForge</div>
-    </header>
-    <section id="settingsPanel" class="settings hidden" aria-label="CodeForge settings">
-      <div class="settings-grid">
-        <label class="wide">OpenAI API profile
-          <div class="profile-control">
-            <div class="combo settings-combo" data-combo="profile">
-              <button id="profileButton" class="combo-button" type="button" aria-haspopup="listbox" aria-expanded="false">OpenAI API</button>
-              <div id="profileMenu" class="combo-menu hidden" role="listbox" aria-label="OpenAI API profile"></div>
-              <select id="profileSelect" class="native-select" tabindex="-1" aria-hidden="true"></select>
-            </div>
-            <button id="addProfile" class="icon-button add-profile" type="button" title="Add OpenAI API profile" aria-label="Add OpenAI API profile">+</button>
+    <section id="settingsPanel" class="settings hidden" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+      <div class="settings-surface">
+        <header class="settings-header">
+          <div class="settings-heading">
+            <h2 id="settingsTitle">Settings</h2>
+            <p>OpenAI API endpoint, context, and local permission controls.</p>
           </div>
-        </label>
-        <div id="endpointMeta" class="settings-meta wide"></div>
-        <label class="wide">Profile name<input id="profileLabel" type="text" placeholder="OpenAI API profile name"></label>
-        <label class="wide">OpenAI API Base URL<input id="baseUrl" type="text" placeholder="http://127.0.0.1:1234"></label>
-        <label class="wide">API key<input id="apiKey" type="password" autocomplete="off" placeholder="Optional API key"></label>
-        <label>Model<input id="modelInput" type="text" placeholder="Model ID"></label>
-        <div id="modelMeta" class="settings-meta wide"></div>
-        <label>Context files<input id="maxFiles" type="number" min="1" max="200"></label>
-        <label>Context bytes<input id="maxBytes" type="number" min="8000" max="2000000"></label>
-        <label>Command timeout<input id="commandTimeout" type="number" min="5" max="1800"></label>
-        <label>Command output<input id="commandOutputLimit" type="number" min="16000" max="2000000"></label>
-        <label class="wide">Network allowlist<textarea id="allowlist" rows="3" placeholder="one host, origin, or CIDR per line"></textarea></label>
-        <label class="wide">Permission rules<textarea id="permissionRules" rows="5" placeholder='[{"kind":"command","pattern":"npm test","behavior":"allow","scope":"workspace"}]'></textarea></label>
-      </div>
-      <div class="settings-actions">
-        <button id="saveSettings" type="button">Save Settings</button>
+          <button id="settingsClose" class="icon-button settings-close" type="button" title="Close settings" aria-label="Close settings">&times;</button>
+        </header>
+        <div class="settings-content">
+          <div class="settings-grid">
+            <label class="wide">OpenAI API profile
+              <div class="profile-control">
+                <div class="combo settings-combo" data-combo="profile">
+                  <button id="profileButton" class="combo-button" type="button" aria-haspopup="listbox" aria-expanded="false">OpenAI API</button>
+                  <div id="profileMenu" class="combo-menu hidden" role="listbox" aria-label="OpenAI API profile"></div>
+                  <select id="profileSelect" class="native-select" tabindex="-1" aria-hidden="true"></select>
+                </div>
+                <button id="addProfile" class="icon-button add-profile" type="button" title="Add OpenAI API profile" aria-label="Add OpenAI API profile">+</button>
+              </div>
+            </label>
+            <div id="endpointMeta" class="settings-meta wide"></div>
+            <label class="wide">Profile name<input id="profileLabel" type="text" placeholder="OpenAI API profile name"></label>
+            <label class="wide">OpenAI API Base URL<input id="baseUrl" type="text" placeholder="http://127.0.0.1:1234"></label>
+            <label class="wide">API key<input id="apiKey" type="password" autocomplete="off" placeholder="Optional API key"></label>
+            <label>Model<input id="modelInput" type="text" placeholder="Model ID"></label>
+            <div id="modelMeta" class="settings-meta wide"></div>
+            <label>Context files<input id="maxFiles" type="number" min="1" max="200"></label>
+            <label>Context bytes<input id="maxBytes" type="number" min="8000" max="2000000"></label>
+            <label>Command timeout<input id="commandTimeout" type="number" min="5" max="1800"></label>
+            <label>Command output<input id="commandOutputLimit" type="number" min="16000" max="2000000"></label>
+            <label class="wide">Network allowlist<textarea id="allowlist" rows="3" placeholder="one host, origin, or CIDR per line"></textarea></label>
+            <label class="wide">Permission rules<textarea id="permissionRules" rows="5" placeholder='[{"kind":"command","pattern":"npm test","behavior":"allow","scope":"workspace"}]'></textarea></label>
+          </div>
+        </div>
+        <div class="settings-actions">
+          <button id="settingsCancel" class="secondary" type="button">Close</button>
+          <button id="saveSettings" type="button">Save Settings</button>
+        </div>
       </div>
     </section>
     <main id="messages" class="messages" aria-live="polite"></main>
@@ -175,7 +184,6 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
             <div id="slashCommandMenu" class="slash-command-menu hidden" role="listbox" aria-label="Slash commands"></div>
           </div>
           <div class="prompt-actions">
-            <button id="settingsToggle" class="icon-button settings-button" type="button" title="Settings" aria-label="Settings"><span aria-hidden="true">&#9881;</span><span class="sr-only">Settings</span></button>
             <div class="agent-mode-picker">
               <button id="agentModeButton" class="agent-mode-button" type="button" title="Agent mode" aria-label="Agent mode" aria-haspopup="listbox" aria-expanded="false"><span id="agentModeIcon" aria-hidden="true">&#11042;</span><span class="sr-only">Agent mode</span></button>
               <div id="agentModeMenu" class="agent-mode-menu hidden" role="listbox" aria-label="Agent mode"></div>
@@ -193,7 +201,10 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
             <button id="endpointPickerButton" class="endpoint-picker-button" type="button" title="Endpoint" aria-label="Endpoint" aria-haspopup="listbox" aria-expanded="false"><span class="endpoint-icon" aria-hidden="true"></span><span id="endpointPickerLabel">Local</span></button>
             <div id="endpointPickerMenu" class="endpoint-picker-menu hidden" role="listbox" aria-label="Endpoint"></div>
           </div>
-          <span id="modeStatus" class="mode-status status-item" aria-live="polite">Default Approvals</span>
+          <div class="permission-picker">
+            <button id="permissionModeButton" class="permission-mode-button" type="button" title="Approvals" aria-label="Approvals" aria-haspopup="listbox" aria-expanded="false"><span id="permissionModeLabel">Smart Approvals</span></button>
+            <div id="permissionModeMenu" class="permission-mode-menu hidden" role="listbox" aria-label="Approvals"></div>
+          </div>
           <button id="compactContext" class="context-ring" type="button" aria-label="Compact context" aria-describedby="contextTooltip">
             <span id="contextValue">0%</span>
           </button>
@@ -231,7 +242,7 @@ interface WebviewMessage {
 }
 
 function parsePermissionMode(value: unknown): PermissionMode | undefined {
-  return value === "default" || value === "review" || value === "acceptEdits" || value === "readOnly" || value === "workspaceTrusted"
+  return value === "manual" || value === "smart" || value === "fullAuto"
     ? value
     : undefined;
 }

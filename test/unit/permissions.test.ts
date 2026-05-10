@@ -3,17 +3,25 @@ import assert from "node:assert/strict";
 import { evaluateActionPermission, normalizePermissionPolicy, parsePermissionRules } from "../../src/core/permissions";
 import { PermissionPolicy } from "../../src/core/types";
 
-test("allows reads and asks for side effects in default mode", () => {
-  const policy: PermissionPolicy = { mode: "default", rules: [] };
+test("smart mode allows reads, small edits, and asks for commands", () => {
+  const policy: PermissionPolicy = { mode: "smart", rules: [] };
   assert.equal(evaluateActionPermission({ type: "read_file", path: "src/index.ts" }, policy).behavior, "allow");
   assert.equal(evaluateActionPermission({ type: "search_text", query: "AgentController" }, policy).behavior, "allow");
   assert.equal(evaluateActionPermission({ type: "list_diagnostics", path: "src/index.ts" }, policy).behavior, "allow");
+  assert.equal(
+    evaluateActionPermission(
+      { type: "propose_patch", patch: "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-a\n+b\n" },
+      policy
+    ).behavior,
+    "allow"
+  );
+  assert.equal(evaluateActionPermission({ type: "write_file", path: "src/new.ts", content: "export {};" }, policy).behavior, "ask");
   assert.equal(evaluateActionPermission({ type: "run_command", command: "npm test" }, policy).behavior, "ask");
 });
 
 test("applies deny ask allow precedence", () => {
   const policy: PermissionPolicy = {
-    mode: "default",
+    mode: "smart",
     rules: [
       { kind: "command", pattern: "npm test", behavior: "allow", scope: "workspace" },
       { kind: "command", pattern: "npm *", behavior: "ask", scope: "workspace" },
@@ -27,26 +35,25 @@ test("applies deny ask allow precedence", () => {
   assert.equal(decision.rule?.scope, "user");
 });
 
-test("review and read-only modes constrain side effects", () => {
+test("manual mode asks for side effects even with allow rules", () => {
   assert.equal(
     evaluateActionPermission(
       { type: "run_command", command: "npm test" },
-      { mode: "review", rules: [{ kind: "command", pattern: "npm test", behavior: "allow", scope: "workspace" }] }
+      { mode: "manual", rules: [{ kind: "command", pattern: "npm test", behavior: "allow", scope: "workspace" }] }
     ).behavior,
     "ask"
   );
-
   assert.equal(
     evaluateActionPermission(
       { type: "propose_patch", patch: "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-a\n+b\n" },
-      { mode: "readOnly", rules: [] }
+      { mode: "manual", rules: [] }
     ).behavior,
-    "deny"
+    "ask"
   );
 });
 
-test("acceptEdits mode allows validated patches but still asks for commands", () => {
-  const policy: PermissionPolicy = { mode: "acceptEdits", rules: [] };
+test("full auto mode allows edits and commands", () => {
+  const policy: PermissionPolicy = { mode: "fullAuto", rules: [] };
   assert.equal(
     evaluateActionPermission(
       { type: "propose_patch", patch: "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-a\n+b\n" },
@@ -54,7 +61,7 @@ test("acceptEdits mode allows validated patches but still asks for commands", ()
     ).behavior,
     "allow"
   );
-  assert.equal(evaluateActionPermission({ type: "run_command", command: "npm test" }, policy).behavior, "ask");
+  assert.equal(evaluateActionPermission({ type: "run_command", command: "npm test" }, policy).behavior, "allow");
 });
 
 test("parses persisted permission rules safely", () => {
@@ -66,6 +73,6 @@ test("parses persisted permission rules safely", () => {
     ],
     "workspace"
   );
-  const policy = normalizePermissionPolicy({ mode: "default", rules });
+  const policy = normalizePermissionPolicy({ mode: "smart", rules });
   assert.deepEqual(policy.rules, [{ kind: "path", pattern: "src/*", behavior: "deny", scope: "user", description: undefined }]);
 });

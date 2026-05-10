@@ -85,7 +85,7 @@ export interface NetworkPolicy {
 }
 
 export type AgentMode = "agent" | "ask" | "plan";
-export type PermissionMode = "default" | "review" | "acceptEdits" | "readOnly" | "workspaceTrusted";
+export type PermissionMode = "manual" | "smart" | "fullAuto";
 export type PermissionBehavior = "allow" | "ask" | "deny";
 export type PermissionRuleKind = "tool" | "path" | "command" | "endpoint";
 export type PermissionRuleScope = "session" | "workspace" | "user";

@@ -7,8 +7,9 @@
     input: document.getElementById("promptInput"),
     slashCommandMenu: document.getElementById("slashCommandMenu"),
     stopRun: document.getElementById("stopRun"),
-    settingsToggle: document.getElementById("settingsToggle"),
     settingsPanel: document.getElementById("settingsPanel"),
+    settingsClose: document.getElementById("settingsClose"),
+    settingsCancel: document.getElementById("settingsCancel"),
     endpointPickerButton: document.getElementById("endpointPickerButton"),
     endpointPickerMenu: document.getElementById("endpointPickerMenu"),
     endpointPickerLabel: document.getElementById("endpointPickerLabel"),
@@ -34,7 +35,9 @@
     maxBytes: document.getElementById("maxBytes"),
     commandTimeout: document.getElementById("commandTimeout"),
     commandOutputLimit: document.getElementById("commandOutputLimit"),
-    modeStatus: document.getElementById("modeStatus"),
+    permissionModeButton: document.getElementById("permissionModeButton"),
+    permissionModeMenu: document.getElementById("permissionModeMenu"),
+    permissionModeLabel: document.getElementById("permissionModeLabel"),
     permissionRules: document.getElementById("permissionRules"),
     allowlist: document.getElementById("allowlist"),
     saveSettings: document.getElementById("saveSettings")
@@ -71,22 +74,18 @@
     { name: "agent", description: "Switch to Agent mode", argumentHint: "[task]" },
     { name: "ask", description: "Switch to Ask mode", argumentHint: "[question]" },
     { name: "plan", description: "Switch to Plan mode", argumentHint: "[task]" },
-    { name: "default", description: "Set permission mode to Default" },
-    { name: "review", description: "Set permission mode to Review" },
-    { name: "accept-edits", description: "Set permission mode to Accept edits" },
-    { name: "read-only", description: "Set permission mode to Read only" },
-    { name: "workspace-trusted", description: "Set permission mode to Workspace trusted" },
+    { name: "manual", description: "Set approvals to Manual" },
+    { name: "smart", description: "Set approvals to Smart" },
+    { name: "full-auto", description: "Set approvals to Full Auto" },
     { name: "config", description: "Open CodeForge settings" },
     { name: "settings", description: "Open CodeForge settings" },
     { name: "reset", description: "Reset the current chat session" },
     { name: "cancel", description: "Stop the current request" }
   ];
   const permissionModeOptions = [
-    { value: "default", label: "Default" },
-    { value: "review", label: "Review" },
-    { value: "acceptEdits", label: "Accept edits" },
-    { value: "readOnly", label: "Read only" },
-    { value: "workspaceTrusted", label: "Workspace trusted" }
+    { value: "manual", label: "Manual", description: "Ask before edits and local commands" },
+    { value: "smart", label: "Smart", description: "Allow reads and small edits; ask before risky actions" },
+    { value: "fullAuto", label: "Full Auto", description: "Proceed without most approval prompts" }
   ];
   const agentModeOptions = [
     { value: "agent", label: "Agent", icon: "⬢", description: "Autonomous coding with approved local actions" },
@@ -152,7 +151,7 @@
       closeMenus();
       hideContextTooltip();
       hideSlashCommandMenu();
-      elements.settingsPanel?.classList.add("hidden");
+      closeSettingsWindow();
     }
   });
 
@@ -173,6 +172,11 @@
     toggleComboMenu(elements.endpointPickerMenu, elements.endpointPickerButton);
   });
 
+  on(elements.permissionModeButton, "click", () => {
+    renderPermissionModePicker();
+    toggleComboMenu(elements.permissionModeMenu, elements.permissionModeButton);
+  });
+
   on(elements.agentModeButton, "click", () => {
     renderAgentModePicker();
     toggleComboMenu(elements.agentModeMenu, elements.agentModeButton);
@@ -184,9 +188,18 @@
     toggleComboMenu(elements.modelPickerMenu, elements.modelPickerButton);
   });
 
-  on(elements.settingsToggle, "click", () => {
-    closeMenus();
-    elements.settingsPanel?.classList.toggle("hidden");
+  on(elements.settingsClose, "click", () => {
+    closeSettingsWindow();
+  });
+
+  on(elements.settingsCancel, "click", () => {
+    closeSettingsWindow();
+  });
+
+  on(elements.settingsPanel, "pointerdown", (event) => {
+    if (event.target === elements.settingsPanel) {
+      closeSettingsWindow();
+    }
   });
 
   on(elements.profileSelect, "change", () => {
@@ -198,7 +211,7 @@
 
   window.addEventListener("click", (event) => {
     const target = event.target;
-    if (target instanceof Element && (target === elements.input || target.closest(".slash-command-menu") || target.closest(".combo") || target.closest(".endpoint-picker") || target.closest(".agent-mode-picker") || target.closest(".model-picker"))) {
+    if (target instanceof Element && (target === elements.input || target.closest(".slash-command-menu") || target.closest(".combo") || target.closest(".endpoint-picker") || target.closest(".permission-picker") || target.closest(".agent-mode-picker") || target.closest(".model-picker"))) {
       return;
     }
     closeMenus();
@@ -212,7 +225,7 @@
   });
   window.addEventListener("scroll", (event) => {
     const target = event.target;
-    if (target instanceof Element && (target.closest(".combo-menu") || target.closest(".slash-command-menu") || target.closest(".endpoint-picker-menu") || target.closest(".agent-mode-menu") || target.closest(".model-picker-menu"))) {
+    if (target instanceof Element && (target.closest(".combo-menu") || target.closest(".slash-command-menu") || target.closest(".endpoint-picker-menu") || target.closest(".permission-mode-menu") || target.closest(".agent-mode-menu") || target.closest(".model-picker-menu"))) {
       return;
     }
     closeMenus();
@@ -320,7 +333,7 @@
       state = { ...(state || {}), contextUsage: message.usage };
       renderContextUsage(message.usage);
     } else if (message.type === "openSettings") {
-      elements.settingsPanel?.classList.remove("hidden");
+      openSettingsWindow();
       renderState();
     } else if (message.type === "message") {
       if (message.role === "assistant" && streamingMessage) {
@@ -412,9 +425,26 @@
     setValue(elements.maxBytes, String(state.settings?.maxBytes ?? 120000));
     setValue(elements.commandTimeout, String(state.settings?.commandTimeoutSeconds ?? 120));
     setValue(elements.commandOutputLimit, String(state.settings?.commandOutputLimitBytes ?? 200000));
-    renderPermissionModeStatus(state.settings?.permissionMode || "default");
+    renderPermissionModePicker();
     setValue(elements.permissionRules, JSON.stringify(state.settings?.permissionRules || [], null, 2));
     setValue(elements.allowlist, (state.settings?.allowlist || []).join("\n"));
+  }
+
+  function openSettingsWindow() {
+    closeMenus();
+    hideContextTooltip();
+    hideSlashCommandMenu();
+    elements.settingsPanel?.classList.remove("hidden");
+    elements.settingsClose?.focus();
+  }
+
+  function closeSettingsWindow() {
+    const wasOpen = Boolean(elements.settingsPanel && !elements.settingsPanel.classList.contains("hidden"));
+    closeMenus();
+    elements.settingsPanel?.classList.add("hidden");
+    if (wasOpen) {
+      elements.input?.focus();
+    }
   }
 
   function renderEndpointFields() {
@@ -614,11 +644,46 @@
     return nextValue;
   }
 
-  function renderPermissionModeStatus(selectedValue) {
-    const selectedOption = permissionModeOptions.find((option) => option.value === selectedValue) || permissionModeOptions[0];
-    if (elements.modeStatus) {
-      elements.modeStatus.textContent = `${selectedOption.label} Approvals`;
+  function renderPermissionModePicker() {
+    const selectedValue = normalizePermissionMode(state?.settings?.permissionMode);
+    const selectedOption = permissionModeOptions.find((option) => option.value === selectedValue) || permissionModeOptions[1];
+    if (elements.permissionModeLabel) {
+      elements.permissionModeLabel.textContent = `${selectedOption.label} Approvals`;
     }
+    if (elements.permissionModeButton) {
+      elements.permissionModeButton.title = `Approvals: ${selectedOption.label}`;
+      elements.permissionModeButton.setAttribute("aria-label", `Approvals: ${selectedOption.label}`);
+      elements.permissionModeButton.dataset.mode = selectedOption.value;
+    }
+    renderComboMenu(elements.permissionModeMenu, elements.permissionModeButton, permissionModeOptions, selectedValue, "Smart", choosePermissionMode, { preserveButtonText: true, includeDescription: true });
+  }
+
+  function choosePermissionMode(value) {
+    const nextMode = normalizePermissionMode(value);
+    if (state) {
+      state = {
+        ...state,
+        settings: {
+          ...(state.settings || {}),
+          permissionMode: nextMode
+        }
+      };
+    }
+    renderPermissionModePicker();
+    vscode.postMessage({ type: "setPermissionMode", permissionMode: nextMode });
+  }
+
+  function normalizePermissionMode(value) {
+    if (value === "review" || value === "readOnly") {
+      return "manual";
+    }
+    if (value === "workspaceTrusted") {
+      return "fullAuto";
+    }
+    if (value === "default" || value === "acceptEdits") {
+      return "smart";
+    }
+    return permissionModeOptions.some((option) => option.value === value) ? value : "smart";
   }
 
   function renderAgentModePicker() {
@@ -786,6 +851,7 @@
     const combos = [
       [elements.profileButton, elements.profileMenu],
       [elements.endpointPickerButton, elements.endpointPickerMenu],
+      [elements.permissionModeButton, elements.permissionModeMenu],
       [elements.agentModeButton, elements.agentModeMenu],
       [elements.modelPickerButton, elements.modelPickerMenu]
     ];
@@ -851,10 +917,39 @@
       elements.slashCommandMenu.append(item);
     });
 
+    elements.slashCommandMenu.style.visibility = "hidden";
     elements.slashCommandMenu.classList.remove("hidden");
+    positionSlashCommandMenu();
+    elements.slashCommandMenu.style.visibility = "";
     elements.input?.setAttribute("aria-expanded", "true");
     elements.input?.setAttribute("aria-activedescendant", `slash-command-${slashCommandIndex}`);
     updateSlashCommandSelection();
+  }
+
+  function positionSlashCommandMenu() {
+    if (!elements.slashCommandMenu || !elements.input) {
+      return;
+    }
+
+    const margin = 4;
+    const gap = 6;
+    const rect = elements.input.getBoundingClientRect();
+    const hostRect = elements.input.closest(".prompt-input-wrap")?.getBoundingClientRect() || rect;
+    const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
+    const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+    const width = Math.min(Math.max(hostRect.width, 220), Math.max(120, viewportWidth - margin * 2));
+    const left = Math.min(Math.max(margin, hostRect.left), Math.max(margin, viewportWidth - width - margin));
+    const availableAbove = Math.max(rect.top - margin - gap, 80);
+    const maxHeight = Math.min(300, availableAbove, viewportHeight - margin * 2);
+    const naturalHeight = Math.min(elements.slashCommandMenu.scrollHeight || maxHeight, maxHeight);
+    const top = Math.max(margin, rect.top - naturalHeight - gap);
+
+    elements.slashCommandMenu.style.left = `${left}px`;
+    elements.slashCommandMenu.style.right = "auto";
+    elements.slashCommandMenu.style.top = `${top}px`;
+    elements.slashCommandMenu.style.bottom = "auto";
+    elements.slashCommandMenu.style.width = `${width}px`;
+    elements.slashCommandMenu.style.maxHeight = `${maxHeight}px`;
   }
 
   function slashCommandContext() {
