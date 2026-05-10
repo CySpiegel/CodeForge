@@ -84,6 +84,20 @@ export interface NetworkPolicy {
   readonly allowlist: readonly string[];
 }
 
+export type McpTransportKind = "stdio" | "http" | "sse";
+
+export interface McpServerConfig {
+  readonly id: string;
+  readonly label: string;
+  readonly enabled?: boolean;
+  readonly transport: McpTransportKind;
+  readonly command?: string;
+  readonly args?: readonly string[];
+  readonly cwd?: string;
+  readonly url?: string;
+  readonly headers?: Readonly<Record<string, string>>;
+}
+
 export type AgentMode = "agent" | "ask" | "plan";
 export type PermissionMode = "manual" | "smart" | "fullAuto";
 export type PermissionBehavior = "allow" | "ask" | "deny";
@@ -116,7 +130,7 @@ export interface ContextLimits {
 }
 
 export interface ContextItem {
-  readonly kind: "activeFile" | "selection" | "openFile" | "fileTree" | "file" | "projectInstructions" | "memory";
+  readonly kind: "activeFile" | "selection" | "openFile" | "fileTree" | "file" | "projectInstructions" | "memory" | "mcpResource";
   readonly label: string;
   readonly content: string;
 }
@@ -163,7 +177,8 @@ export type AgentAction =
   | WriteFileAction
   | EditFileAction
   | OpenDiffAction
-  | RunCommandAction;
+  | RunCommandAction
+  | McpCallToolAction;
 
 export interface ListFilesAction {
   readonly type: "list_files";
@@ -241,7 +256,15 @@ export interface RunCommandAction {
   readonly reason?: string;
 }
 
-export type ApprovalKind = "read" | "search" | "edit" | "preview" | "command";
+export interface McpCallToolAction {
+  readonly type: "mcp_call_tool";
+  readonly serverId: string;
+  readonly toolName: string;
+  readonly arguments?: Readonly<Record<string, unknown>>;
+  readonly reason?: string;
+}
+
+export type ApprovalKind = "read" | "search" | "edit" | "preview" | "command" | "service";
 
 export interface ApprovalRequest {
   readonly id: string;

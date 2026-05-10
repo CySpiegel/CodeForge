@@ -192,6 +192,8 @@ Exit criteria:
 
 Purpose: add local protocol integrations while preserving offline-first network policy.
 
+Status: complete for the VS Code extension baseline. MCP servers are configured through the in-app settings screen, validated against the offline network policy, exposed through slash commands, and called through the shared permission engine. Streamable HTTP, legacy SSE, and stdio transports are supported. MCP tools return structured tool results, and MCP resources can be explicitly attached to chat context.
+
 Scope:
 - Add MCP client support through an adapter.
 - Allow only explicitly configured MCP servers.
@@ -210,18 +212,39 @@ Exit criteria:
 
 Purpose: bring useful Harnes-style delegation into VS Code without becoming a terminal swarm UI.
 
+Status: initial implementation in progress. CodeForge now has a VS Code-native worker task layer for bounded local workers. The first slice supports read-only Explore, Plan, Review, and Verify workers that run against the active OpenAI-compatible endpoint, inherit the same workspace context policy, persist worker records in the local session JSONL stream, and render worker status in the extension view. Write-capable workers, command-capable verification, and permission bubbling for side effects remain follow-up work.
+
 Scope:
-- Add bounded worker sessions for codebase exploration, review, and verification.
-- Keep workers local to the same configured endpoint and workspace policy.
-- Give workers isolated context, read-only defaults, and explicit write scopes.
-- Present worker output as summarized session artifacts, not separate terminals.
-- Add cancellation and transcript persistence for workers.
+- Add bounded worker sessions for codebase exploration, implementation planning, review, and verification.
+- Keep workers local to the same configured OpenAI-compatible endpoint, selected model, offline network policy, and workspace context policy.
+- Give every worker an isolated transcript, abort controller, token/tool progress, and capped status summary.
+- Enforce worker capabilities in code, not just prompts. Explore, Plan, Review, and the initial Verify worker are read-only and may only use VS Code-native read/search/diagnostic tools.
+- Present worker output as summarized session artifacts in the VS Code extension view, not separate terminals, tmux panes, remote sessions, or website views.
+- Persist worker start/progress/completion/failure records in local session storage.
+- Add slash commands and UI affordances:
+  - `/workers`
+  - `/worker plan <task>`
+  - `/worker output <id>`
+  - `/worker stop <id>`
+  - `/explore <task>`
+  - `/review <scope>`
+  - `/verify <task>`
+- Add a future permission bridge before allowing any worker to run terminal commands, call MCP tools, or write files.
+- Add explicit write scopes before adding implementation workers. No worker may make hidden background edits.
 
 Exit criteria:
 - Users can run a review or exploration worker from the VS Code extension view.
 - Worker permissions cannot exceed the parent session.
 - Worker summaries include files inspected, claims, and confidence.
 - No hidden background edits.
+- Reloading a workspace session can replay completed worker records.
+- Running workers can be stopped from the extension view.
+
+Follow-up slices:
+- Command-capable Verify worker with parent approval bubbling for `run_command`.
+- Scoped implementation workers that can only propose diffs for explicit paths and must surface VS Code diff previews through the parent approval queue.
+- Worker transcript viewer polish, filtering, and transcript export.
+- Worker output attachment back into the main chat context.
 
 ## Phase 10: Packaging, Reliability, And Local Operations
 

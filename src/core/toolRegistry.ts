@@ -7,6 +7,7 @@ import {
   GrepTextAction,
   ListDiagnosticsAction,
   ListFilesAction,
+  McpCallToolAction,
   ProposePatchAction,
   ReadFileAction,
   RunCommandAction,
@@ -481,6 +482,51 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
     summarize(action) {
       return action.type === "run_command" ? action.command : "Run command";
     }
+  },
+  {
+    name: "mcp_call_tool",
+    description: "Call a tool on an explicitly configured local/on-prem MCP server after permission approval.",
+    risk: "command",
+    concurrencySafe: false,
+    requiresApproval: true,
+    parameters: {
+      type: "object",
+      properties: {
+        serverId: { type: "string" },
+        toolName: { type: "string" },
+        arguments: { type: "object" },
+        reason: { type: "string" }
+      },
+      required: ["serverId", "toolName"],
+      additionalProperties: false
+    },
+    parse(input) {
+      const args = input.arguments;
+      return typeof input.serverId === "string" && typeof input.toolName === "string"
+        ? {
+          type: "mcp_call_tool",
+          serverId: input.serverId,
+          toolName: input.toolName,
+          arguments: args === undefined ? undefined : isRecord(args) ? args : undefined,
+          reason: optionalString(input.reason)
+        }
+        : undefined;
+    },
+    validate(action) {
+      if (action.type !== "mcp_call_tool") {
+        return invalidToolType(action, "mcp_call_tool");
+      }
+      if (!isSafeMcpName(action.serverId)) {
+        return { ok: false, message: "MCP serverId must contain only letters, numbers, dots, underscores, or dashes." };
+      }
+      if (!isSafeMcpName(action.toolName)) {
+        return { ok: false, message: "MCP toolName must contain only letters, numbers, dots, slashes, underscores, or dashes." };
+      }
+      return { ok: true };
+    },
+    summarize(action) {
+      return action.type === "mcp_call_tool" ? `Call MCP ${action.serverId}/${action.toolName}` : "Call MCP tool";
+    }
   }
 ];
 
@@ -507,7 +553,7 @@ export function isLocalReadOnlyAction(action: AgentAction): action is ListFilesA
   return Boolean(tool && !tool.requiresApproval && tool.concurrencySafe);
 }
 
-export function isApprovalAction(action: AgentAction): action is ProposePatchAction | WriteFileAction | EditFileAction | RunCommandAction {
+export function isApprovalAction(action: AgentAction): action is ProposePatchAction | WriteFileAction | EditFileAction | RunCommandAction | McpCallToolAction {
   const tool = findTool(action.type);
   return Boolean(tool?.requiresApproval);
 }
@@ -564,6 +610,14 @@ function optionalPositiveInteger(value: unknown): number | undefined {
     return undefined;
   }
   return Math.max(1, Math.floor(value));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isSafeMcpName(value: string): boolean {
+  return /^[A-Za-z0-9._/-]{1,160}$/.test(value) && !value.includes("..");
 }
 
 function validateSearchQuery(query: string): ToolValidationResult {

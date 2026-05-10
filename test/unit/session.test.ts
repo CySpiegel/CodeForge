@@ -66,3 +66,39 @@ test("message replacement records compact restored context", () => {
   assert.ok(snapshot);
   assert.deepEqual(snapshot.messages.map((message) => message.content), ["system", "Compacted session context:\n\nsummary", "next"]);
 });
+
+test("keeps worker records in session snapshots", () => {
+  const records: SessionRecord[] = [
+    { type: "session_started", sessionId: "session-1", createdAt: 1, schemaVersion: 1, title: "CodeForge session" },
+    {
+      type: "worker",
+      sessionId: "session-1",
+      createdAt: 2,
+      event: "started",
+      worker: {
+        id: "worker-1",
+        kind: "explore",
+        label: "Explore",
+        status: "running",
+        prompt: "Find auth routes",
+        startedAt: 2,
+        updatedAt: 2,
+        toolUseCount: 0,
+        tokenCount: 0,
+        filesInspected: []
+      },
+      transcriptEntry: {
+        workerId: "worker-1",
+        createdAt: 2,
+        role: "status",
+        text: "started"
+      }
+    }
+  ];
+
+  const snapshot = buildSessionSnapshot(records);
+
+  assert.ok(snapshot);
+  assert.equal(snapshot.records.length, 2);
+  assert.equal(snapshot.records[1]?.type, "worker");
+});

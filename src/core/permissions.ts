@@ -96,13 +96,15 @@ interface PermissionContext {
   readonly toolName: AgentAction["type"];
   readonly paths: readonly string[];
   readonly command?: string;
+  readonly endpoint?: string;
 }
 
 function buildPermissionContext(action: AgentAction): PermissionContext {
   return {
     toolName: action.type,
     paths: actionPaths(action),
-    command: action.type === "run_command" ? action.command : undefined
+    command: action.type === "run_command" ? action.command : undefined,
+    endpoint: action.type === "mcp_call_tool" ? action.serverId : undefined
   };
 }
 
@@ -155,7 +157,7 @@ function ruleMatchesContext(rule: PermissionRule, context: PermissionContext): b
     case "command":
       return Boolean(context.command && commandPatternMatches(rule.pattern, context.command));
     case "endpoint":
-      return false;
+      return Boolean(context.endpoint && wildcardMatch(rule.pattern, context.endpoint));
   }
 }
 
@@ -185,6 +187,14 @@ function decisionFromModeConstraint(action: AgentAction, mode: PermissionMode): 
       behavior: "ask",
       source: "mode",
       reason: "Smart approval mode asks before terminal commands."
+    };
+  }
+
+  if (mode === "smart" && action.type === "mcp_call_tool") {
+    return {
+      behavior: "ask",
+      source: "mode",
+      reason: "Smart approval mode asks before MCP service tool calls."
     };
   }
 
@@ -245,7 +255,7 @@ function permissionRuleDescription(rule: PermissionRule): string {
 }
 
 function isSideEffectAction(action: AgentAction): boolean {
-  return action.type === "propose_patch" || action.type === "write_file" || action.type === "edit_file" || action.type === "run_command";
+  return action.type === "propose_patch" || action.type === "write_file" || action.type === "edit_file" || action.type === "run_command" || action.type === "mcp_call_tool";
 }
 
 function isRiskyEditAction(action: AgentAction): boolean {

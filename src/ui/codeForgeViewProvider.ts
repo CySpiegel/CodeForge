@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { AgentController, AgentUiEvent } from "../agent/agentController";
+import { normalizeMcpServerConfigs } from "../adapters/vscodeConfig";
 import { parsePermissionRules } from "../core/permissions";
 import { AgentMode, PermissionMode } from "../core/types";
 
@@ -71,6 +72,10 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
       await this.controller.resumeSession(typeof message.sessionId === "string" ? message.sessionId : undefined);
     } else if (message.type === "cancel") {
       this.controller.cancel();
+    } else if (message.type === "workerStop" && typeof message.workerId === "string") {
+      this.controller.stopWorker(message.workerId);
+    } else if (message.type === "workerOutput" && typeof message.workerId === "string") {
+      this.controller.showWorkerOutput(message.workerId);
     } else if (message.type === "selectModel" && typeof message.model === "string") {
       await this.controller.selectModel(message.model);
     } else if (message.type === "selectProfile" && typeof message.profileId === "string") {
@@ -100,6 +105,7 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
         apiKey: typeof message.apiKey === "string" ? message.apiKey : undefined,
         model: typeof message.model === "string" ? message.model : undefined,
         allowlist: Array.isArray(message.allowlist) ? message.allowlist.filter((item): item is string => typeof item === "string") : undefined,
+        mcpServers: Array.isArray(message.mcpServers) ? message.mcpServers : undefined,
         maxFiles: typeof message.maxFiles === "number" ? message.maxFiles : undefined,
         maxBytes: typeof message.maxBytes === "number" ? message.maxBytes : undefined,
         commandTimeoutSeconds: typeof message.commandTimeoutSeconds === "number" ? message.commandTimeoutSeconds : undefined,
@@ -107,6 +113,19 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
         permissionMode: parsePermissionMode(message.permissionMode),
         permissionRules: message.permissionRules === undefined ? undefined : parsePermissionRules(message.permissionRules, "workspace")
       });
+    } else if (message.type === "probeMcpServers") {
+      await this.controller.inspectMcpServers(
+        typeof message.serverId === "string" ? message.serverId : undefined,
+        normalizeMcpServerConfigs(Array.isArray(message.mcpServers) ? message.mcpServers : undefined)
+      );
+    } else if (message.type === "attachMcpResource" && typeof message.serverId === "string" && typeof message.uri === "string") {
+      await this.controller.attachMcpResource(
+        message.serverId,
+        message.uri,
+        normalizeMcpServerConfigs(Array.isArray(message.mcpServers) ? message.mcpServers : undefined)
+      );
+    } else if (message.type === "detachMcpResource" && typeof message.serverId === "string" && typeof message.uri === "string") {
+      this.controller.detachMcpResource(message.serverId, message.uri);
     }
   }
 
@@ -141,30 +160,70 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
           </div>
           <button id="settingsClose" class="icon-button settings-close" type="button" title="Close settings" aria-label="Close settings">&times;</button>
         </header>
+        <div class="settings-tabs" role="tablist" aria-label="Settings sections">
+          <button id="settingsTabGeneral" class="settings-tab" type="button" role="tab" aria-selected="true" data-settings-tab="general">Endpoint</button>
+          <button id="settingsTabMcp" class="settings-tab" type="button" role="tab" aria-selected="false" data-settings-tab="mcp">MCP</button>
+          <button id="settingsTabPermissions" class="settings-tab" type="button" role="tab" aria-selected="false" data-settings-tab="permissions">Permissions</button>
+        </div>
         <div class="settings-content">
-          <div class="settings-grid">
-            <label class="wide">OpenAI API profile
-              <div class="profile-control">
-                <div class="combo settings-combo" data-combo="profile">
-                  <button id="profileButton" class="combo-button" type="button" aria-haspopup="listbox" aria-expanded="false">OpenAI API</button>
-                  <div id="profileMenu" class="combo-menu hidden" role="listbox" aria-label="OpenAI API profile"></div>
-                  <select id="profileSelect" class="native-select" tabindex="-1" aria-hidden="true"></select>
+          <div id="settingsPaneGeneral" class="settings-pane" data-settings-pane="general">
+            <div class="settings-grid">
+              <label class="wide">OpenAI API profile
+                <div class="profile-control">
+                  <div class="combo settings-combo" data-combo="profile">
+                    <button id="profileButton" class="combo-button" type="button" aria-haspopup="listbox" aria-expanded="false">OpenAI API</button>
+                    <div id="profileMenu" class="combo-menu hidden" role="listbox" aria-label="OpenAI API profile"></div>
+                    <select id="profileSelect" class="native-select" tabindex="-1" aria-hidden="true"></select>
+                  </div>
+                  <button id="addProfile" class="icon-button add-profile" type="button" title="Add OpenAI API profile" aria-label="Add OpenAI API profile">+</button>
                 </div>
-                <button id="addProfile" class="icon-button add-profile" type="button" title="Add OpenAI API profile" aria-label="Add OpenAI API profile">+</button>
-              </div>
-            </label>
-            <div id="endpointMeta" class="settings-meta wide"></div>
-            <label class="wide">Profile name<input id="profileLabel" type="text" placeholder="OpenAI API profile name"></label>
-            <label class="wide">OpenAI API Base URL<input id="baseUrl" type="text" placeholder="http://127.0.0.1:1234"></label>
-            <label class="wide">API key<input id="apiKey" type="password" autocomplete="off" placeholder="Optional API key"></label>
-            <label>Model<input id="modelInput" type="text" placeholder="Model ID"></label>
-            <div id="modelMeta" class="settings-meta wide"></div>
-            <label>Context files<input id="maxFiles" type="number" min="1" max="200"></label>
-            <label>Context bytes<input id="maxBytes" type="number" min="8000" max="2000000"></label>
-            <label>Command timeout<input id="commandTimeout" type="number" min="5" max="1800"></label>
-            <label>Command output<input id="commandOutputLimit" type="number" min="16000" max="2000000"></label>
-            <label class="wide">Network allowlist<textarea id="allowlist" rows="3" placeholder="one host, origin, or CIDR per line"></textarea></label>
-            <label class="wide">Permission rules<textarea id="permissionRules" rows="5" placeholder='[{"kind":"command","pattern":"npm test","behavior":"allow","scope":"workspace"}]'></textarea></label>
+              </label>
+              <div id="endpointMeta" class="settings-meta wide"></div>
+              <label class="wide">Profile name<input id="profileLabel" type="text" placeholder="OpenAI API profile name"></label>
+              <label class="wide">OpenAI API Base URL<input id="baseUrl" type="text" placeholder="http://127.0.0.1:1234"></label>
+              <label class="wide">API key<input id="apiKey" type="password" autocomplete="off" placeholder="Optional API key"></label>
+              <label>Model<input id="modelInput" type="text" placeholder="Model ID"></label>
+              <div id="modelMeta" class="settings-meta wide"></div>
+              <label>Context files<input id="maxFiles" type="number" min="1" max="200"></label>
+              <label>Context bytes<input id="maxBytes" type="number" min="8000" max="2000000"></label>
+              <label>Command timeout<input id="commandTimeout" type="number" min="5" max="1800"></label>
+              <label>Command output<input id="commandOutputLimit" type="number" min="16000" max="2000000"></label>
+              <label class="wide">Network allowlist<textarea id="allowlist" rows="3" placeholder="one host, origin, or CIDR per line"></textarea></label>
+            </div>
+          </div>
+          <div id="settingsPaneMcp" class="settings-pane hidden" data-settings-pane="mcp">
+            <div class="mcp-screen">
+              <section class="mcp-sidebar" aria-label="MCP servers">
+                <div class="mcp-section-header">
+                  <strong>MCP servers</strong>
+                  <button id="addMcpServer" class="icon-button" type="button" title="Add MCP server" aria-label="Add MCP server">+</button>
+                </div>
+                <div id="mcpServerList" class="mcp-server-list"></div>
+              </section>
+              <section class="mcp-editor" aria-label="MCP server editor">
+                <div class="settings-grid">
+                  <label>ID<input id="mcpId" type="text" placeholder="local-tools"></label>
+                  <label>Name<input id="mcpLabel" type="text" placeholder="Local tools"></label>
+                  <label>Transport<select id="mcpTransport"><option value="http">Streamable HTTP</option><option value="sse">SSE</option><option value="stdio">stdio</option></select></label>
+                  <label class="checkbox-label"><input id="mcpEnabled" type="checkbox"> Enabled</label>
+                  <label class="wide">HTTP/SSE URL<input id="mcpUrl" type="text" placeholder="http://127.0.0.1:3000/mcp"></label>
+                  <label>Command<input id="mcpCommand" type="text" placeholder="node"></label>
+                  <label>Arguments<input id="mcpArgs" type="text" placeholder="server.js --flag"></label>
+                  <label class="wide">Working directory<input id="mcpCwd" type="text" placeholder="/path/to/workspace-or-server"></label>
+                  <label class="wide">Headers<textarea id="mcpHeaders" rows="4" placeholder='{"Authorization":"Bearer local-token"}'></textarea></label>
+                </div>
+                <div class="mcp-actions">
+                  <button id="deleteMcpServer" class="secondary" type="button">Delete Selected</button>
+                  <button id="checkMcpServer" type="button">Check Server</button>
+                </div>
+                <div id="mcpProbePanel" class="mcp-probe-panel" aria-live="polite"></div>
+              </section>
+            </div>
+          </div>
+          <div id="settingsPanePermissions" class="settings-pane hidden" data-settings-pane="permissions">
+            <div class="settings-grid">
+              <label class="wide">Permission rules<textarea id="permissionRules" rows="8" placeholder='[{"kind":"command","pattern":"npm test","behavior":"allow","scope":"workspace"}]'></textarea></label>
+            </div>
           </div>
         </div>
         <div class="settings-actions">
@@ -174,6 +233,7 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
       </div>
     </section>
     <main id="messages" class="messages" aria-live="polite"></main>
+    <section id="workersPanel" class="workers-panel hidden" aria-label="CodeForge workers"></section>
     <section id="approvals" class="approvals" aria-label="Pending approvals"></section>
     <footer class="composer">
       <form id="promptForm" class="prompt">
@@ -224,6 +284,9 @@ interface WebviewMessage {
   readonly text?: string;
   readonly id?: string;
   readonly sessionId?: string;
+  readonly workerId?: string;
+  readonly serverId?: string;
+  readonly uri?: string;
   readonly model?: string;
   readonly profileId?: string;
   readonly activeProfileId?: string;
@@ -232,6 +295,7 @@ interface WebviewMessage {
   readonly baseUrl?: string;
   readonly apiKey?: string;
   readonly allowlist?: readonly unknown[];
+  readonly mcpServers?: readonly unknown[];
   readonly agentMode?: string;
   readonly permissionMode?: string;
   readonly permissionRules?: readonly unknown[];

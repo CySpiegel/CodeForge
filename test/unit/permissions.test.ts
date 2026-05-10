@@ -17,6 +17,7 @@ test("smart mode allows reads, small edits, and asks for commands", () => {
   );
   assert.equal(evaluateActionPermission({ type: "write_file", path: "src/new.ts", content: "export {};" }, policy).behavior, "ask");
   assert.equal(evaluateActionPermission({ type: "run_command", command: "npm test" }, policy).behavior, "ask");
+  assert.equal(evaluateActionPermission({ type: "mcp_call_tool", serverId: "local", toolName: "tools.echo" }, policy).behavior, "ask");
 });
 
 test("applies deny ask allow precedence", () => {
@@ -62,6 +63,17 @@ test("full auto mode allows edits and commands", () => {
     "allow"
   );
   assert.equal(evaluateActionPermission({ type: "run_command", command: "npm test" }, policy).behavior, "allow");
+  assert.equal(evaluateActionPermission({ type: "mcp_call_tool", serverId: "local", toolName: "tools.echo" }, policy).behavior, "allow");
+});
+
+test("applies endpoint rules to MCP server ids", () => {
+  const decision = evaluateActionPermission(
+    { type: "mcp_call_tool", serverId: "prod-local", toolName: "tools.echo" },
+    { mode: "fullAuto", rules: [{ kind: "endpoint", pattern: "prod-*", behavior: "deny", scope: "workspace" }] }
+  );
+
+  assert.equal(decision.behavior, "deny");
+  assert.equal(decision.source, "rule");
 });
 
 test("parses persisted permission rules safely", () => {

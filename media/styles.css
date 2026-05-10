@@ -169,6 +169,7 @@ textarea {
   position: relative;
   display: inline-grid;
   flex: 0 0 auto;
+  margin-left: auto;
   place-items: center;
   width: 30px;
   min-width: 30px;
@@ -293,10 +294,41 @@ textarea {
   line-height: 1;
 }
 
+.settings-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 6px 8px 0;
+  border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+.settings-tab {
+  min-height: 28px;
+  padding: 4px 9px;
+  color: var(--vscode-descriptionForeground);
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+}
+
+.settings-tab:hover {
+  color: var(--vscode-foreground);
+  background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+}
+
+.settings-tab[aria-selected="true"] {
+  color: var(--vscode-foreground);
+  border-bottom-color: var(--vscode-focusBorder);
+}
+
 .settings-content {
   min-height: 0;
   overflow-y: auto;
   padding: 10px 12px;
+}
+
+.settings-pane.hidden {
+  display: none;
 }
 
 .settings-grid {
@@ -327,6 +359,171 @@ textarea {
   padding: 3px;
 }
 
+.checkbox-label {
+  align-content: end;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 7px;
+}
+
+.checkbox-label input {
+  width: auto;
+}
+
+.mcp-screen {
+  display: grid;
+  grid-template-columns: minmax(140px, 0.42fr) minmax(0, 1fr);
+  gap: 10px;
+  min-height: 430px;
+}
+
+.mcp-sidebar,
+.mcp-editor {
+  min-width: 0;
+}
+
+.mcp-section-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 30px;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.mcp-server-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mcp-server-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+  min-height: 44px;
+  padding: 4px;
+  color: var(--vscode-foreground);
+  background: transparent;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 5px;
+  text-align: left;
+}
+
+.mcp-server-row[aria-selected="true"],
+.mcp-server-row:hover {
+  background: var(--vscode-list-activeSelectionBackground, var(--vscode-list-hoverBackground));
+}
+
+.mcp-server-select {
+  display: grid;
+  min-width: 0;
+  width: 100%;
+  min-height: 34px;
+  padding: 3px 4px;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  text-align: left;
+}
+
+.mcp-server-select:hover {
+  background: transparent;
+}
+
+.mcp-server-delete {
+  min-height: 24px;
+  padding: 2px 6px;
+  font-size: 11px;
+}
+
+.mcp-server-title,
+.mcp-probe-name {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mcp-server-detail,
+.mcp-empty,
+.mcp-probe-empty,
+.mcp-probe-detail {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--vscode-descriptionForeground);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mcp-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+
+.mcp-probe-panel {
+  min-height: 72px;
+  margin-top: 10px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 5px;
+  padding: 8px;
+  background: var(--vscode-input-background);
+}
+
+.mcp-probe-result {
+  display: grid;
+  gap: 8px;
+}
+
+.mcp-probe-error {
+  margin: 0;
+  color: var(--vscode-errorForeground);
+  font-size: 11px;
+}
+
+.mcp-probe-group {
+  display: grid;
+  gap: 3px;
+}
+
+.mcp-probe-heading {
+  color: var(--vscode-descriptionForeground);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.mcp-probe-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "name action"
+    "detail action";
+  gap: 1px;
+  align-items: center;
+  min-height: 28px;
+  padding: 4px 0;
+  border-top: 1px solid var(--vscode-panel-border);
+}
+
+.mcp-probe-name {
+  grid-area: name;
+}
+
+.mcp-probe-detail {
+  grid-area: detail;
+}
+
+.mcp-attach-button {
+  grid-area: action;
+  min-height: 22px;
+  padding: 1px 6px;
+  font-size: 11px;
+}
+
 .settings-meta {
   min-height: 18px;
   color: var(--vscode-descriptionForeground);
@@ -347,6 +544,10 @@ textarea {
   .settings-grid {
     grid-template-columns: 1fr;
   }
+
+  .mcp-screen {
+    grid-template-columns: 1fr;
+  }
 }
 
 .messages {
@@ -354,6 +555,88 @@ textarea {
   min-height: 0;
   overflow-y: auto;
   padding: 10px 8px;
+}
+
+.workers-panel {
+  flex: 0 0 auto;
+  display: grid;
+  gap: 6px;
+  max-height: 28vh;
+  overflow-y: auto;
+  padding: 8px;
+  border-top: 1px solid var(--vscode-sideBarSectionHeader-border);
+  background: var(--vscode-sideBar-background);
+}
+
+.workers-panel.hidden {
+  display: none;
+}
+
+.workers-header,
+.worker-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.workers-header {
+  color: var(--vscode-descriptionForeground);
+  font-size: 11px;
+}
+
+.workers-header strong {
+  color: var(--vscode-foreground);
+  font-size: 12px;
+}
+
+.worker-row {
+  min-height: 48px;
+  padding: 6px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 5px;
+  background: var(--vscode-input-background);
+}
+
+.worker-row[data-status="failed"] {
+  border-color: var(--vscode-errorForeground);
+}
+
+.worker-row[data-status="running"] {
+  border-color: var(--vscode-focusBorder, var(--vscode-panel-border));
+}
+
+.worker-meta {
+  min-width: 0;
+}
+
+.worker-title {
+  overflow: hidden;
+  color: var(--vscode-foreground);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.worker-detail,
+.worker-summary {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--vscode-descriptionForeground);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.worker-actions {
+  display: flex;
+  gap: 5px;
+}
+
+.worker-actions button {
+  min-height: 24px;
+  padding: 2px 7px;
+  font-size: 11px;
 }
 
 .message,

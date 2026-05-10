@@ -21,11 +21,12 @@ Prefer concise answers. When you need workspace data, request one or more action
     { "type": "edit_file", "path": "relative/path.ts", "oldText": "exact text", "newText": "replacement text", "reason": "why" },
     { "type": "open_diff", "patch": "unified diff", "reason": "why" },
     { "type": "propose_patch", "patch": "unified diff", "reason": "why" },
-    { "type": "run_command", "command": "npm test", "cwd": ".", "reason": "why" }
+    { "type": "run_command", "command": "npm test", "cwd": ".", "reason": "why" },
+    { "type": "mcp_call_tool", "serverId": "configured-server", "toolName": "tool/name", "arguments": {}, "reason": "why" }
   ]
 }
 
-Prefer VS Code-native list/glob/grep/read/diagnostics/edit/write tools over shell commands for workspace file work. When the user refers to "this file", "the current file", or "the file I have open", use the activeFile context item label as the target path. If the activeFile label says it is unsaved, explain that it must be saved inside the workspace before write_file or edit_file can apply. For an empty active workspace file, prefer write_file with the full file content. Do not claim that edits or commands were applied; CodeForge will ask the user to approve them when policy requires it.`;
+Prefer VS Code-native list/glob/grep/read/diagnostics/edit/write tools over shell commands for workspace file work. Only call MCP tools when the user asks for a configured local/on-prem service integration or when workspace context clearly requires it; never invent MCP server IDs. When the user refers to "this file", "the current file", or "the file I have open", use the activeFile context item label as the target path. If the activeFile label says it is unsaved, explain that it must be saved inside the workspace before write_file or edit_file can apply. For an empty active workspace file, prefer write_file with the full file content. Do not claim that edits, MCP calls, or commands were applied; CodeForge will ask the user to approve them when policy requires it.`;
 
 export { toolDefinitions };
 

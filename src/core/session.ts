@@ -1,4 +1,5 @@
 import { AgentAction, ApprovalRequest, ChatMessage } from "./types";
+import { WorkerSessionEvent, WorkerSummary, WorkerTranscriptEntry } from "./workerTypes";
 
 export interface SessionSummary {
   readonly id: string;
@@ -22,6 +23,7 @@ export type SessionRecord =
   | SessionApprovalRequestedRecord
   | SessionApprovalResolvedRecord
   | SessionCheckpointRecord
+  | SessionWorkerRecord
   | SessionEventRecord;
 
 export interface SessionStartedRecord {
@@ -69,6 +71,15 @@ export interface SessionCheckpointRecord {
   readonly createdAt: number;
   readonly action: AgentAction;
   readonly summary: string;
+}
+
+export interface SessionWorkerRecord {
+  readonly type: "worker";
+  readonly sessionId: string;
+  readonly createdAt: number;
+  readonly event: WorkerSessionEvent;
+  readonly worker: WorkerSummary;
+  readonly transcriptEntry?: WorkerTranscriptEntry;
 }
 
 export interface SessionEventRecord {

@@ -224,6 +224,60 @@
             }
           }
         },
+        "codeforge.mcp.servers": {
+          "type": "array",
+          "default": [],
+          "description": "Explicit local or on-prem MCP server configurations. CodeForge never connects to MCP servers unless configured here and requested by a tool call.",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "label",
+              "transport"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              },
+              "enabled": {
+                "type": "boolean",
+                "default": true
+              },
+              "transport": {
+                "type": "string",
+                "enum": [
+                  "stdio",
+                  "http",
+                  "sse"
+                ]
+              },
+              "command": {
+                "type": "string"
+              },
+              "args": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "cwd": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              },
+              "headers": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
         "codeforge.context.maxFiles": {
           "type": "number",
           "default": 24,

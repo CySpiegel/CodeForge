@@ -29,6 +29,10 @@ test("parses and validates registered tools", () => {
   const diagnostics = parseAction("list_diagnostics", { path: "src/core/types.ts", limit: 25 });
   assert.deepEqual(diagnostics, { type: "list_diagnostics", path: "src/core/types.ts", limit: 25, reason: undefined });
   assert.equal(diagnostics ? validateAction(diagnostics).ok : false, true);
+
+  const mcp = parseAction("mcp_call_tool", { serverId: "local", toolName: "tools.echo", arguments: { message: "hi" }, reason: "service lookup" });
+  assert.deepEqual(mcp, { type: "mcp_call_tool", serverId: "local", toolName: "tools.echo", arguments: { message: "hi" }, reason: "service lookup" });
+  assert.equal(mcp ? validateAction(mcp).ok : false, true);
 });
 
 test("rejects malformed patch actions", () => {
@@ -53,4 +57,10 @@ test("rejects untracked background command execution", () => {
   const result = validateAction(command);
   assert.equal(result.ok, false);
   assert.match(result.message ?? "", /Background shell execution/);
+});
+
+test("rejects unsafe MCP tool identifiers", () => {
+  const action = parseAction("mcp_call_tool", { serverId: "../bad", toolName: "tools.echo" });
+  assert.ok(action);
+  assert.equal(validateAction(action).ok, false);
 });

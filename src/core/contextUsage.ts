@@ -131,6 +131,8 @@ function bucketForContextItem(item: ContextItem): { key: string; label: string }
       return { key: "projectInstructions", label: "Project instructions" };
     case "memory":
       return { key: "memory", label: "Local memory" };
+    case "mcpResource":
+      return { key: "mcpResources", label: "MCP resources" };
     case "activeFile":
       return { key: "activeFile", label: "Active file" };
     case "selection":

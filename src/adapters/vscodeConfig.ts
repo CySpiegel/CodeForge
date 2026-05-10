@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import { assertUrlAllowed } from "../core/networkPolicy";
 import { normalizePermissionPolicy, parsePermissionRules } from "../core/permissions";
-import { AgentMode, ContextLimits, NetworkPolicy, PermissionMode, PermissionPolicy, PermissionRule, ProviderProfile } from "../core/types";
+import { AgentMode, ContextLimits, McpServerConfig, NetworkPolicy, PermissionMode, PermissionPolicy, PermissionRule, ProviderProfile } from "../core/types";
 
 const sectionName = "codeforge";
 
@@ -16,6 +16,10 @@ export class CodeForgeConfigService {
     return {
       allowlist: this.config().get<readonly string[]>("network.allowlist", [])
     };
+  }
+
+  getMcpServers(): readonly McpServerConfig[] {
+    return normalizeMcpServerConfigs(this.config().get<readonly unknown[]>("mcp.servers", []));
   }
 
   getContextLimits(): ContextLimits {
@@ -148,6 +152,9 @@ export class CodeForgeConfigService {
     if (settings.permissionRules !== undefined) {
       await config.update("permissions.rules", settings.permissionRules, vscode.ConfigurationTarget.Workspace);
     }
+    if (settings.mcpServers !== undefined) {
+      await config.update("mcp.servers", normalizeMcpServerConfigs(settings.mcpServers), vscode.ConfigurationTarget.Workspace);
+    }
   }
 
   private config(): vscode.WorkspaceConfiguration {
@@ -229,6 +236,7 @@ export interface CodeForgeSettingsUpdate {
   readonly commandOutputLimitBytes: number;
   readonly permissionMode: PermissionMode;
   readonly permissionRules: readonly PermissionRule[];
+  readonly mcpServers: readonly McpServerConfig[];
 }
 
 const defaultProfiles: readonly ProviderProfile[] = [
@@ -246,6 +254,41 @@ function isValidProfile(profile: ProviderProfile): boolean {
 
 function isAgentMode(value: unknown): value is AgentMode {
   return value === "agent" || value === "ask" || value === "plan";
+}
+
+export function normalizeMcpServerConfigs(value: readonly unknown[] | undefined): readonly McpServerConfig[] {
+  return (value ?? []).map(toMcpServerConfig).filter((server): server is McpServerConfig => server !== undefined);
+}
+
+function toMcpServerConfig(value: unknown): McpServerConfig | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const id = typeof value.id === "string" ? value.id.trim() : "";
+  const label = typeof value.label === "string" ? value.label.trim() : id;
+  const transport = value.transport;
+  if (!id || !label || (transport !== "stdio" && transport !== "http" && transport !== "sse")) {
+    return undefined;
+  }
+  const args = Array.isArray(value.args) ? value.args.filter((item): item is string => typeof item === "string") : undefined;
+  const headers = isRecord(value.headers)
+    ? Object.fromEntries(Object.entries(value.headers).filter((entry): entry is [string, string] => typeof entry[1] === "string"))
+    : undefined;
+  return {
+    id,
+    label,
+    enabled: typeof value.enabled === "boolean" ? value.enabled : undefined,
+    transport,
+    command: typeof value.command === "string" ? value.command.trim() : undefined,
+    args,
+    cwd: typeof value.cwd === "string" ? value.cwd.trim() : undefined,
+    url: typeof value.url === "string" ? value.url.trim() : undefined,
+    headers
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 type LegacyPermissionMode = "default" | "review" | "acceptEdits" | "readOnly" | "workspaceTrusted";

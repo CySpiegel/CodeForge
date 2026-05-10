@@ -3,6 +3,7 @@ import { formatMemories, MemoryEntry } from "./memory";
 
 export interface ContextBuilderSources {
   readonly memories?: readonly MemoryEntry[];
+  readonly mcpResources?: readonly ContextItem[];
 }
 
 export class ContextBuilder {
@@ -32,6 +33,17 @@ export class ContextBuilder {
     if (memoryItem && budget > 0) {
       items.push(memoryItem);
       budget -= byteLength(memoryItem.content);
+    }
+
+    for (const item of this.sources.mcpResources ?? []) {
+      if (items.length >= this.limits.maxFiles || budget <= 0) {
+        break;
+      }
+      const trimmed = trimToBudget(item.content, Math.min(32000, budget));
+      if (trimmed) {
+        items.push({ ...item, content: trimmed });
+        budget -= byteLength(trimmed);
+      }
     }
 
     const activeDocument = await this.workspace.getActiveTextDocument(Math.min(32000, budget));

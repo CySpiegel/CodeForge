@@ -2,6 +2,7 @@
   const vscode = acquireVsCodeApi();
   const elements = {
     messages: document.getElementById("messages"),
+    workersPanel: document.getElementById("workersPanel"),
     approvals: document.getElementById("approvals"),
     form: document.getElementById("promptForm"),
     input: document.getElementById("promptInput"),
@@ -10,6 +11,8 @@
     settingsPanel: document.getElementById("settingsPanel"),
     settingsClose: document.getElementById("settingsClose"),
     settingsCancel: document.getElementById("settingsCancel"),
+    settingsTabs: Array.from(document.querySelectorAll("[data-settings-tab]")),
+    settingsPanes: Array.from(document.querySelectorAll("[data-settings-pane]")),
     endpointPickerButton: document.getElementById("endpointPickerButton"),
     endpointPickerMenu: document.getElementById("endpointPickerMenu"),
     endpointPickerLabel: document.getElementById("endpointPickerLabel"),
@@ -39,6 +42,20 @@
     permissionModeMenu: document.getElementById("permissionModeMenu"),
     permissionModeLabel: document.getElementById("permissionModeLabel"),
     permissionRules: document.getElementById("permissionRules"),
+    addMcpServer: document.getElementById("addMcpServer"),
+    deleteMcpServer: document.getElementById("deleteMcpServer"),
+    checkMcpServer: document.getElementById("checkMcpServer"),
+    mcpServerList: document.getElementById("mcpServerList"),
+    mcpId: document.getElementById("mcpId"),
+    mcpLabel: document.getElementById("mcpLabel"),
+    mcpEnabled: document.getElementById("mcpEnabled"),
+    mcpTransport: document.getElementById("mcpTransport"),
+    mcpUrl: document.getElementById("mcpUrl"),
+    mcpCommand: document.getElementById("mcpCommand"),
+    mcpArgs: document.getElementById("mcpArgs"),
+    mcpCwd: document.getElementById("mcpCwd"),
+    mcpHeaders: document.getElementById("mcpHeaders"),
+    mcpProbePanel: document.getElementById("mcpProbePanel"),
     allowlist: document.getElementById("allowlist"),
     saveSettings: document.getElementById("saveSettings")
   };
@@ -51,11 +68,22 @@
   let slashCommandIndex = 0;
   let lastCommandRefreshAt = 0;
   let lastModelRefreshAt = 0;
+  let activeSettingsTab = "general";
+  let mcpDrafts = [];
+  let selectedMcpId = "";
+  let mcpDraftDirty = false;
   let contextTooltipText = "Context used: 0 / 0 tokens (0%)\nClick to compact context.";
   const builtInSlashCommands = [
     { name: "compact", description: "Compact the current session context", argumentHint: "[focus]" },
     { name: "context", description: "Show context usage and attached local context" },
     { name: "commands", description: "List workspace-local slash commands" },
+    { name: "mcp", description: "List configured local MCP servers" },
+    { name: "workers", description: "List local background workers" },
+    { name: "worker", description: "Manage workers", argumentHint: "list|plan|output|stop" },
+    { name: "explore", description: "Run a read-only exploration worker", argumentHint: "<task>" },
+    { name: "review", description: "Run a read-only review worker", argumentHint: "<scope>" },
+    { name: "verify", description: "Run a read-only verification worker", argumentHint: "<task>" },
+    { name: "plan-worker", description: "Run a read-only planning worker", argumentHint: "<task>" },
     { name: "skills", description: "List workspace-local skills" },
     { name: "skill", description: "Run a workspace-local skill", argumentHint: "<name> <task>" },
     { name: "memory", description: "Manage explicit local memories", argumentHint: "list|add|remove|clear" },
@@ -196,6 +224,41 @@
     closeSettingsWindow();
   });
 
+  for (const tab of elements.settingsTabs || []) {
+    on(tab, "click", () => {
+      setSettingsTab(tab.dataset.settingsTab || "general");
+    });
+  }
+
+  on(elements.addMcpServer, "click", () => {
+    addMcpDraft();
+  });
+
+  on(elements.deleteMcpServer, "click", () => {
+    deleteSelectedMcpDraft();
+  });
+
+  on(elements.checkMcpServer, "click", () => {
+    updateSelectedMcpDraftFromFields();
+    if (!selectedMcpId) {
+      addMessage("system error", "Error: Select an MCP server before checking it.");
+      return;
+    }
+    renderMcpProbeStatus("Checking MCP server...");
+    vscode.postMessage({ type: "probeMcpServers", serverId: selectedMcpId, mcpServers: serializedMcpDrafts() });
+  });
+
+  for (const field of [elements.mcpId, elements.mcpLabel, elements.mcpEnabled, elements.mcpTransport, elements.mcpUrl, elements.mcpCommand, elements.mcpArgs, elements.mcpCwd, elements.mcpHeaders]) {
+    on(field, "input", () => {
+      updateSelectedMcpDraftFromFields();
+      renderMcpServerList();
+    });
+    on(field, "change", () => {
+      updateSelectedMcpDraftFromFields();
+      renderMcpServerList();
+    });
+  }
+
   on(elements.settingsPanel, "pointerdown", (event) => {
     if (event.target === elements.settingsPanel) {
       closeSettingsWindow();
@@ -266,6 +329,8 @@
     if (!permissionRules) {
       return;
     }
+    updateSelectedMcpDraftFromFields();
+    const mcpServers = serializedMcpDrafts();
     const profileLabel = elements.profileLabel?.value.trim() || "";
     const baseUrl = elements.baseUrl?.value.trim() || "";
     if (!profileLabel) {
@@ -277,6 +342,7 @@
       return;
     }
     pendingProfileCreate = isCreatingProfile;
+    mcpDraftDirty = false;
     vscode.postMessage({
       type: "saveSettings",
       activeProfileId: elements.profileSelect?.value || "",
@@ -286,6 +352,7 @@
       apiKey: elements.apiKey?.value.trim() || "",
       model: elements.modelInput?.value.trim() || "",
       allowlist: splitLines(elements.allowlist?.value || ""),
+      mcpServers,
       maxFiles: Number(elements.maxFiles?.value),
       maxBytes: Number(elements.maxBytes?.value),
       commandTimeoutSeconds: Number(elements.commandTimeout?.value),
@@ -302,6 +369,8 @@
 
     if (message.type === "sessionReset") {
       elements.messages?.replaceChildren();
+      elements.workersPanel?.replaceChildren();
+      elements.workersPanel?.classList.add("hidden");
       elements.approvals?.replaceChildren();
       streamingMessage = undefined;
     } else if (message.type === "state") {
@@ -329,9 +398,14 @@
       if (isSlashCommandMenuOpen()) {
         renderSlashCommandMenu();
       }
+    } else if (message.type === "mcpProbe") {
+      renderMcpProbe(message.inspections || []);
     } else if (message.type === "contextUsage") {
       state = { ...(state || {}), contextUsage: message.usage };
       renderContextUsage(message.usage);
+    } else if (message.type === "workers") {
+      state = { ...(state || {}), workers: message.workers || [] };
+      renderWorkers(message.workers || []);
     } else if (message.type === "openSettings") {
       openSettingsWindow();
       renderState();
@@ -381,6 +455,7 @@
     renderEndpointPicker();
     renderAgentModePicker();
     renderModelPicker();
+    renderWorkers(state.workers || []);
     renderContextUsage(state.contextUsage);
     if (isSlashCommandMenuOpen()) {
       renderSlashCommandMenu();
@@ -427,7 +502,331 @@
     setValue(elements.commandOutputLimit, String(state.settings?.commandOutputLimitBytes ?? 200000));
     renderPermissionModePicker();
     setValue(elements.permissionRules, JSON.stringify(state.settings?.permissionRules || [], null, 2));
+    if (!mcpDraftDirty) {
+      mcpDrafts = cloneMcpServers(state.settings?.mcpServers || []);
+      selectedMcpId = selectedMcpId && mcpDrafts.some((server) => server.id === selectedMcpId)
+        ? selectedMcpId
+        : mcpDrafts[0]?.id || "";
+    }
+    renderSettingsTabs();
+    renderMcpEditor();
     setValue(elements.allowlist, (state.settings?.allowlist || []).join("\n"));
+  }
+
+  function setSettingsTab(tab) {
+    activeSettingsTab = tab || "general";
+    renderSettingsTabs();
+  }
+
+  function renderSettingsTabs() {
+    for (const tab of elements.settingsTabs || []) {
+      const selected = tab.dataset.settingsTab === activeSettingsTab;
+      tab.setAttribute("aria-selected", selected ? "true" : "false");
+    }
+    for (const pane of elements.settingsPanes || []) {
+      pane.classList.toggle("hidden", pane.dataset.settingsPane !== activeSettingsTab);
+    }
+  }
+
+  function cloneMcpServers(servers) {
+    return (Array.isArray(servers) ? servers : []).map((server) => ({
+      id: String(server.id || ""),
+      label: String(server.label || server.id || ""),
+      enabled: server.enabled !== false,
+      transport: ["http", "sse", "stdio"].includes(server.transport) ? server.transport : "http",
+      url: String(server.url || ""),
+      command: String(server.command || ""),
+      args: Array.isArray(server.args) ? server.args.filter((item) => typeof item === "string") : [],
+      cwd: String(server.cwd || ""),
+      headers: server.headers && typeof server.headers === "object" && !Array.isArray(server.headers) ? { ...server.headers } : {}
+    }));
+  }
+
+  function renderMcpEditor() {
+    renderMcpServerList();
+    const selected = mcpDrafts.find((server) => server.id === selectedMcpId) || mcpDrafts[0];
+    selectedMcpId = selected?.id || "";
+    const hasSelection = Boolean(selected);
+    setDisabled(elements.deleteMcpServer, !hasSelection);
+    setDisabled(elements.checkMcpServer, !hasSelection);
+    for (const field of [elements.mcpId, elements.mcpLabel, elements.mcpEnabled, elements.mcpTransport, elements.mcpUrl, elements.mcpCommand, elements.mcpArgs, elements.mcpCwd, elements.mcpHeaders]) {
+      setDisabled(field, !hasSelection);
+    }
+    if (!selected) {
+      setValue(elements.mcpId, "");
+      setValue(elements.mcpLabel, "");
+      setChecked(elements.mcpEnabled, true);
+      setValue(elements.mcpTransport, "http");
+      setValue(elements.mcpUrl, "");
+      setValue(elements.mcpCommand, "");
+      setValue(elements.mcpArgs, "");
+      setValue(elements.mcpCwd, "");
+      setValue(elements.mcpHeaders, "{}");
+      renderMcpProbeStatus("No MCP server selected.");
+      return;
+    }
+    setValue(elements.mcpId, selected.id);
+    setValue(elements.mcpLabel, selected.label);
+    setChecked(elements.mcpEnabled, selected.enabled !== false);
+    setValue(elements.mcpTransport, selected.transport || "http");
+    setValue(elements.mcpUrl, selected.url || "");
+    setValue(elements.mcpCommand, selected.command || "");
+    setValue(elements.mcpArgs, (selected.args || []).join(" "));
+    setValue(elements.mcpCwd, selected.cwd || "");
+    setValue(elements.mcpHeaders, JSON.stringify(selected.headers || {}, null, 2));
+    renderMcpProbeFromState(selected.id);
+  }
+
+  function renderMcpServerList() {
+    if (!elements.mcpServerList) {
+      return;
+    }
+    elements.mcpServerList.replaceChildren();
+    if (mcpDrafts.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "mcp-empty";
+      empty.textContent = "No MCP servers configured.";
+      elements.mcpServerList.append(empty);
+      return;
+    }
+    const statuses = new Map((state?.mcpServers || []).map((server) => [server.id, server]));
+    for (const server of mcpDrafts) {
+      const status = statuses.get(server.id);
+      const row = document.createElement("div");
+      row.className = "mcp-server-row";
+      row.setAttribute("aria-selected", server.id === selectedMcpId ? "true" : "false");
+      const select = document.createElement("button");
+      select.type = "button";
+      select.className = "mcp-server-select";
+      const title = document.createElement("span");
+      title.className = "mcp-server-title";
+      title.textContent = server.label || server.id || "Unnamed MCP";
+      const detail = document.createElement("span");
+      detail.className = "mcp-server-detail";
+      detail.textContent = `${server.transport || "http"}${status ? ` - ${status.enabled ? status.valid ? "ready" : "blocked" : "disabled"}` : ""}`;
+      select.append(title, detail);
+      select.addEventListener("click", () => {
+        updateSelectedMcpDraftFromFields();
+        selectedMcpId = server.id;
+        renderMcpEditor();
+      });
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "secondary mcp-server-delete";
+      remove.textContent = "Delete";
+      remove.title = `Delete ${server.label || server.id || "MCP server"}`;
+      remove.addEventListener("click", () => {
+        deleteMcpDraft(server.id);
+      });
+      row.append(select, remove);
+      elements.mcpServerList.append(row);
+    }
+  }
+
+  function addMcpDraft() {
+    updateSelectedMcpDraftFromFields();
+    const id = uniqueMcpId();
+    mcpDrafts = [
+      ...mcpDrafts,
+      {
+        id,
+        label: "Local MCP",
+        enabled: true,
+        transport: "http",
+        url: "http://127.0.0.1:3000/mcp",
+        command: "",
+        args: [],
+        cwd: "",
+        headers: {}
+      }
+    ];
+    selectedMcpId = id;
+    mcpDraftDirty = true;
+    renderMcpEditor();
+    elements.mcpLabel?.focus();
+  }
+
+  function deleteSelectedMcpDraft() {
+    if (!selectedMcpId) {
+      return;
+    }
+    deleteMcpDraft(selectedMcpId);
+  }
+
+  function deleteMcpDraft(id) {
+    if (!id) {
+      return;
+    }
+    const removed = mcpDrafts.find((server) => server.id === id);
+    mcpDrafts = mcpDrafts.filter((server) => server.id !== id);
+    selectedMcpId = mcpDrafts[0]?.id || "";
+    mcpDraftDirty = true;
+    if (removed) {
+      renderMcpProbeStatus(`Deleted ${removed.label || removed.id}. Save settings to apply.`);
+    }
+    renderMcpEditor();
+  }
+
+  function updateSelectedMcpDraftFromFields() {
+    if (!selectedMcpId) {
+      return;
+    }
+    const index = mcpDrafts.findIndex((server) => server.id === selectedMcpId);
+    if (index < 0) {
+      return;
+    }
+    const headers = parseJsonObjectSetting(elements.mcpHeaders, "MCP headers");
+    if (headers === undefined) {
+      return;
+    }
+    const nextId = safeMcpId(elements.mcpId?.value || selectedMcpId);
+    const next = {
+      ...mcpDrafts[index],
+      id: nextId,
+      label: elements.mcpLabel?.value.trim() || nextId,
+      enabled: elements.mcpEnabled?.checked !== false,
+      transport: ["http", "sse", "stdio"].includes(elements.mcpTransport?.value) ? elements.mcpTransport.value : "http",
+      url: elements.mcpUrl?.value.trim() || "",
+      command: elements.mcpCommand?.value.trim() || "",
+      args: splitArgs(elements.mcpArgs?.value || ""),
+      cwd: elements.mcpCwd?.value.trim() || "",
+      headers
+    };
+    mcpDrafts[index] = next;
+    selectedMcpId = next.id;
+    mcpDraftDirty = true;
+  }
+
+  function serializedMcpDrafts() {
+    return mcpDrafts
+      .map((server) => {
+        const transport = ["http", "sse", "stdio"].includes(server.transport) ? server.transport : "http";
+        const result = {
+          id: safeMcpId(server.id),
+          label: server.label || safeMcpId(server.id),
+          enabled: server.enabled !== false,
+          transport
+        };
+        if (transport === "stdio") {
+          result.command = server.command || "";
+          result.args = server.args || [];
+          if (server.cwd) {
+            result.cwd = server.cwd;
+          }
+        } else {
+          result.url = server.url || "";
+        }
+        if (server.headers && Object.keys(server.headers).length > 0) {
+          result.headers = server.headers;
+        }
+        return result;
+      })
+      .filter((server) => server.id && server.label);
+  }
+
+  function renderMcpProbe(inspections) {
+    if (!inspections.length) {
+      renderMcpProbeStatus("No MCP probe results.");
+      return;
+    }
+    const selected = inspections.find((inspection) => inspection.server?.id === selectedMcpId) || inspections[0];
+    if (!selected || !elements.mcpProbePanel) {
+      return;
+    }
+    elements.mcpProbePanel.replaceChildren(renderMcpInspection(selected));
+  }
+
+  function renderMcpProbeFromState(serverId) {
+    const status = (state?.mcpServers || []).find((server) => server.id === serverId);
+    if (!status) {
+      renderMcpProbeStatus("Save settings or check the server to see tools and resources.");
+      return;
+    }
+    const text = status.enabled ? status.valid ? "Ready. Check the server to list tools and resources." : `Blocked: ${status.reason || "invalid configuration"}` : "Disabled.";
+    renderMcpProbeStatus(text);
+  }
+
+  function renderMcpProbeStatus(text) {
+    if (!elements.mcpProbePanel) {
+      return;
+    }
+    const item = document.createElement("div");
+    item.className = "mcp-probe-empty";
+    item.textContent = text;
+    elements.mcpProbePanel.replaceChildren(item);
+  }
+
+  function renderMcpInspection(inspection) {
+    const wrapper = document.createElement("div");
+    wrapper.className = "mcp-probe-result";
+    const title = document.createElement("strong");
+    const server = inspection.server || {};
+    title.textContent = `${server.label || server.id || "MCP server"} - ${server.enabled ? server.valid ? "ready" : "blocked" : "disabled"}`;
+    wrapper.append(title);
+    if (inspection.error || server.reason) {
+      const error = document.createElement("p");
+      error.className = "mcp-probe-error";
+      error.textContent = inspection.error || server.reason;
+      wrapper.append(error);
+    }
+    wrapper.append(renderMcpProbeGroup("Tools", inspection.tools || [], "name", ""));
+    wrapper.append(renderMcpProbeGroup("Resources", inspection.resources || [], "uri", server.id || selectedMcpId));
+    return wrapper;
+  }
+
+  function renderMcpProbeGroup(label, items, key, serverId) {
+    const group = document.createElement("div");
+    group.className = "mcp-probe-group";
+    const heading = document.createElement("div");
+    heading.className = "mcp-probe-heading";
+    heading.textContent = `${label} (${items.length})`;
+    group.append(heading);
+    if (!items.length) {
+      const empty = document.createElement("div");
+      empty.className = "mcp-probe-empty";
+      empty.textContent = `No ${label.toLowerCase()} reported.`;
+      group.append(empty);
+      return group;
+    }
+    for (const item of items.slice(0, 24)) {
+      const row = document.createElement("div");
+      row.className = "mcp-probe-row";
+      const name = document.createElement("span");
+      name.className = "mcp-probe-name";
+      name.textContent = item[key] || item.name || "";
+      const detail = document.createElement("span");
+      detail.className = "mcp-probe-detail";
+      detail.textContent = item.description || item.mimeType || "";
+      row.append(name, detail);
+      if (label === "Resources" && serverId) {
+        const attach = document.createElement("button");
+        attach.type = "button";
+        attach.className = "secondary mcp-attach-button";
+        attach.textContent = "Attach";
+        attach.addEventListener("click", () => {
+          updateSelectedMcpDraftFromFields();
+          vscode.postMessage({ type: "attachMcpResource", serverId, uri: item.uri, mcpServers: serializedMcpDrafts() });
+        });
+        row.append(attach);
+      }
+      group.append(row);
+    }
+    return group;
+  }
+
+  function uniqueMcpId() {
+    let suffix = mcpDrafts.length + 1;
+    let id = "local-mcp";
+    const ids = new Set(mcpDrafts.map((server) => server.id));
+    while (ids.has(id)) {
+      id = `local-mcp-${suffix}`;
+      suffix += 1;
+    }
+    return id;
+  }
+
+  function safeMcpId(value) {
+    return String(value || "").trim().replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || uniqueMcpId();
   }
 
   function openSettingsWindow() {
@@ -435,6 +834,7 @@
     hideContextTooltip();
     hideSlashCommandMenu();
     elements.settingsPanel?.classList.remove("hidden");
+    setSettingsTab(activeSettingsTab);
     elements.settingsClose?.focus();
   }
 
@@ -1166,19 +1566,41 @@
   }
 
   function parsePermissionRules() {
-    const raw = elements.permissionRules?.value.trim() || "";
+    return parseJsonArraySetting(elements.permissionRules, "Permission rules");
+  }
+
+  function parseJsonArraySetting(element, label) {
+    const raw = element?.value.trim() || "";
     if (!raw) {
       return [];
     }
     try {
       const parsed = JSON.parse(raw);
       if (!Array.isArray(parsed)) {
-        addMessage("system error", "Error: Permission rules must be a JSON array.");
+        addMessage("system error", `Error: ${label} must be a JSON array.`);
         return undefined;
       }
       return parsed;
     } catch (error) {
-      addMessage("system error", `Error: Could not parse permission rules JSON. ${error.message || String(error)}`);
+      addMessage("system error", `Error: Could not parse ${label} JSON. ${error.message || String(error)}`);
+      return undefined;
+    }
+  }
+
+  function parseJsonObjectSetting(element, label) {
+    const raw = element?.value.trim() || "";
+    if (!raw) {
+      return {};
+    }
+    try {
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        addMessage("system error", `Error: ${label} must be a JSON object.`);
+        return undefined;
+      }
+      return parsed;
+    } catch (error) {
+      addMessage("system error", `Error: Could not parse ${label} JSON. ${error.message || String(error)}`);
       return undefined;
     }
   }
@@ -1624,6 +2046,83 @@
     scrollMessages();
   }
 
+  function renderWorkers(workers) {
+    if (!elements.workersPanel) {
+      return;
+    }
+    const activeWorkers = Array.isArray(workers) ? workers : [];
+    elements.workersPanel.replaceChildren();
+    elements.workersPanel.classList.toggle("hidden", activeWorkers.length === 0);
+    if (activeWorkers.length === 0) {
+      return;
+    }
+
+    const header = document.createElement("div");
+    header.className = "workers-header";
+    const title = document.createElement("strong");
+    title.textContent = "Workers";
+    const count = document.createElement("span");
+    count.textContent = `${activeWorkers.filter((worker) => worker.status === "running").length} running`;
+    header.append(title, count);
+    elements.workersPanel.append(header);
+
+    for (const worker of activeWorkers.slice(0, 5)) {
+      elements.workersPanel.append(renderWorkerRow(worker));
+    }
+  }
+
+  function renderWorkerRow(worker) {
+    const row = document.createElement("div");
+    row.className = "worker-row";
+    row.dataset.status = worker.status || "running";
+
+    const meta = document.createElement("div");
+    meta.className = "worker-meta";
+    const title = document.createElement("div");
+    title.className = "worker-title";
+    title.textContent = `${worker.label || worker.kind || "Worker"} · ${worker.status || "running"}`;
+    const detail = document.createElement("div");
+    detail.className = "worker-detail";
+    const parts = [];
+    if (worker.model) {
+      parts.push(worker.model);
+    }
+    if (worker.toolUseCount) {
+      parts.push(`${worker.toolUseCount} tools`);
+    }
+    if (worker.tokenCount) {
+      parts.push(`${formatNumber(worker.tokenCount)} tokens`);
+    }
+    if (worker.filesInspected?.length) {
+      parts.push(`${worker.filesInspected.length} files`);
+    }
+    detail.textContent = parts.length > 0 ? parts.join(" · ") : worker.prompt || worker.id;
+    const summary = document.createElement("div");
+    summary.className = "worker-summary";
+    summary.textContent = worker.error || worker.summary || worker.prompt || "";
+    meta.append(title, detail, summary);
+
+    const actions = document.createElement("div");
+    actions.className = "worker-actions";
+    const output = document.createElement("button");
+    output.type = "button";
+    output.className = "secondary";
+    output.textContent = "Open";
+    output.addEventListener("click", () => vscode.postMessage({ type: "workerOutput", workerId: worker.id }));
+    actions.append(output);
+    if (worker.status === "running") {
+      const stop = document.createElement("button");
+      stop.type = "button";
+      stop.className = "secondary";
+      stop.textContent = "Stop";
+      stop.addEventListener("click", () => vscode.postMessage({ type: "workerStop", workerId: worker.id }));
+      actions.append(stop);
+    }
+
+    row.append(meta, actions);
+    return row;
+  }
+
   function addSessionList(sessions) {
     const item = document.createElement("article");
     item.className = "message session-list";
@@ -1696,6 +2195,9 @@
     if (action.type === "run_command") {
       return action.command;
     }
+    if (action.type === "mcp_call_tool") {
+      return `${action.serverId}/${action.toolName}\n\n${JSON.stringify(action.arguments || {}, null, 2)}`;
+    }
     if (action.type === "propose_patch") {
       return action.patch;
     }
@@ -1766,8 +2268,24 @@
     }
   }
 
+  function setChecked(element, value) {
+    if (element) {
+      element.checked = Boolean(value);
+    }
+  }
+
+  function setDisabled(element, value) {
+    if (element) {
+      element.disabled = Boolean(value);
+    }
+  }
+
   function splitLines(value) {
     return value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  }
+
+  function splitArgs(value) {
+    return String(value || "").match(/(?:"([^"]*)"|'([^']*)'|[^\s]+)/g)?.map((item) => item.replace(/^["']|["']$/g, "")) || [];
   }
 
   function scrollMessages() {

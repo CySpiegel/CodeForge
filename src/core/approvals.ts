@@ -84,6 +84,8 @@ function approvalKind(action: AgentAction): ApprovalKind {
       return "edit";
     case "run_command":
       return "command";
+    case "mcp_call_tool":
+      return "service";
   }
 }
 
@@ -109,6 +111,8 @@ function titleForAction(action: AgentAction): string {
       return "Apply proposed edit";
     case "run_command":
       return "Run command";
+    case "mcp_call_tool":
+      return "Call MCP tool";
   }
 }
 
@@ -129,5 +133,7 @@ function riskForAction(action: AgentAction): string {
       return "workspace edit";
     case "run_command":
       return classifyShellCommand(action.command).summary;
+    case "mcp_call_tool":
+      return "configured local service tool";
   }
 }

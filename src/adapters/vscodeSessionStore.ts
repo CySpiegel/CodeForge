@@ -9,6 +9,7 @@ import {
 } from "../core/session";
 import { validateAction } from "../core/toolRegistry";
 import { AgentAction, ApprovalRequest, ChatMessage, ToolCall } from "../core/types";
+import { WorkerKind, WorkerSessionEvent, WorkerStatus, WorkerSummary, WorkerTranscriptEntry, WorkerTranscriptRole } from "../core/workerTypes";
 
 const latestSessionKey = "codeforge.sessions.latest";
 const sessionFileExtension = ".jsonl";
@@ -255,6 +256,20 @@ function toSessionRecord(value: unknown): SessionRecord | undefined {
         }
         : undefined;
     }
+    case "worker": {
+      const worker = toWorkerSummary(value.worker);
+      const transcriptEntry = value.transcriptEntry === undefined ? undefined : toWorkerTranscriptEntry(value.transcriptEntry);
+      return worker && isWorkerSessionEvent(value.event) && (value.transcriptEntry === undefined || transcriptEntry)
+        ? {
+          type: "worker",
+          sessionId: value.sessionId,
+          createdAt: value.createdAt,
+          event: value.event,
+          worker,
+          transcriptEntry
+        }
+        : undefined;
+    }
     case "event":
       return isEventLevel(value.level) && typeof value.text === "string"
         ? { type: "event", sessionId: value.sessionId, createdAt: value.createdAt, level: value.level, text: value.text }
@@ -311,11 +326,64 @@ function isChatRole(value: unknown): value is ChatMessage["role"] {
 }
 
 function isApprovalKind(value: unknown): value is ApprovalRequest["kind"] {
-  return value === "read" || value === "search" || value === "edit" || value === "preview" || value === "command";
+  return value === "read" || value === "search" || value === "edit" || value === "preview" || value === "command" || value === "service";
 }
 
 function isReplacementReason(value: unknown): value is "compact" | "restore" {
   return value === "compact" || value === "restore";
+}
+
+function toWorkerSummary(value: unknown): WorkerSummary | undefined {
+  if (!isObject(value) || typeof value.id !== "string" || !isWorkerKind(value.kind) || !isWorkerStatus(value.status) || typeof value.prompt !== "string" || typeof value.startedAt !== "number" || typeof value.updatedAt !== "number" || typeof value.toolUseCount !== "number" || typeof value.tokenCount !== "number") {
+    return undefined;
+  }
+  const filesInspected = Array.isArray(value.filesInspected)
+    ? value.filesInspected.filter((item): item is string => typeof item === "string")
+    : [];
+  return {
+    id: value.id,
+    kind: value.kind,
+    label: typeof value.label === "string" ? value.label : value.kind,
+    status: value.status,
+    prompt: value.prompt,
+    summary: typeof value.summary === "string" ? value.summary : undefined,
+    error: typeof value.error === "string" ? value.error : undefined,
+    model: typeof value.model === "string" ? value.model : undefined,
+    profileLabel: typeof value.profileLabel === "string" ? value.profileLabel : undefined,
+    startedAt: value.startedAt,
+    updatedAt: value.updatedAt,
+    completedAt: typeof value.completedAt === "number" ? value.completedAt : undefined,
+    toolUseCount: value.toolUseCount,
+    tokenCount: value.tokenCount,
+    filesInspected
+  };
+}
+
+function toWorkerTranscriptEntry(value: unknown): WorkerTranscriptEntry | undefined {
+  return isObject(value) && typeof value.workerId === "string" && typeof value.createdAt === "number" && isWorkerTranscriptRole(value.role) && typeof value.text === "string"
+    ? {
+      workerId: value.workerId,
+      createdAt: value.createdAt,
+      role: value.role,
+      text: value.text
+    }
+    : undefined;
+}
+
+function isWorkerKind(value: unknown): value is WorkerKind {
+  return value === "explore" || value === "plan" || value === "review" || value === "verify";
+}
+
+function isWorkerStatus(value: unknown): value is WorkerStatus {
+  return value === "running" || value === "completed" || value === "failed" || value === "stopped";
+}
+
+function isWorkerTranscriptRole(value: unknown): value is WorkerTranscriptRole {
+  return value === "system" || value === "user" || value === "assistant" || value === "tool" || value === "status";
+}
+
+function isWorkerSessionEvent(value: unknown): value is WorkerSessionEvent {
+  return value === "started" || value === "progress" || value === "completed" || value === "failed" || value === "stopped";
 }
 
 function isEventLevel(value: unknown): value is "status" | "error" {
