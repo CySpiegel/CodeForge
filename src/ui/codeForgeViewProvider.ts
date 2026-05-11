@@ -67,6 +67,8 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
       this.controller.newSession();
     } else if (message.type === "resumeSession") {
       await this.controller.resumeSession(typeof message.sessionId === "string" ? message.sessionId : undefined);
+    } else if (message.type === "deleteSession" && typeof message.sessionId === "string") {
+      await this.controller.deleteSession(message.sessionId);
     } else if (message.type === "cancel") {
       this.controller.cancel();
     } else if (message.type === "workerStop" && typeof message.workerId === "string") {

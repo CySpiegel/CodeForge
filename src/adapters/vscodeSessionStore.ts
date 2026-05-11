@@ -93,6 +93,27 @@ export class VsCodeSessionStore implements SessionStore {
     return exportUri.fsPath || exportUri.toString();
   }
 
+  async deleteSession(sessionId: string): Promise<boolean> {
+    if (!isSafeSessionId(sessionId)) {
+      return false;
+    }
+
+    await this.flushPendingWrites();
+    try {
+      await vscode.workspace.fs.delete(this.sessionUri(sessionId), { useTrash: false });
+    } catch {
+      return false;
+    }
+
+    const latestSessionId = this.context.workspaceState.get<string>(latestSessionKey);
+    if (latestSessionId === sessionId) {
+      const [mostRecent] = await this.readSnapshots(1);
+      await this.context.workspaceState.update(latestSessionKey, mostRecent?.id);
+    }
+
+    return true;
+  }
+
   private async appendNow(record: SessionRecord): Promise<void> {
     const current = await this.readText(record.sessionId);
     const prefix = current && !current.endsWith("\n") ? `${current}\n` : current;

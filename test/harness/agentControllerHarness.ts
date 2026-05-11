@@ -5,6 +5,7 @@ import { TerminalRunner } from "../../src/adapters/terminalRunner";
 import { CodeIntelAction, CodeIntelPort } from "../../src/core/codeIntel";
 import { MemoryEntry, MemoryListFilter, MemoryStore, MemoryWriteOptions } from "../../src/core/memory";
 import { NotebookAction, NotebookPort } from "../../src/core/notebooks";
+import { applyFilePatch, parseUnifiedDiff, targetPath } from "../../src/core/unifiedDiff";
 import {
   AgentMode,
   CommandResult,
@@ -219,7 +220,14 @@ export class FakeDiffService {
 
   async applyPatch(patch: string): Promise<readonly string[]> {
     this.patches.push(patch);
-    return ["patch.diff"];
+    const changed: string[] = [];
+    for (const filePatch of parseUnifiedDiff(patch)) {
+      const path = targetPath(filePatch);
+      const original = await this.workspace.readTextFile(path, 2_000_000).catch(() => "");
+      this.workspace.write(path, applyFilePatch(original, filePatch));
+      changed.push(path);
+    }
+    return changed;
   }
 
   async applyWriteFile(action: WriteFileAction): Promise<readonly string[]> {

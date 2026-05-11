@@ -206,11 +206,11 @@ function decisionFromModeConstraint(action: AgentAction, mode: PermissionMode): 
     };
   }
 
-  if (mode === "smart" && isRiskyEditAction(action)) {
+  if (mode === "smart" && isSideEffectAction(action)) {
     return {
       behavior: "ask",
       source: "mode",
-      reason: "Smart approval mode asks before large edits, file creation, or file deletion."
+      reason: "Smart approval mode asks before edits, commands, memory writes, notebooks, or service calls."
     };
   }
 
@@ -223,14 +223,6 @@ function defaultDecision(action: AgentAction, mode: PermissionMode): PermissionD
       behavior: "allow",
       source: "default",
       reason: `${toolSummary(action)} does not modify repo files or run shell commands.`
-    };
-  }
-
-  if (mode === "smart" && isSmallEditAction(action)) {
-    return {
-      behavior: "allow",
-      source: "mode",
-      reason: "Smart approval mode allows small workspace edits."
     };
   }
 
@@ -264,44 +256,6 @@ function permissionRuleDescription(rule: PermissionRule): string {
 
 function isSideEffectAction(action: AgentAction): boolean {
   return action.type === "propose_patch" || action.type === "write_file" || action.type === "edit_file" || action.type === "notebook_edit_cell" || action.type === "memory_write" || action.type === "run_command" || action.type === "mcp_call_tool";
-}
-
-function isRiskyEditAction(action: AgentAction): boolean {
-  if (action.type === "write_file") {
-    return true;
-  }
-  if (action.type === "edit_file") {
-    return Boolean(action.replaceAll) || changedLineCount(action.oldText, action.newText) > 80;
-  }
-  if (action.type !== "propose_patch") {
-    return false;
-  }
-
-  try {
-    const patches = parseUnifiedDiff(action.patch);
-    if (patches.length > 3) {
-      return true;
-    }
-    return patches.some((patch) => patch.oldPath === "/dev/null" || patch.newPath === "/dev/null" || patchChangedLines(patch) > 80);
-  } catch {
-    return true;
-  }
-}
-
-function isSmallEditAction(action: AgentAction): boolean {
-  return (action.type === "edit_file" || action.type === "propose_patch") && !isRiskyEditAction(action);
-}
-
-function changedLineCount(oldText: string, newText: string): number {
-  return lineCount(oldText) + lineCount(newText);
-}
-
-function lineCount(value: string): number {
-  return value.length === 0 ? 0 : value.replace(/\r\n/g, "\n").split("\n").length;
-}
-
-function patchChangedLines(patch: ReturnType<typeof parseUnifiedDiff>[number]): number {
-  return patch.hunks.reduce((sum, hunk) => sum + hunk.lines.filter((line) => line.type === "add" || line.type === "remove").length, 0);
 }
 
 function wildcardMatch(pattern: string, value: string): boolean {

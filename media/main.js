@@ -136,7 +136,7 @@
   ];
   const permissionModeOptions = [
     { value: "manual", label: "Manual", description: "Ask before edits and local commands" },
-    { value: "smart", label: "Smart", description: "Allow reads and small edits; ask before risky actions" },
+    { value: "smart", label: "Smart", description: "Allow reads; ask before edits and local actions" },
     { value: "fullAuto", label: "Full Auto", description: "Proceed without most approval prompts" }
   ];
   const agentModeOptions = [
@@ -2523,7 +2523,18 @@
     open.textContent = "Open";
     open.addEventListener("click", () => vscode.postMessage({ type: "resumeSession", sessionId: session.id }));
 
-    row.append(meta, open);
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "secondary";
+    remove.textContent = "Delete";
+    remove.title = `Delete ${session.title || session.id}`;
+    remove.addEventListener("click", () => vscode.postMessage({ type: "deleteSession", sessionId: session.id }));
+
+    const actions = document.createElement("div");
+    actions.className = "session-actions";
+    actions.append(open, remove);
+
+    row.append(meta, actions);
     return row;
   }
 

@@ -60,6 +60,7 @@ export class DiffService {
     const filePatches = parseUnifiedDiff(patch);
     const edit = new vscode.WorkspaceEdit();
     const changedPaths: string[] = [];
+    const changedUris: vscode.Uri[] = [];
 
     for (const filePatch of filePatches) {
       const path = targetPath(filePatch);
@@ -72,12 +73,14 @@ export class DiffService {
       }
       edit.replace(uri, fullRange, proposed);
       changedPaths.push(path);
+      changedUris.push(uri);
     }
 
     const applied = await vscode.workspace.applyEdit(edit);
     if (!applied) {
       throw new Error("VS Code rejected the workspace edit.");
     }
+    await saveAppliedUris(changedUris);
     return changedPaths;
   }
 
@@ -112,6 +115,7 @@ export class DiffService {
     if (!applied) {
       throw new Error("VS Code rejected the workspace edit.");
     }
+    await saveAppliedUris([uri]);
   }
 }
 
@@ -153,4 +157,16 @@ function countOccurrences(value: string, search: string): number {
     index = value.indexOf(search, index + search.length);
   }
   return count;
+}
+
+async function saveAppliedUris(uris: readonly vscode.Uri[]): Promise<void> {
+  for (const uri of uris) {
+    const document = await vscode.workspace.openTextDocument(uri);
+    if (document.isDirty) {
+      const saved = await document.save();
+      if (!saved) {
+        throw new Error(`VS Code applied edits to ${uri.fsPath || uri.toString()} but did not save them.`);
+      }
+    }
+  }
 }

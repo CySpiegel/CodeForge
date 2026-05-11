@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { AgentController, AgentUiState } from "./agent/agentController";
+import { AgentController, AgentSessionSummary, AgentUiState } from "./agent/agentController";
 import { DiffPreviewProvider, DiffService } from "./adapters/diffService";
 import { TerminalRunner } from "./adapters/terminalRunner";
 import { CodeForgeConfigService } from "./adapters/vscodeConfig";
@@ -49,6 +49,9 @@ export function activate(context: vscode.ExtensionContext): void {
       await viewProvider.focus();
       controller.newSession();
     }),
+    vscode.commands.registerCommand("codeforge.showConversations", async () => {
+      await showConversationPicker(controller, viewProvider);
+    }),
     vscode.commands.registerCommand("codeforge.openSettings", () => viewProvider.openSettings()),
     vscode.commands.registerCommand("codeforge.askSelection", async () => {
       await viewProvider.focus();
@@ -89,4 +92,100 @@ function updateStatusBar(item: vscode.StatusBarItem, state: AgentUiState): void 
     `Model: ${state.selectedModel || "(profile default)"}`,
     `Context: ${state.contextUsage.label}`
   ].join("\n");
+}
+
+interface ConversationQuickPickItem extends vscode.QuickPickItem {
+  readonly session: AgentSessionSummary;
+}
+
+const refreshButton: vscode.QuickInputButton = {
+  iconPath: new vscode.ThemeIcon("refresh"),
+  tooltip: "Refresh conversations"
+};
+
+const newConversationButton: vscode.QuickInputButton = {
+  iconPath: new vscode.ThemeIcon("add"),
+  tooltip: "New conversation"
+};
+
+const deleteConversationButton: vscode.QuickInputButton = {
+  iconPath: new vscode.ThemeIcon("trash"),
+  tooltip: "Delete conversation"
+};
+
+async function showConversationPicker(controller: AgentController, viewProvider: CodeForgeViewProvider): Promise<void> {
+  const picker = vscode.window.createQuickPick<ConversationQuickPickItem>();
+  picker.title = "CodeForge Conversations";
+  picker.placeholder = "Select a conversation to resume";
+  picker.matchOnDescription = true;
+  picker.matchOnDetail = true;
+  picker.buttons = [newConversationButton, refreshButton];
+
+  const refresh = async () => {
+    picker.busy = true;
+    const currentSessionId = controller.getCurrentSessionId();
+    const sessions = await controller.listSessions(100);
+    picker.items = sessions.map((session) => toConversationItem(session, currentSessionId));
+    picker.placeholder = sessions.length > 0 ? "Select a conversation to resume" : "No saved CodeForge conversations";
+    picker.busy = false;
+  };
+
+  picker.onDidAccept(async () => {
+    const selected = picker.selectedItems[0];
+    if (!selected) {
+      return;
+    }
+    picker.hide();
+    await viewProvider.focus();
+    await controller.resumeSession(selected.session.id);
+  });
+
+  picker.onDidTriggerButton(async (button) => {
+    if (button === refreshButton) {
+      await refresh();
+      return;
+    }
+    if (button === newConversationButton) {
+      picker.hide();
+      await viewProvider.focus();
+      controller.newSession();
+    }
+  });
+
+  picker.onDidTriggerItemButton(async (event) => {
+    if (event.button !== deleteConversationButton) {
+      return;
+    }
+    const session = event.item.session;
+    const confirmed = await vscode.window.showWarningMessage(
+      `Delete CodeForge conversation "${session.title || session.id}"?`,
+      { modal: true },
+      "Delete"
+    );
+    if (confirmed !== "Delete") {
+      return;
+    }
+    await controller.deleteSession(session.id);
+    await refresh();
+  });
+
+  picker.onDidHide(() => picker.dispose());
+  picker.show();
+  await refresh();
+}
+
+function toConversationItem(session: AgentSessionSummary, currentSessionId: string | undefined): ConversationQuickPickItem {
+  const current = session.id === currentSessionId;
+  const pending = session.pendingApprovalCount > 0 ? `, ${session.pendingApprovalCount} pending approval(s)` : "";
+  return {
+    label: `${current ? "$(circle-filled) " : ""}${session.title || "CodeForge conversation"}`,
+    description: `${formatConversationTime(session.updatedAt)} - ${session.messageCount} message(s)${pending}`,
+    detail: session.id,
+    session,
+    buttons: [deleteConversationButton]
+  };
+}
+
+function formatConversationTime(value: number): string {
+  return new Date(value || Date.now()).toLocaleString();
 }

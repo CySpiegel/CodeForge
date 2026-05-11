@@ -106,6 +106,7 @@ export interface SessionStore {
   readLatest(): Promise<SessionSnapshot | undefined>;
   list(limit: number): Promise<readonly SessionSummary[]>;
   exportSession(sessionId: string): Promise<string | undefined>;
+  deleteSession(sessionId: string): Promise<boolean>;
 }
 
 export function buildSessionSnapshot(records: readonly SessionRecord[]): SessionSnapshot | undefined {

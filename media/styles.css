@@ -1056,6 +1056,19 @@ textarea {
   margin: 0;
 }
 
+.session-actions {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.session-actions button {
+  min-height: 24px;
+  padding: 2px 7px;
+  font-size: 11px;
+}
+
 .message.tool-result pre,
 .approval pre {
   white-space: pre-wrap;

@@ -108,6 +108,69 @@ test("Agent mode executes write_file in full auto through the diff pipeline", as
   assertAssistantMessage(harness.events, /Created SMOKE_AGENT\.md/);
 });
 
+test("Agent mode executes edit_file in full auto through the diff pipeline", async () => {
+  const harness = createControllerHarness({
+    mode: "agent",
+    permissionMode: "fullAuto",
+    files: { "README.md": "# CodeForge\nold value\n" },
+    responses: [
+      { toolCalls: [toolCall("edit_file", { path: "README.md", oldText: "old value", newText: "new value" })] },
+      { content: "Edited README.md." }
+    ]
+  });
+
+  await harness.controller.sendPrompt("Edit README.md.");
+
+  assertToolCompleted(harness.events, "edit_file");
+  assert.equal(harness.diff.edits.length, 1);
+  assert.equal(harness.workspace.files.get("README.md"), "# CodeForge\nnew value\n");
+  assertAssistantMessage(harness.events, /Edited README\.md/);
+});
+
+test("Agent mode applies propose_patch in full auto through the diff pipeline", async () => {
+  const patch = `--- a/src/value.ts
++++ b/src/value.ts
+@@ -1 +1 @@
+-export const value = 1;
++export const value = 2;
+`;
+  const harness = createControllerHarness({
+    mode: "agent",
+    permissionMode: "fullAuto",
+    files: { "src/value.ts": "export const value = 1;\n" },
+    responses: [
+      { toolCalls: [toolCall("propose_patch", { patch })] },
+      { content: "Patched src/value.ts." }
+    ]
+  });
+
+  await harness.controller.sendPrompt("Patch src/value.ts.");
+
+  assertToolCompleted(harness.events, "propose_patch");
+  assert.equal(harness.diff.patches.length, 1);
+  assert.equal(harness.workspace.files.get("src/value.ts"), "export const value = 2;\n");
+  assertAssistantMessage(harness.events, /Patched src\/value\.ts/);
+});
+
+test("Full auto edit failures return tool errors and keep the model loop alive", async () => {
+  const harness = createControllerHarness({
+    mode: "agent",
+    permissionMode: "fullAuto",
+    files: { "README.md": "# CodeForge\nold value\n" },
+    responses: [
+      { toolCalls: [toolCall("edit_file", { path: "README.md", oldText: "missing value", newText: "new value" })] },
+      { content: "I will retry after reading the current file." }
+    ]
+  });
+
+  await harness.controller.sendPrompt("Edit README.md.");
+
+  assertToolFailed(harness.events, "edit_file");
+  assert.equal(harness.workspace.files.get("README.md"), "# CodeForge\nold value\n");
+  assert.ok(harness.events.some((event) => event.type === "toolResult" && /oldText was not found/.test(event.text)));
+  assertAssistantMessage(harness.events, /retry after reading/);
+});
+
 test("pinned active files are attached to future prompt context", async () => {
   const harness = createControllerHarness({
     mode: "ask",
@@ -248,6 +311,52 @@ test("Manual approval pauses side effects, then approve resumes the model loop",
 
   assert.equal(harness.diff.writes.length, 1);
   assert.equal(harness.workspace.files.get("APPROVED.md"), "approved");
+});
+
+test("Smart approval asks before applying file edits in Agent mode", async () => {
+  const harness = createControllerHarness({
+    mode: "agent",
+    permissionMode: "smart",
+    files: { "README.md": "# CodeForge\nold\n" },
+    responses: [
+      { toolCalls: [toolCall("edit_file", { path: "README.md", oldText: "old", newText: "new" })] },
+      { content: "Smart-approved edit completed." }
+    ]
+  });
+
+  await harness.controller.sendPrompt("Edit README.");
+  const approval = harness.events.find((event) => event.type === "approvalRequested");
+  assert.ok(approval && approval.type === "approvalRequested");
+  assert.equal(approval.approval.action.type, "edit_file");
+  assert.equal(harness.diff.edits.length, 0);
+  assert.equal(harness.workspace.files.get("README.md"), "# CodeForge\nold\n");
+
+  await harness.controller.approve(approval.approval.id);
+  await waitForEvent(harness.events, (event) => event.type === "message" && event.role === "assistant" && /Smart-approved edit completed/.test(event.text));
+
+  assert.equal(harness.diff.edits.length, 1);
+  assert.equal(harness.workspace.files.get("README.md"), "# CodeForge\nnew\n");
+});
+
+test("Preview failures still surface an approval instead of failing the request", async () => {
+  const harness = createControllerHarness({
+    mode: "agent",
+    permissionMode: "smart",
+    files: { "README.md": "# CodeForge\nold\n" },
+    responses: [
+      { toolCalls: [toolCall("edit_file", { path: "README.md", oldText: "old", newText: "new" })] }
+    ]
+  });
+  harness.diff.previewEditFile = async () => {
+    throw new Error("preview failed");
+  };
+
+  await harness.controller.sendPrompt("Edit README.");
+  const approval = harness.events.find((event) => event.type === "approvalRequested");
+  assert.ok(approval && approval.type === "approvalRequested");
+  assert.match(approval.approval.detail ?? "", /Diff preview unavailable: preview failed/);
+  assert.equal(harness.diff.edits.length, 0);
+  assert.equal(harness.workspace.files.get("README.md"), "# CodeForge\nold\n");
 });
 
 test("Manual rejection resumes the model loop so the assistant can choose another path", async () => {

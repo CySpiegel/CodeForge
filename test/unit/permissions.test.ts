@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { evaluateActionPermission, normalizePermissionPolicy, parsePermissionRules } from "../../src/core/permissions";
 import { AgentAction, PermissionPolicy } from "../../src/core/types";
 
-test("smart mode allows reads, small edits, and asks for commands", () => {
+test("smart mode allows reads and asks before side effects", () => {
   const policy: PermissionPolicy = { mode: "smart", rules: [] };
   assert.equal(evaluateActionPermission({ type: "read_file", path: "src/index.ts" }, policy).behavior, "allow");
   assert.equal(evaluateActionPermission({ type: "search_text", query: "AgentController" }, policy).behavior, "allow");
@@ -13,8 +13,9 @@ test("smart mode allows reads, small edits, and asks for commands", () => {
       { type: "propose_patch", patch: "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-a\n+b\n" },
       policy
     ).behavior,
-    "allow"
+    "ask"
   );
+  assert.equal(evaluateActionPermission({ type: "edit_file", path: "src/index.ts", oldText: "old", newText: "new" }, policy).behavior, "ask");
   assert.equal(evaluateActionPermission({ type: "write_file", path: "src/new.ts", content: "export {};" }, policy).behavior, "ask");
   assert.equal(evaluateActionPermission({ type: "run_command", command: "npm test" }, policy).behavior, "ask");
   assert.equal(evaluateActionPermission({ type: "mcp_call_tool", serverId: "local", toolName: "tools.echo" }, policy).behavior, "ask");
@@ -101,7 +102,7 @@ test("permission mode matrix covers each side-effect family", () => {
       name: "small patch",
       action: { type: "propose_patch", patch: "--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n" },
       manual: "ask",
-      smart: "allow",
+      smart: "ask",
       fullAuto: "allow"
     },
     {
@@ -122,7 +123,7 @@ test("permission mode matrix covers each side-effect family", () => {
       name: "small exact edit",
       action: { type: "edit_file", path: "src/a.ts", oldText: "old", newText: "new" },
       manual: "ask",
-      smart: "allow",
+      smart: "ask",
       fullAuto: "allow"
     },
     {

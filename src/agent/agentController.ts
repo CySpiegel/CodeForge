@@ -452,6 +452,46 @@ export class AgentController {
     this.emit({ type: "state", state: await this.getState() });
   }
 
+  async listSessions(limit = 50): Promise<readonly AgentSessionSummary[]> {
+    if (!this.sessionStore) {
+      return [];
+    }
+    return (await this.sessionStore.list(limit)).map(toAgentSessionSummary);
+  }
+
+  getCurrentSessionId(): string | undefined {
+    return this.sessionId;
+  }
+
+  async deleteSession(sessionId: string): Promise<boolean> {
+    if (!this.sessionStore) {
+      this.emit({ type: "error", text: "Session history is not available in this environment." });
+      return false;
+    }
+    if (!sessionId) {
+      this.emit({ type: "error", text: "Select a CodeForge session to delete." });
+      return false;
+    }
+    if (this.runningAbort && this.sessionId === sessionId) {
+      this.emit({ type: "error", text: "Stop the current CodeForge request before deleting the active conversation." });
+      return false;
+    }
+
+    const deleted = await this.sessionStore.deleteSession(sessionId);
+    if (!deleted) {
+      this.emit({ type: "error", text: `No saved CodeForge session found for ${sessionId}.` });
+      return false;
+    }
+
+    if (this.sessionId === sessionId) {
+      this.reset();
+    } else {
+      await this.publishState();
+    }
+    this.emit({ type: "status", text: `Deleted conversation ${sessionId}.` });
+    return true;
+  }
+
   async refreshModels(): Promise<void> {
     try {
       const provider = await this.createProvider();
@@ -1512,14 +1552,24 @@ export class AgentController {
   }
 
   private async requestApproval(action: AgentAction, toolCallId: string | undefined, decision: PermissionDecision, metadata?: { readonly detail?: string; readonly risk?: string; readonly origin?: ApprovalRequest["origin"] }): Promise<ApprovalRequest> {
-    const approval = this.approvals.createForAction(action, decision, toolCallId, metadata ?? this.approvalMetadata(action, decision));
-    if (action.type === "propose_patch") {
-      await this.diff.previewPatch(action.patch);
-    } else if (action.type === "write_file") {
-      await this.diff.previewWriteFile(action);
-    } else if (action.type === "edit_file") {
-      await this.diff.previewEditFile(action);
+    let approvalMetadata = metadata ?? this.approvalMetadata(action, decision);
+    try {
+      if (action.type === "propose_patch") {
+        await this.diff.previewPatch(action.patch);
+      } else if (action.type === "write_file") {
+        await this.diff.previewWriteFile(action);
+      } else if (action.type === "edit_file") {
+        await this.diff.previewEditFile(action);
+      }
+    } catch (error) {
+      const previewError = `Diff preview unavailable: ${errorMessage(error)}`;
+      this.recordInspector("warn", "approval", `Preview failed for ${action.type}.`, previewError);
+      approvalMetadata = {
+        ...approvalMetadata,
+        detail: [approvalMetadata.detail, previewError].filter((item): item is string => Boolean(item)).join("\n\n")
+      };
     }
+    const approval = this.approvals.createForAction(action, decision, toolCallId, approvalMetadata);
     await this.recordApprovalRequested(approval);
     this.recordInspector("warn", "approval", `Approval requested for ${action.type}.`, decision.reason);
     this.emit({ type: "approvalRequested", approval });
