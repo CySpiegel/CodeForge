@@ -1,17 +1,19 @@
 import { ToolDefinition } from "./types";
 
-export type WorkerKind = "explore" | "plan" | "review" | "verify";
+export type WorkerKind = "explore" | "plan" | "review" | "verify" | "implement" | "custom";
 export type WorkerStatus = "running" | "completed" | "failed" | "stopped";
 export type WorkerTranscriptRole = "system" | "user" | "assistant" | "tool" | "status";
 
 export interface WorkerDefinition {
   readonly kind: WorkerKind;
   readonly label: string;
+  readonly name?: string;
   readonly description: string;
   readonly slashCommand: string;
   readonly maxTurns: number;
   readonly allowedToolNames: readonly ToolDefinition["name"][];
   readonly systemPrompt: string;
+  readonly local?: boolean;
 }
 
 export interface WorkerSummary {

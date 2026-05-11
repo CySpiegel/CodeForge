@@ -79,10 +79,13 @@
     { name: "commands", description: "List workspace-local slash commands" },
     { name: "mcp", description: "List configured local MCP servers" },
     { name: "workers", description: "List local background workers" },
-    { name: "worker", description: "Manage workers", argumentHint: "list|plan|output|stop" },
+    { name: "worker", description: "Manage workers", argumentHint: "list|plan|implement|agent|output|stop" },
+    { name: "agents", description: "List workspace-local agents" },
+    { name: "agent-run", description: "Run a workspace-local agent", argumentHint: "<name> <task>" },
     { name: "explore", description: "Run a read-only exploration worker", argumentHint: "<task>" },
     { name: "review", description: "Run a read-only review worker", argumentHint: "<scope>" },
     { name: "verify", description: "Run a read-only verification worker", argumentHint: "<task>" },
+    { name: "implement", description: "Run an approval-gated implementation worker", argumentHint: "<task>" },
     { name: "plan-worker", description: "Run a read-only planning worker", argumentHint: "<task>" },
     { name: "skills", description: "List workspace-local skills" },
     { name: "skill", description: "Run a workspace-local skill", argumentHint: "<name> <task>" },
@@ -1979,6 +1982,12 @@
 
     const actions = document.createElement("div");
     actions.className = "approval-actions";
+    if (approval.action?.type === "ask_user_question") {
+      const questionForm = renderQuestionApproval(approval, reason);
+      item.append(title, summary, risk, questionForm, actions);
+      elements.approvals?.append(item);
+      return;
+    }
     if (hasDiffPreview(approval.action)) {
       const review = document.createElement("button");
       review.textContent = "Review";
@@ -1996,6 +2005,89 @@
 
     item.append(title, summary, risk, reason, detail, actions);
     elements.approvals?.append(item);
+  }
+
+  function renderQuestionApproval(approval, reasonElement) {
+    const form = document.createElement("form");
+    form.className = "question-approval";
+    const questions = Array.isArray(approval.action?.questions) ? approval.action.questions : [];
+    const error = document.createElement("div");
+    error.className = "approval-reason";
+    error.textContent = reasonElement.textContent;
+    form.append(error);
+
+    questions.forEach((question, questionIndex) => {
+      const field = document.createElement("fieldset");
+      field.className = "question-field";
+      const legend = document.createElement("legend");
+      legend.textContent = question.question || `Question ${questionIndex + 1}`;
+      field.append(legend);
+
+      const options = Array.isArray(question.options) ? question.options : [];
+      options.forEach((option, optionIndex) => {
+        const id = `${approval.id}-${questionIndex}-${optionIndex}`;
+        const label = document.createElement("label");
+        label.className = "question-option";
+        const input = document.createElement("input");
+        input.type = question.multiSelect ? "checkbox" : "radio";
+        input.name = `${approval.id}-${questionIndex}`;
+        input.value = option.label || "";
+        input.id = id;
+        const text = document.createElement("span");
+        text.textContent = `${option.label || "Option"}${option.description ? ` - ${option.description}` : ""}`;
+        label.append(input, text);
+        field.append(label);
+        if (option.preview) {
+          const preview = document.createElement("pre");
+          preview.className = "question-preview";
+          preview.textContent = option.preview;
+          field.append(preview);
+        }
+      });
+
+      const other = document.createElement("input");
+      other.className = "question-other";
+      other.type = "text";
+      other.placeholder = "Other";
+      other.dataset.questionIndex = String(questionIndex);
+      field.append(other);
+      form.append(field);
+    });
+
+    const actions = document.createElement("div");
+    actions.className = "approval-actions";
+    const submit = document.createElement("button");
+    submit.type = "submit";
+    submit.textContent = "Submit";
+    const reject = document.createElement("button");
+    reject.type = "button";
+    reject.className = "secondary";
+    reject.textContent = "Skip";
+    reject.addEventListener("click", () => vscode.postMessage({ type: "reject", id: approval.id }));
+    actions.append(submit, reject);
+    form.append(actions);
+
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const answers = {};
+      let missing = false;
+      questions.forEach((question, questionIndex) => {
+        const selected = Array.from(form.querySelectorAll(`input[name="${cssEscape(`${approval.id}-${questionIndex}`)}"]:checked`)).map((input) => input.value).filter(Boolean);
+        const other = form.querySelector(`.question-other[data-question-index="${questionIndex}"]`)?.value?.trim();
+        const answer = other || selected.join(", ");
+        if (!answer) {
+          missing = true;
+        }
+        answers[question.question] = answer;
+      });
+      if (missing) {
+        error.textContent = "Select or type an answer for each question.";
+        return;
+      }
+      vscode.postMessage({ type: "answerQuestion", id: approval.id, answers });
+    });
+
+    return form;
   }
 
   function removeApproval(id) {
@@ -2110,6 +2202,12 @@
     output.textContent = "Open";
     output.addEventListener("click", () => vscode.postMessage({ type: "workerOutput", workerId: worker.id }));
     actions.append(output);
+    const attach = document.createElement("button");
+    attach.type = "button";
+    attach.className = "secondary";
+    attach.textContent = "Attach";
+    attach.addEventListener("click", () => vscode.postMessage({ type: "workerAttach", workerId: worker.id }));
+    actions.append(attach);
     if (worker.status === "running") {
       const stop = document.createElement("button");
       stop.type = "button";
@@ -2197,6 +2295,42 @@
     }
     if (action.type === "mcp_call_tool") {
       return `${action.serverId}/${action.toolName}\n\n${JSON.stringify(action.arguments || {}, null, 2)}`;
+    }
+    if (action.type === "ask_user_question") {
+      return (action.questions || []).map((question) => {
+        const options = (question.options || []).map((option) => `- ${option.label}: ${option.description}`).join("\n");
+        return `${question.question}\n${options}`;
+      }).join("\n\n");
+    }
+    if (action.type === "task_create") {
+      return `${action.subject || ""}\n\n${action.description || ""}`;
+    }
+    if (action.type === "task_update") {
+      return `${action.taskId || ""}${action.status ? ` -> ${action.status}` : ""}`;
+    }
+    if (action.type === "task_get") {
+      return action.taskId || "";
+    }
+    if (action.type === "task_list") {
+      return action.status || "all tasks";
+    }
+    if (action.type === "code_hover" || action.type === "code_definition" || action.type === "code_references") {
+      return `${action.path}:${action.line}:${action.character}`;
+    }
+    if (action.type === "code_symbols") {
+      return action.path || action.query || "";
+    }
+    if (action.type === "mcp_list_resources") {
+      return action.serverId || "all configured MCP servers";
+    }
+    if (action.type === "mcp_read_resource") {
+      return `${action.serverId}:${action.uri}`;
+    }
+    if (action.type === "notebook_read") {
+      return action.path;
+    }
+    if (action.type === "notebook_edit_cell") {
+      return `${action.path} cell ${action.index}\n\n${action.content || ""}`;
     }
     if (action.type === "propose_patch") {
       return action.patch;

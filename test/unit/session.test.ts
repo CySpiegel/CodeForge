@@ -102,3 +102,28 @@ test("keeps worker records in session snapshots", () => {
   assert.equal(snapshot.records.length, 2);
   assert.equal(snapshot.records[1]?.type, "worker");
 });
+
+test("keeps task records in session snapshots", () => {
+  const snapshot = buildSessionSnapshot([
+    { type: "session_started", sessionId: "session-1", createdAt: 1, schemaVersion: 1, title: "CodeForge session" },
+    {
+      type: "task",
+      sessionId: "session-1",
+      createdAt: 2,
+      event: "created",
+      task: {
+        id: "task-2-abc",
+        subject: "Inspect auth",
+        status: "pending",
+        blocks: [],
+        blockedBy: [],
+        createdAt: 2,
+        updatedAt: 2
+      }
+    }
+  ]);
+
+  assert.ok(snapshot);
+  assert.equal(snapshot.records.length, 2);
+  assert.equal(snapshot.records[1]?.type, "task");
+});

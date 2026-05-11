@@ -20,7 +20,8 @@ CodeForge is a VS Code extension only. There will be no CLI edition and no brows
 - No browser preview surface for viewing work on websites.
 - No cloud provider presets.
 - No public internet tool access.
-- No web fetch or web search tools.
+- No web fetch or web search tools for now.
+- No cron or scheduled job tools for now.
 
 ## Guiding Architecture
 
@@ -212,13 +213,16 @@ Exit criteria:
 
 Purpose: bring useful Harnes-style delegation into VS Code without becoming a terminal swarm UI.
 
-Status: initial implementation in progress. CodeForge now has a VS Code-native worker task layer for bounded local workers. The first slice supports read-only Explore, Plan, Review, and Verify workers that run against the active OpenAI-compatible endpoint, inherit the same workspace context policy, persist worker records in the local session JSONL stream, and render worker status in the extension view. Write-capable workers, command-capable verification, and permission bubbling for side effects remain follow-up work.
+Status: implemented for the Phase 9 scope. CodeForge now has a VS Code-native worker task layer for bounded local workers. The current slice supports read-only Explore, Plan, and Review workers, a command-capable Verify worker with parent approval bubbling, an approval-gated Implement worker, and workspace-local custom agent definitions loaded from `.codeforge/agents/*.md` or `.codeforge/agents/<name>/AGENT.md`. Workers run against the active OpenAI-compatible endpoint, inherit the same workspace context policy, persist worker records in the local session JSONL stream, and render worker status in the extension view. The Harnes-style delegation path is also model-facing: the main agent and allowed local agents can use internal `spawn_agent`, `worker_output`, and approval-gated `memory_write` tools without exposing those as noisy primary UI controls.
 
 Scope:
 - Add bounded worker sessions for codebase exploration, implementation planning, review, and verification.
+- Add an approval-gated implementation worker that can search, read, learn project patterns, and request file edits through the parent VS Code approval/checkpoint path.
+- Add workspace-local user-defined agents with file-backed instructions, tool scopes, and max-turn configuration.
+- Add model-facing internal tools for agent delegation, worker output retrieval, and local memory writes so the harness can coordinate work inside the model loop.
 - Keep workers local to the same configured OpenAI-compatible endpoint, selected model, offline network policy, and workspace context policy.
 - Give every worker an isolated transcript, abort controller, token/tool progress, and capped status summary.
-- Enforce worker capabilities in code, not just prompts. Explore, Plan, Review, and the initial Verify worker are read-only and may only use VS Code-native read/search/diagnostic tools.
+- Enforce worker capabilities in code, not just prompts. Explore, Plan, and Review are read-only. Verify can request terminal commands only through the parent approval bridge. Implement and write-capable local agents can request edits only through the parent diff/checkpoint path.
 - Present worker output as summarized session artifacts in the VS Code extension view, not separate terminals, tmux panes, remote sessions, or website views.
 - Persist worker start/progress/completion/failure records in local session storage.
 - Add slash commands and UI affordances:
@@ -229,22 +233,52 @@ Scope:
   - `/explore <task>`
   - `/review <scope>`
   - `/verify <task>`
-- Add a future permission bridge before allowing any worker to run terminal commands, call MCP tools, or write files.
-- Add explicit write scopes before adding implementation workers. No worker may make hidden background edits.
+  - `/implement <task>`
+  - `/agents`
+  - `/agent-run <name> <task>`
+- Use a parent permission bridge before allowing any worker to run terminal commands, call MCP tools, or write files.
+- No worker or local agent may make hidden background edits.
 
 Exit criteria:
-- Users can run a review or exploration worker from the VS Code extension view.
+- Users can run review, exploration, implementation, or workspace-local custom agents from the VS Code extension view.
 - Worker permissions cannot exceed the parent session.
 - Worker summaries include files inspected, claims, and confidence.
 - No hidden background edits.
 - Reloading a workspace session can replay completed worker records.
 - Running workers can be stopped from the extension view.
+- Worker output can be inspected, attached back into the main chat context, or fetched by the model through the internal worker-output tool.
 
 Follow-up slices:
-- Command-capable Verify worker with parent approval bubbling for `run_command`.
-- Scoped implementation workers that can only propose diffs for explicit paths and must surface VS Code diff previews through the parent approval queue.
+- Local agent authoring UI for creating/editing `.codeforge/agents` files from inside the extension.
 - Worker transcript viewer polish, filtering, and transcript export.
-- Worker output attachment back into the main chat context.
+
+## Phase 9B: Harnes-Style Internal Tool Coverage
+
+Purpose: close the tool capability gap while preserving VS Code-only, local/offline-first operation.
+
+Status: implemented. CodeForge now exposes the Harnes-style tooling as typed, model-facing internal actions in the same agent loop rather than as a separate CLI surface. The implemented coverage includes structured user questions, local session task tracking, tool discovery, VS Code language-service queries, configured MCP resource list/read, VS Code notebook read/edit, and scoped local memory. Public web and cron tools remain explicitly out of scope.
+
+Scope:
+- Treat Harnes-style tools primarily as model-facing internal automations and state transitions, not as commands the user must manually drive.
+- Include AskUserQuestion-style interaction so agents can pause and ask the user a structured question during a coding workflow.
+- Include task/todo tools for durable multi-step work tracking.
+- Include LSP code intelligence tools for hover, definitions, references, and symbols through VS Code APIs.
+- Include direct MCP resource list/read tools for configured local/on-prem MCP servers.
+- Include notebook edit support through VS Code notebook APIs.
+- Include tool discovery for the model so local agents can inspect available CodeForge tools without guessing.
+- Include local persistent memory improvements:
+  - shared workspace memory
+  - user preference memory
+  - agent-specific memory namespaces
+  - explicit user controls for inspect/remove/clear
+- Exclude web fetch/search tools until explicitly re-scoped for local/on-prem use only.
+- Exclude cron/scheduled job tools for now.
+
+Exit criteria:
+- Tool behavior is available to both the main agent loop and local agents where permissions allow it.
+- Every side-effect tool uses the shared permission, approval, checkpoint, and local session record path.
+- Persistent memory remains local, inspectable, and user-controllable.
+- No public network capability is added.
 
 ## Phase 10: Packaging, Reliability, And Local Operations
 

@@ -1,4 +1,4 @@
-import { AgentAction, ApprovalRequest, ChatMessage } from "./types";
+import { AgentAction, ApprovalRequest, ChatMessage, CodeForgeTask } from "./types";
 import { WorkerSessionEvent, WorkerSummary, WorkerTranscriptEntry } from "./workerTypes";
 
 export interface SessionSummary {
@@ -24,6 +24,7 @@ export type SessionRecord =
   | SessionApprovalResolvedRecord
   | SessionCheckpointRecord
   | SessionWorkerRecord
+  | SessionTaskRecord
   | SessionEventRecord;
 
 export interface SessionStartedRecord {
@@ -80,6 +81,14 @@ export interface SessionWorkerRecord {
   readonly event: WorkerSessionEvent;
   readonly worker: WorkerSummary;
   readonly transcriptEntry?: WorkerTranscriptEntry;
+}
+
+export interface SessionTaskRecord {
+  readonly type: "task";
+  readonly sessionId: string;
+  readonly createdAt: number;
+  readonly event: "created" | "updated";
+  readonly task: CodeForgeTask;
 }
 
 export interface SessionEventRecord {

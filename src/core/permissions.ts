@@ -174,6 +174,14 @@ function commandPatternMatches(pattern: string, command: string): boolean {
 }
 
 function decisionFromModeConstraint(action: AgentAction, mode: PermissionMode): PermissionDecision | undefined {
+  if (action.type === "ask_user_question") {
+    return {
+      behavior: "ask",
+      source: "default",
+      reason: "The model needs an answer from the user before continuing."
+    };
+  }
+
   if (mode === "manual" && isSideEffectAction(action)) {
     return {
       behavior: "ask",
@@ -210,11 +218,11 @@ function decisionFromModeConstraint(action: AgentAction, mode: PermissionMode): 
 }
 
 function defaultDecision(action: AgentAction, mode: PermissionMode): PermissionDecision {
-  if (action.type === "list_files" || action.type === "glob_files" || action.type === "read_file" || action.type === "search_text" || action.type === "grep_text" || action.type === "list_diagnostics" || action.type === "open_diff") {
+  if (action.type === "list_files" || action.type === "glob_files" || action.type === "read_file" || action.type === "search_text" || action.type === "grep_text" || action.type === "list_diagnostics" || action.type === "tool_list" || action.type === "task_list" || action.type === "task_get" || action.type === "task_create" || action.type === "task_update" || action.type === "code_hover" || action.type === "code_definition" || action.type === "code_references" || action.type === "code_symbols" || action.type === "mcp_list_resources" || action.type === "mcp_read_resource" || action.type === "notebook_read" || action.type === "open_diff" || action.type === "spawn_agent" || action.type === "worker_output") {
     return {
       behavior: "allow",
       source: "default",
-      reason: `${toolSummary(action)} does not modify the workspace.`
+      reason: `${toolSummary(action)} does not modify workspace files or run shell commands.`
     };
   }
 
@@ -255,7 +263,7 @@ function permissionRuleDescription(rule: PermissionRule): string {
 }
 
 function isSideEffectAction(action: AgentAction): boolean {
-  return action.type === "propose_patch" || action.type === "write_file" || action.type === "edit_file" || action.type === "run_command" || action.type === "mcp_call_tool";
+  return action.type === "propose_patch" || action.type === "write_file" || action.type === "edit_file" || action.type === "notebook_edit_cell" || action.type === "memory_write" || action.type === "run_command" || action.type === "mcp_call_tool";
 }
 
 function isRiskyEditAction(action: AgentAction): boolean {

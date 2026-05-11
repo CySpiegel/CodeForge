@@ -2,7 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   formatLocalCommandList,
+  formatLocalAgentList,
   formatLocalSkillList,
+  loadLocalAgents,
   loadLocalCommands,
   loadLocalHooks,
   loadLocalSkills,
@@ -74,6 +76,34 @@ Use strict TypeScript patterns.
   assert.match(renderLocalSkillPrompt(skills[1], "Fix types"), /Use strict TypeScript patterns/);
 });
 
+test("loads local agents from flat files and AGENT.md directories", async () => {
+  const workspace = new FakeWorkspace({
+    ".codeforge/agents/code-reviewer.md": `---
+label: Code Reviewer
+description: Review code for correctness
+tools: read, edit
+max-turns: 8
+---
+Review changes for defects before style comments.
+`,
+    ".codeforge/agents/planner/AGENT.md": `---
+description: Planning agent
+tools: read
+---
+Plan implementation work.
+`
+  });
+
+  const agents = await loadLocalAgents(workspace);
+
+  assert.deepEqual(agents.map((agent) => agent.name), ["code-reviewer", "planner"]);
+  assert.equal(agents[0].label, "Code Reviewer");
+  assert.deepEqual(agents[0].tools, ["read", "edit"]);
+  assert.equal(agents[0].maxTurns, 8);
+  assert.match(formatLocalAgentList(agents), /code-reviewer/);
+  assert.match(formatLocalAgentList(agents), /tools: read, edit/);
+});
+
 test("parses local hooks and matches tool events", () => {
   const hooks = parseLocalHooks(JSON.stringify({
     hooks: [
@@ -138,6 +168,12 @@ class FakeWorkspace implements WorkspacePort {
     }
     if (pattern === ".codeforge/skills/*/SKILL.md") {
       return Object.keys(this.files).filter((path) => /^\.codeforge\/skills\/[^/]+\/SKILL\.md$/.test(path));
+    }
+    if (pattern === ".codeforge/agents/*.md") {
+      return Object.keys(this.files).filter((path) => /^\.codeforge\/agents\/[^/]+\.md$/.test(path));
+    }
+    if (pattern === ".codeforge/agents/*/AGENT.md") {
+      return Object.keys(this.files).filter((path) => /^\.codeforge\/agents\/[^/]+\/AGENT\.md$/.test(path));
     }
     return [];
   }

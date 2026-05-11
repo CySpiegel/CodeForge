@@ -2,21 +2,31 @@ import { parseUnifiedDiff } from "./unifiedDiff";
 import { classifyShellCommand } from "./shellSemantics";
 import {
   AgentAction,
+  AskUserQuestionAction,
+  CodeDefinitionAction,
+  CodeForgeTaskStatus,
+  CodeHoverAction,
+  CodeReferencesAction,
   EditFileAction,
   GlobFilesAction,
   GrepTextAction,
   ListDiagnosticsAction,
   ListFilesAction,
+  MemoryWriteAction,
   McpCallToolAction,
+  NotebookEditCellAction,
   ProposePatchAction,
   ReadFileAction,
   RunCommandAction,
   SearchTextAction,
   ToolDefinition,
+  NotebookCellKindName,
+  QuestionOption,
+  UserQuestion,
   WriteFileAction
 } from "./types";
 
-export type ToolRisk = "read" | "search" | "edit" | "command";
+export type ToolRisk = "read" | "search" | "automation" | "question" | "memory" | "state" | "service" | "edit" | "command";
 
 export interface ToolValidationResult {
   readonly ok: boolean;
@@ -263,6 +273,656 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
     },
     summarize(action) {
       return action.type === "list_diagnostics" ? `List diagnostics${action.path ? ` for ${action.path}` : ""}` : "List diagnostics";
+    }
+  },
+  {
+    name: "spawn_agent",
+    description: "Launch a CodeForge built-in or workspace-local agent to investigate, review, verify, or implement a task.",
+    risk: "automation",
+    concurrencySafe: true,
+    requiresApproval: false,
+    parameters: {
+      type: "object",
+      properties: {
+        agent: { type: "string" },
+        prompt: { type: "string" },
+        description: { type: "string" },
+        background: { type: "boolean" },
+        reason: { type: "string" }
+      },
+      required: ["prompt"],
+      additionalProperties: false
+    },
+    parse(input) {
+      return typeof input.prompt === "string"
+        ? {
+          type: "spawn_agent",
+          agent: optionalString(input.agent),
+          prompt: input.prompt,
+          description: optionalString(input.description),
+          background: typeof input.background === "boolean" ? input.background : undefined,
+          reason: optionalString(input.reason)
+        }
+        : undefined;
+    },
+    validate(action) {
+      if (action.type !== "spawn_agent") {
+        return invalidToolType(action, "spawn_agent");
+      }
+      if (!action.prompt.trim()) {
+        return { ok: false, message: "Agent prompt must not be empty." };
+      }
+      if (action.prompt.length > 24000) {
+        return { ok: false, message: "Agent prompt is too long." };
+      }
+      if (action.agent && !isSafeExtensionName(action.agent)) {
+        return { ok: false, message: "Agent name must contain only letters, numbers, underscores, or dashes." };
+      }
+      return { ok: true };
+    },
+    summarize(action) {
+      return action.type === "spawn_agent" ? `Launch agent ${action.agent || "implement"}` : "Launch agent";
+    }
+  },
+  {
+    name: "worker_output",
+    description: "Read the current status and transcript of a CodeForge worker or local agent.",
+    risk: "automation",
+    concurrencySafe: true,
+    requiresApproval: false,
+    parameters: {
+      type: "object",
+      properties: {
+        workerId: { type: "string" },
+        reason: { type: "string" }
+      },
+      required: ["workerId"],
+      additionalProperties: false
+    },
+    parse(input) {
+      return typeof input.workerId === "string"
+        ? { type: "worker_output", workerId: input.workerId, reason: optionalString(input.reason) }
+        : undefined;
+    },
+    validate(action) {
+      if (action.type !== "worker_output") {
+        return invalidToolType(action, "worker_output");
+      }
+      return isSafeWorkerId(action.workerId)
+        ? { ok: true }
+        : { ok: false, message: "Worker id is invalid." };
+    },
+    summarize(action) {
+      return action.type === "worker_output" ? `Read worker output ${action.workerId}` : "Read worker output";
+    }
+  },
+  {
+    name: "ask_user_question",
+    description: "Pause the local model loop and ask the user one or more structured multiple-choice questions inside the VS Code extension.",
+    risk: "question",
+    concurrencySafe: true,
+    requiresApproval: true,
+    parameters: {
+      type: "object",
+      properties: {
+        questions: {
+          type: "array",
+          minItems: 1,
+          maxItems: 4,
+          items: {
+            type: "object",
+            properties: {
+              question: { type: "string" },
+              header: { type: "string" },
+              multiSelect: { type: "boolean" },
+              options: {
+                type: "array",
+                minItems: 2,
+                maxItems: 4,
+                items: {
+                  type: "object",
+                  properties: {
+                    label: { type: "string" },
+                    description: { type: "string" },
+                    preview: { type: "string" }
+                  },
+                  required: ["label", "description"],
+                  additionalProperties: false
+                }
+              }
+            },
+            required: ["question", "header", "options"],
+            additionalProperties: false
+          }
+        },
+        reason: { type: "string" }
+      },
+      required: ["questions"],
+      additionalProperties: false
+    },
+    parse(input) {
+      const questions = parseQuestions(input.questions);
+      return questions.length > 0
+        ? { type: "ask_user_question", questions, reason: optionalString(input.reason) }
+        : undefined;
+    },
+    validate(action) {
+      if (action.type !== "ask_user_question") {
+        return invalidToolType(action, "ask_user_question");
+      }
+      if (action.questions.length < 1 || action.questions.length > 4) {
+        return { ok: false, message: "ask_user_question requires 1-4 questions." };
+      }
+      const seenQuestions = new Set<string>();
+      for (const question of action.questions) {
+        if (!question.question.trim() || !question.question.trim().endsWith("?")) {
+          return { ok: false, message: "Each question must be non-empty and end with a question mark." };
+        }
+        if (!question.header.trim() || question.header.length > 18) {
+          return { ok: false, message: "Each question header must be 1-18 characters." };
+        }
+        const normalizedQuestion = question.question.trim().toLowerCase();
+        if (seenQuestions.has(normalizedQuestion)) {
+          return { ok: false, message: "Question texts must be unique." };
+        }
+        seenQuestions.add(normalizedQuestion);
+        if (question.options.length < 2 || question.options.length > 4) {
+          return { ok: false, message: "Each question must have 2-4 options." };
+        }
+        const labels = new Set<string>();
+        for (const option of question.options) {
+          if (!option.label.trim() || !option.description.trim()) {
+            return { ok: false, message: "Question option labels and descriptions must not be empty." };
+          }
+          if (option.label.length > 40) {
+            return { ok: false, message: "Question option labels must be 40 characters or fewer." };
+          }
+          const normalizedLabel = option.label.trim().toLowerCase();
+          if (labels.has(normalizedLabel)) {
+            return { ok: false, message: "Option labels must be unique within a question." };
+          }
+          labels.add(normalizedLabel);
+        }
+      }
+      return { ok: true };
+    },
+    summarize(action) {
+      return action.type === "ask_user_question" ? `Ask ${action.questions.length} user question(s)` : "Ask user question";
+    }
+  },
+  {
+    name: "tool_list",
+    description: "List CodeForge model-facing tools, risks, approval requirements, and concurrency metadata.",
+    risk: "read",
+    concurrencySafe: true,
+    requiresApproval: false,
+    parameters: {
+      type: "object",
+      properties: {
+        reason: { type: "string" }
+      },
+      additionalProperties: false
+    },
+    parse(input) {
+      return { type: "tool_list", reason: optionalString(input.reason) };
+    },
+    validate(action) {
+      return action.type === "tool_list" ? { ok: true } : invalidToolType(action, "tool_list");
+    },
+    summarize() {
+      return "List available tools";
+    }
+  },
+  {
+    name: "task_create",
+    description: "Create a durable local task for multi-step agent work in the current VS Code chat session.",
+    risk: "state",
+    concurrencySafe: false,
+    requiresApproval: false,
+    parameters: {
+      type: "object",
+      properties: {
+        subject: { type: "string" },
+        description: { type: "string" },
+        activeForm: { type: "string" },
+        owner: { type: "string" },
+        blocks: { type: "array", items: { type: "string" } },
+        blockedBy: { type: "array", items: { type: "string" } },
+        metadata: { type: "object" },
+        reason: { type: "string" }
+      },
+      required: ["subject"],
+      additionalProperties: false
+    },
+    parse(input) {
+      return typeof input.subject === "string"
+        ? {
+          type: "task_create",
+          subject: input.subject,
+          description: optionalString(input.description),
+          activeForm: optionalString(input.activeForm),
+          owner: optionalString(input.owner),
+          blocks: optionalStringArray(input.blocks),
+          blockedBy: optionalStringArray(input.blockedBy),
+          metadata: isRecord(input.metadata) ? input.metadata : undefined,
+          reason: optionalString(input.reason)
+        }
+        : undefined;
+    },
+    validate(action) {
+      if (action.type !== "task_create") {
+        return invalidToolType(action, "task_create");
+      }
+      return validateTaskSubject(action.subject) ?? validateTaskIds(action.blocks) ?? validateTaskIds(action.blockedBy) ?? { ok: true };
+    },
+    summarize(action) {
+      return action.type === "task_create" ? `Create task ${action.subject}` : "Create task";
+    }
+  },
+  {
+    name: "task_update",
+    description: "Update a durable local task status, owner, description, dependencies, or metadata.",
+    risk: "state",
+    concurrencySafe: false,
+    requiresApproval: false,
+    parameters: {
+      type: "object",
+      properties: {
+        taskId: { type: "string" },
+        subject: { type: "string" },
+        description: { type: "string" },
+        activeForm: { type: "string" },
+        status: { type: "string", enum: ["pending", "in_progress", "blocked", "completed", "cancelled"] },
+        owner: { type: "string" },
+        blocks: { type: "array", items: { type: "string" } },
+        blockedBy: { type: "array", items: { type: "string" } },
+        metadata: { type: "object" },
+        reason: { type: "string" }
+      },
+      required: ["taskId"],
+      additionalProperties: false
+    },
+    parse(input) {
+      return typeof input.taskId === "string"
+        ? {
+          type: "task_update",
+          taskId: input.taskId,
+          subject: optionalString(input.subject),
+          description: optionalString(input.description),
+          activeForm: optionalString(input.activeForm),
+          status: parseTaskStatus(input.status),
+          owner: optionalString(input.owner),
+          blocks: optionalStringArray(input.blocks),
+          blockedBy: optionalStringArray(input.blockedBy),
+          metadata: isRecord(input.metadata) ? input.metadata : undefined,
+          reason: optionalString(input.reason)
+        }
+        : undefined;
+    },
+    validate(action) {
+      if (action.type !== "task_update") {
+        return invalidToolType(action, "task_update");
+      }
+      const idResult = validateTaskId(action.taskId);
+      if (!idResult.ok) {
+        return idResult;
+      }
+      if (action.subject !== undefined) {
+        const subject = validateTaskSubject(action.subject);
+        if (subject) {
+          return subject;
+        }
+      }
+      return validateTaskIds(action.blocks) ?? validateTaskIds(action.blockedBy) ?? { ok: true };
+    },
+    summarize(action) {
+      return action.type === "task_update" ? `Update task ${action.taskId}` : "Update task";
+    }
+  },
+  {
+    name: "task_list",
+    description: "List durable local tasks for the current chat session.",
+    risk: "read",
+    concurrencySafe: true,
+    requiresApproval: false,
+    parameters: {
+      type: "object",
+      properties: {
+        status: { type: "string", enum: ["pending", "in_progress", "blocked", "completed", "cancelled"] },
+        owner: { type: "string" },
+        reason: { type: "string" }
+      },
+      additionalProperties: false
+    },
+    parse(input) {
+      return {
+        type: "task_list",
+        status: parseTaskStatus(input.status),
+        owner: optionalString(input.owner),
+        reason: optionalString(input.reason)
+      };
+    },
+    validate(action) {
+      return action.type === "task_list" ? { ok: true } : invalidToolType(action, "task_list");
+    },
+    summarize(action) {
+      return action.type === "task_list" ? `List tasks${action.status ? ` with status ${action.status}` : ""}` : "List tasks";
+    }
+  },
+  {
+    name: "task_get",
+    description: "Read one durable local task for the current chat session.",
+    risk: "read",
+    concurrencySafe: true,
+    requiresApproval: false,
+    parameters: {
+      type: "object",
+      properties: {
+        taskId: { type: "string" },
+        reason: { type: "string" }
+      },
+      required: ["taskId"],
+      additionalProperties: false
+    },
+    parse(input) {
+      return typeof input.taskId === "string" ? { type: "task_get", taskId: input.taskId, reason: optionalString(input.reason) } : undefined;
+    },
+    validate(action) {
+      return action.type === "task_get" ? validateTaskId(action.taskId) : invalidToolType(action, "task_get");
+    },
+    summarize(action) {
+      return action.type === "task_get" ? `Read task ${action.taskId}` : "Read task";
+    }
+  },
+  {
+    name: "code_hover",
+    description: "Use VS Code language services to read hover information at a workspace file position.",
+    risk: "read",
+    concurrencySafe: true,
+    requiresApproval: false,
+    parameters: codePositionParameters(),
+    parse(input) {
+      return parseCodePosition("code_hover", input);
+    },
+    validate(action) {
+      return action.type === "code_hover" ? validateCodePosition(action) : invalidToolType(action, "code_hover");
+    },
+    summarize(action) {
+      return action.type === "code_hover" ? `Read hover at ${action.path}:${action.line}:${action.character}` : "Read hover";
+    }
+  },
+  {
+    name: "code_definition",
+    description: "Use VS Code language services to find definitions at a workspace file position.",
+    risk: "read",
+    concurrencySafe: true,
+    requiresApproval: false,
+    parameters: codePositionParameters(),
+    parse(input) {
+      return parseCodePosition("code_definition", input);
+    },
+    validate(action) {
+      return action.type === "code_definition" ? validateCodePosition(action) : invalidToolType(action, "code_definition");
+    },
+    summarize(action) {
+      return action.type === "code_definition" ? `Find definition at ${action.path}:${action.line}:${action.character}` : "Find definition";
+    }
+  },
+  {
+    name: "code_references",
+    description: "Use VS Code language services to find references at a workspace file position.",
+    risk: "search",
+    concurrencySafe: true,
+    requiresApproval: false,
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string" },
+        line: { type: "number" },
+        character: { type: "number" },
+        includeDeclaration: { type: "boolean" },
+        reason: { type: "string" }
+      },
+      required: ["path", "line", "character"],
+      additionalProperties: false
+    },
+    parse(input) {
+      const parsed = parseCodePosition("code_references", input);
+      return parsed && parsed.type === "code_references"
+        ? { ...parsed, includeDeclaration: typeof input.includeDeclaration === "boolean" ? input.includeDeclaration : undefined }
+        : undefined;
+    },
+    validate(action) {
+      return action.type === "code_references" ? validateCodePosition(action) : invalidToolType(action, "code_references");
+    },
+    summarize(action) {
+      return action.type === "code_references" ? `Find references at ${action.path}:${action.line}:${action.character}` : "Find references";
+    }
+  },
+  {
+    name: "code_symbols",
+    description: "Use VS Code language services to list document symbols for one file or workspace symbols matching a query.",
+    risk: "search",
+    concurrencySafe: true,
+    requiresApproval: false,
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string" },
+        query: { type: "string" },
+        reason: { type: "string" }
+      },
+      additionalProperties: false
+    },
+    parse(input) {
+      return {
+        type: "code_symbols",
+        path: optionalString(input.path),
+        query: optionalString(input.query),
+        reason: optionalString(input.reason)
+      };
+    },
+    validate(action) {
+      if (action.type !== "code_symbols") {
+        return invalidToolType(action, "code_symbols");
+      }
+      if (!action.path && !action.query) {
+        return { ok: false, message: "code_symbols requires either path or query." };
+      }
+      return action.path ? validateWorkspacePath(action.path) : validateSearchQuery(action.query ?? "");
+    },
+    summarize(action) {
+      return action.type === "code_symbols" ? `List code symbols${action.path ? ` in ${action.path}` : ` matching ${action.query}`}` : "List code symbols";
+    }
+  },
+  {
+    name: "mcp_list_resources",
+    description: "List resources from explicitly configured local/on-prem MCP servers.",
+    risk: "service",
+    concurrencySafe: true,
+    requiresApproval: false,
+    parameters: {
+      type: "object",
+      properties: {
+        serverId: { type: "string" },
+        reason: { type: "string" }
+      },
+      additionalProperties: false
+    },
+    parse(input) {
+      return { type: "mcp_list_resources", serverId: optionalString(input.serverId), reason: optionalString(input.reason) };
+    },
+    validate(action) {
+      if (action.type !== "mcp_list_resources") {
+        return invalidToolType(action, "mcp_list_resources");
+      }
+      return action.serverId && !isSafeMcpName(action.serverId)
+        ? { ok: false, message: "MCP serverId must contain only letters, numbers, dots, underscores, or dashes." }
+        : { ok: true };
+    },
+    summarize(action) {
+      return action.type === "mcp_list_resources" ? `List MCP resources${action.serverId ? ` on ${action.serverId}` : ""}` : "List MCP resources";
+    }
+  },
+  {
+    name: "mcp_read_resource",
+    description: "Read a resource from an explicitly configured local/on-prem MCP server.",
+    risk: "service",
+    concurrencySafe: true,
+    requiresApproval: false,
+    parameters: {
+      type: "object",
+      properties: {
+        serverId: { type: "string" },
+        uri: { type: "string" },
+        reason: { type: "string" }
+      },
+      required: ["serverId", "uri"],
+      additionalProperties: false
+    },
+    parse(input) {
+      return typeof input.serverId === "string" && typeof input.uri === "string"
+        ? { type: "mcp_read_resource", serverId: input.serverId, uri: input.uri, reason: optionalString(input.reason) }
+        : undefined;
+    },
+    validate(action) {
+      if (action.type !== "mcp_read_resource") {
+        return invalidToolType(action, "mcp_read_resource");
+      }
+      if (!isSafeMcpName(action.serverId)) {
+        return { ok: false, message: "MCP serverId must contain only letters, numbers, dots, underscores, or dashes." };
+      }
+      if (!action.uri.trim() || action.uri.includes("\0") || action.uri.length > 4000) {
+        return { ok: false, message: "MCP resource URI is invalid." };
+      }
+      return { ok: true };
+    },
+    summarize(action) {
+      return action.type === "mcp_read_resource" ? `Read MCP resource ${action.serverId}:${action.uri}` : "Read MCP resource";
+    }
+  },
+  {
+    name: "notebook_read",
+    description: "Read cells from a VS Code notebook in the current workspace.",
+    risk: "read",
+    concurrencySafe: true,
+    requiresApproval: false,
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string" },
+        reason: { type: "string" }
+      },
+      required: ["path"],
+      additionalProperties: false
+    },
+    parse(input) {
+      return typeof input.path === "string" ? { type: "notebook_read", path: input.path, reason: optionalString(input.reason) } : undefined;
+    },
+    validate(action) {
+      return action.type === "notebook_read" ? validateWorkspacePath(action.path) : invalidToolType(action, "notebook_read");
+    },
+    summarize(action) {
+      return action.type === "notebook_read" ? `Read notebook ${action.path}` : "Read notebook";
+    }
+  },
+  {
+    name: "notebook_edit_cell",
+    description: "Replace one cell in a VS Code notebook after approval.",
+    risk: "edit",
+    concurrencySafe: false,
+    requiresApproval: true,
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string" },
+        index: { type: "number" },
+        content: { type: "string" },
+        language: { type: "string" },
+        kind: { type: "string", enum: ["code", "markdown"] },
+        reason: { type: "string" }
+      },
+      required: ["path", "index", "content"],
+      additionalProperties: false
+    },
+    parse(input) {
+      return typeof input.path === "string" && typeof input.index === "number" && typeof input.content === "string"
+        ? {
+          type: "notebook_edit_cell",
+          path: input.path,
+          index: Math.max(0, Math.floor(input.index)),
+          content: input.content,
+          language: optionalString(input.language),
+          kind: parseNotebookCellKind(input.kind),
+          reason: optionalString(input.reason)
+        }
+        : undefined;
+    },
+    validate(action) {
+      if (action.type !== "notebook_edit_cell") {
+        return invalidToolType(action, "notebook_edit_cell");
+      }
+      const path = validateWorkspacePath(action.path);
+      if (!path.ok) {
+        return path;
+      }
+      if (!Number.isInteger(action.index) || action.index < 0) {
+        return { ok: false, message: "Notebook cell index must be a zero-based non-negative integer." };
+      }
+      if (Buffer.byteLength(action.content, "utf8") > 2_000_000) {
+        return { ok: false, message: "Notebook cell content is too large." };
+      }
+      return { ok: true };
+    },
+    summarize(action) {
+      return action.type === "notebook_edit_cell" ? `Edit notebook ${action.path} cell ${action.index}` : "Edit notebook cell";
+    }
+  },
+  {
+    name: "memory_write",
+    description: "Persist a durable local memory after user approval. Use for stable user preferences or repository facts that should affect future sessions.",
+    risk: "memory",
+    concurrencySafe: false,
+    requiresApproval: true,
+    parameters: {
+      type: "object",
+      properties: {
+        text: { type: "string" },
+        scope: { type: "string", enum: ["workspace", "user", "agent"] },
+        agent: { type: "string" },
+        reason: { type: "string" }
+      },
+      required: ["text"],
+      additionalProperties: false
+    },
+    parse(input) {
+      return typeof input.text === "string"
+        ? {
+          type: "memory_write",
+          text: input.text,
+          scope: input.scope === "workspace" || input.scope === "user" || input.scope === "agent" ? input.scope : undefined,
+          agent: optionalString(input.agent),
+          reason: optionalString(input.reason)
+        }
+        : undefined;
+    },
+    validate(action) {
+      if (action.type !== "memory_write") {
+        return invalidToolType(action, "memory_write");
+      }
+      if (!action.text.trim()) {
+        return { ok: false, message: "Memory text must not be empty." };
+      }
+      if (Buffer.byteLength(action.text, "utf8") > 12000) {
+        return { ok: false, message: "Memory text is too large." };
+      }
+      if (action.scope === "agent" && (!action.agent || !isSafeExtensionName(action.agent))) {
+        return { ok: false, message: "Agent memory requires a safe agent name." };
+      }
+      return { ok: true };
+    },
+    summarize(action) {
+      return action.type === "memory_write" ? `Save ${action.scope ?? "workspace"} memory` : "Save memory";
     }
   },
   {
@@ -549,11 +1209,33 @@ export function validateAction(action: AgentAction): ToolValidationResult {
 }
 
 export function isLocalReadOnlyAction(action: AgentAction): action is ListFilesAction | GlobFilesAction | ReadFileAction | SearchTextAction | GrepTextAction | ListDiagnosticsAction {
-  const tool = findTool(action.type);
-  return Boolean(tool && !tool.requiresApproval && tool.concurrencySafe);
+  return action.type === "list_files"
+    || action.type === "glob_files"
+    || action.type === "read_file"
+    || action.type === "search_text"
+    || action.type === "grep_text"
+    || action.type === "list_diagnostics";
 }
 
-export function isApprovalAction(action: AgentAction): action is ProposePatchAction | WriteFileAction | EditFileAction | RunCommandAction | McpCallToolAction {
+export function isReadOnlyAction(action: AgentAction): boolean {
+  return isLocalReadOnlyAction(action)
+    || action.type === "ask_user_question"
+    || action.type === "tool_list"
+    || action.type === "task_list"
+    || action.type === "task_get"
+    || action.type === "code_hover"
+    || action.type === "code_definition"
+    || action.type === "code_references"
+    || action.type === "code_symbols"
+    || action.type === "mcp_list_resources"
+    || action.type === "mcp_read_resource"
+    || action.type === "notebook_read"
+    || action.type === "open_diff"
+    || action.type === "spawn_agent"
+    || action.type === "worker_output";
+}
+
+export function isApprovalAction(action: AgentAction): action is AskUserQuestionAction | ProposePatchAction | WriteFileAction | EditFileAction | NotebookEditCellAction | MemoryWriteAction | RunCommandAction | McpCallToolAction {
   const tool = findTool(action.type);
   return Boolean(tool?.requiresApproval);
 }
@@ -612,12 +1294,142 @@ function optionalPositiveInteger(value: unknown): number | undefined {
   return Math.max(1, Math.floor(value));
 }
 
+function optionalStringArray(value: unknown): readonly string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  return value.map((item) => typeof item === "string" ? item.trim() : "").filter(Boolean);
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isSafeMcpName(value: string): boolean {
   return /^[A-Za-z0-9._/-]{1,160}$/.test(value) && !value.includes("..");
+}
+
+function isSafeExtensionName(value: string): boolean {
+  return /^[a-z][a-z0-9_-]{0,63}$/i.test(value);
+}
+
+function isSafeWorkerId(value: string): boolean {
+  return /^worker-\d+-[a-f0-9]+$/i.test(value);
+}
+
+function parseQuestions(value: unknown): readonly UserQuestion[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.map((item): UserQuestion | undefined => {
+    if (!isRecord(item) || typeof item.question !== "string" || typeof item.header !== "string" || !Array.isArray(item.options)) {
+      return undefined;
+    }
+    const options = item.options.map((option): QuestionOption | undefined => {
+      if (!isRecord(option) || typeof option.label !== "string" || typeof option.description !== "string") {
+        return undefined;
+      }
+      const parsed: QuestionOption = {
+        label: option.label,
+        description: option.description
+      };
+      const preview = optionalString(option.preview);
+      return preview === undefined ? parsed : { ...parsed, preview };
+    }).filter((option): option is QuestionOption => Boolean(option));
+    const question: UserQuestion = {
+      question: item.question,
+      header: item.header,
+      options
+    };
+    return typeof item.multiSelect === "boolean" ? { ...question, multiSelect: item.multiSelect } : question;
+  }).filter((question): question is UserQuestion => Boolean(question));
+}
+
+function parseTaskStatus(value: unknown): CodeForgeTaskStatus | undefined {
+  return value === "pending" || value === "in_progress" || value === "blocked" || value === "completed" || value === "cancelled"
+    ? value
+    : undefined;
+}
+
+function parseNotebookCellKind(value: unknown): NotebookCellKindName | undefined {
+  return value === "code" || value === "markdown" ? value : undefined;
+}
+
+function validateTaskSubject(subject: string): ToolValidationResult | undefined {
+  const trimmed = subject.trim();
+  if (!trimmed) {
+    return { ok: false, message: "Task subject must not be empty." };
+  }
+  if (trimmed.length > 240) {
+    return { ok: false, message: "Task subject must be 240 characters or fewer." };
+  }
+  return undefined;
+}
+
+function validateTaskId(taskId: string): ToolValidationResult {
+  return /^task-\d+-[a-f0-9]+$/i.test(taskId)
+    ? { ok: true }
+    : { ok: false, message: "Task id is invalid." };
+}
+
+function validateTaskIds(taskIds: readonly string[] | undefined): ToolValidationResult | undefined {
+  if (!taskIds) {
+    return undefined;
+  }
+  for (const taskId of taskIds) {
+    const result = validateTaskId(taskId);
+    if (!result.ok) {
+      return result;
+    }
+  }
+  return undefined;
+}
+
+function codePositionParameters(): Record<string, unknown> {
+  return {
+    type: "object",
+    properties: {
+      path: { type: "string" },
+      line: { type: "number" },
+      character: { type: "number" },
+      reason: { type: "string" }
+    },
+    required: ["path", "line", "character"],
+    additionalProperties: false
+  };
+}
+
+function parseCodePosition(type: CodeHoverAction["type"], input: Record<string, unknown>): CodeHoverAction | undefined;
+function parseCodePosition(type: CodeDefinitionAction["type"], input: Record<string, unknown>): CodeDefinitionAction | undefined;
+function parseCodePosition(type: CodeReferencesAction["type"], input: Record<string, unknown>): CodeReferencesAction | undefined;
+function parseCodePosition(type: CodeHoverAction["type"] | CodeDefinitionAction["type"] | CodeReferencesAction["type"], input: Record<string, unknown>): CodeHoverAction | CodeDefinitionAction | CodeReferencesAction | undefined {
+  if (typeof input.path !== "string" || typeof input.line !== "number" || typeof input.character !== "number") {
+    return undefined;
+  }
+  const line = Math.max(1, Math.floor(input.line));
+  const character = Math.max(1, Math.floor(input.character));
+  const reason = optionalString(input.reason);
+  if (type === "code_hover") {
+    return { type, path: input.path, line, character, reason };
+  }
+  if (type === "code_definition") {
+    return { type, path: input.path, line, character, reason };
+  }
+  return { type, path: input.path, line, character, includeDeclaration: undefined, reason };
+}
+
+function validateCodePosition(action: CodeHoverAction | CodeDefinitionAction | CodeReferencesAction): ToolValidationResult {
+  const path = validateWorkspacePath(action.path);
+  if (!path.ok) {
+    return path;
+  }
+  if (!Number.isInteger(action.line) || action.line < 1) {
+    return { ok: false, message: "Line must be a 1-based positive integer." };
+  }
+  if (!Number.isInteger(action.character) || action.character < 1) {
+    return { ok: false, message: "Character must be a 1-based positive integer." };
+  }
+  return { ok: true };
 }
 
 function validateSearchQuery(query: string): ToolValidationResult {

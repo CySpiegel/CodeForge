@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { createMemoryId, MemoryEntry, MemoryStore, normalizeMemoryText } from "../core/memory";
+import { createMemoryId, MemoryEntry, MemoryListFilter, MemoryStore, MemoryWriteOptions, memoryMatchesFilter, normalizeMemoryNamespace, normalizeMemoryScope, normalizeMemoryText } from "../core/memory";
 
 const memoryFileName = "memories.json";
 
@@ -8,23 +8,30 @@ export class VsCodeMemoryStore implements MemoryStore {
 
   constructor(private readonly context: vscode.ExtensionContext) {}
 
-  async add(text: string): Promise<MemoryEntry> {
+  async add(text: string, options: MemoryWriteOptions = {}): Promise<MemoryEntry> {
     const normalized = normalizeMemoryText(text);
     if (!normalized) {
       throw new Error("Memory text must not be empty.");
     }
+    const scope = normalizeMemoryScope(options.scope);
+    const namespace = scope === "agent" ? normalizeMemoryNamespace(options.namespace) : undefined;
+    if (scope === "agent" && !namespace) {
+      throw new Error("Agent memory requires a safe agent name.");
+    }
     const memory: MemoryEntry = {
       id: createMemoryId(),
       text: normalized,
-      createdAt: Date.now()
+      createdAt: Date.now(),
+      scope,
+      namespace
     };
     await this.update((memories) => [...memories, memory]);
     return memory;
   }
 
-  async list(): Promise<readonly MemoryEntry[]> {
+  async list(filter?: MemoryListFilter): Promise<readonly MemoryEntry[]> {
     await this.flushPendingWrites();
-    return this.readAll();
+    return (await this.readAll()).filter((memory) => memoryMatchesFilter(memory, filter));
   }
 
   async remove(id: string): Promise<boolean> {
@@ -37,8 +44,8 @@ export class VsCodeMemoryStore implements MemoryStore {
     return removed;
   }
 
-  async clear(): Promise<void> {
-    await this.update(() => []);
+  async clear(filter?: MemoryListFilter): Promise<void> {
+    await this.update((memories) => filter ? memories.filter((memory) => !memoryMatchesFilter(memory, filter)) : []);
   }
 
   private update(change: (memories: readonly MemoryEntry[]) => readonly MemoryEntry[]): Promise<void> {
@@ -91,7 +98,9 @@ function toMemoryEntry(value: unknown): MemoryEntry | undefined {
   return {
     id: value.id,
     text: normalizeMemoryText(value.text),
-    createdAt: value.createdAt
+    createdAt: value.createdAt,
+    scope: value.scope === "user" || value.scope === "agent" || value.scope === "workspace" ? value.scope : undefined,
+    namespace: typeof value.namespace === "string" ? normalizeMemoryNamespace(value.namespace) : undefined
   };
 }
 

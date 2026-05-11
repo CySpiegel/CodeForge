@@ -24,13 +24,14 @@ import { WorkerDefinition, WorkerKind, WorkerSessionEvent, WorkerStatus, WorkerS
 export interface WorkerManagerOptions {
   readonly workspace: WorkspacePort;
   readonly contextLimits: () => ContextLimits;
-  readonly memories: () => Promise<readonly MemoryEntry[]>;
+  readonly memories: (definition: WorkerDefinition) => Promise<readonly MemoryEntry[]>;
   readonly mcpResources: () => readonly ContextItem[];
   readonly createProvider: () => Promise<LlmProvider>;
   readonly resolveModel: (provider: LlmProvider, signal: AbortSignal) => Promise<string>;
   readonly capabilities: (provider: LlmProvider, model: string, signal: AbortSignal) => Promise<ProviderCapabilities>;
   readonly selectedModelInfo: () => ModelInfo | undefined;
   readonly permissionPolicy: () => PermissionPolicy;
+  readonly executeAction: (action: AgentAction, toolCallId: string | undefined, worker: WorkerSummary) => Promise<string>;
   readonly record: (factory: (sessionId: string) => SessionRecord) => void;
   readonly onDidChange: (workers: readonly WorkerSummary[]) => void;
   readonly onNotice: (message: string) => void;
@@ -54,9 +55,14 @@ interface WorkerTask {
   messages: ChatMessage[];
   transcript: WorkerTranscriptEntry[];
   abortController?: AbortController;
+  lastSummaryEmitAt?: number;
 }
 
-const workerToolInstruction = `When you need workspace data, request one or more actions using this JSON shape and only these action types:
+const maxTranscriptEntries = 120;
+const maxTranscriptTextBytes = 80_000;
+const summaryEmitIntervalMs = 250;
+
+const workerReadToolInstruction = `When you need workspace data, request one or more actions using this JSON shape and only these action types:
 
 {
   "actions": [
@@ -70,6 +76,107 @@ const workerToolInstruction = `When you need workspace data, request one or more
 }
 
 Use workspace-relative paths only. If a tool is denied, adjust within the allowed read-only scope.`;
+
+const workerCodeIntelToolInstruction = `This worker may also use VS Code language-service tools when symbol-aware code intelligence is more reliable than text search:
+
+{
+  "actions": [
+    { "type": "code_hover", "path": "relative/path.ts", "line": 10, "character": 5, "reason": "why" },
+    { "type": "code_definition", "path": "relative/path.ts", "line": 10, "character": 5, "reason": "why" },
+    { "type": "code_references", "path": "relative/path.ts", "line": 10, "character": 5, "includeDeclaration": false, "reason": "why" },
+    { "type": "code_symbols", "path": "relative/path.ts", "reason": "why" }
+  ]
+}`;
+
+const workerStateToolInstruction = `This worker may also use local task-state tools to track multi-step work internally:
+
+{
+  "actions": [
+    { "type": "tool_list", "reason": "inspect available tools" },
+    { "type": "task_create", "subject": "short task", "description": "details", "reason": "why" },
+    { "type": "task_update", "taskId": "task-1234567890-abc", "status": "in_progress", "reason": "why" },
+    { "type": "task_list", "reason": "check current tasks" },
+    { "type": "task_get", "taskId": "task-1234567890-abc", "reason": "why" }
+  ]
+}
+
+Tasks are local session state for coordination and progress tracking. They do not edit workspace files.`;
+
+const workerQuestionToolInstruction = `This worker may also pause and ask the user a structured question when blocked by missing requirements:
+
+{
+  "actions": [
+    { "type": "ask_user_question", "questions": [{ "question": "Which implementation path should I use?", "header": "Approach", "options": [{ "label": "Small patch", "description": "Make the narrowest change." }, { "label": "Refactor", "description": "Restructure before editing." }] }], "reason": "why the answer is needed" }
+  ]
+}
+
+Ask only when the answer changes the implementation.`;
+
+const workerNotebookToolInstruction = `This worker may also use VS Code notebook tools:
+
+{
+  "actions": [
+    { "type": "notebook_read", "path": "notebooks/example.ipynb", "reason": "why" },
+    { "type": "notebook_edit_cell", "path": "notebooks/example.ipynb", "index": 0, "content": "print('hello')", "language": "python", "kind": "code", "reason": "why" }
+  ]
+}
+
+Notebook edits are routed through the parent VS Code approval, checkpoint, and permission policy.`;
+
+const workerEditToolInstruction = `This worker may also request approval-gated edit actions when edits are needed:
+
+{
+  "actions": [
+    { "type": "edit_file", "path": "relative/path.ts", "oldText": "exact text", "newText": "replacement text", "reason": "why" },
+    { "type": "write_file", "path": "relative/path.ts", "content": "full file text", "reason": "why" },
+    { "type": "propose_patch", "patch": "unified diff", "reason": "why" },
+    { "type": "open_diff", "patch": "unified diff", "reason": "why" }
+  ]
+}
+
+Read before editing. Use workspace-relative paths only. Edits are not hidden background changes; CodeForge routes them through the parent VS Code approval, diff preview, checkpoint, and permission policy.`;
+
+const workerCommandToolInstruction = `This worker may also request approval-gated local command execution when verification or diagnostics require it:
+
+{
+  "actions": [
+    { "type": "run_command", "command": "npm test", "cwd": ".", "reason": "why this command is needed" }
+  ]
+}
+
+Prefer VS Code-native read/search/diagnostic tools first. Keep commands workspace-scoped, foreground, and bounded. Commands are routed through the parent VS Code approval, checkpoint, timeout, output limit, and permission policy.`;
+
+const workerAutomationToolInstruction = `This worker may also delegate focused work to another CodeForge agent:
+
+{
+  "actions": [
+    { "type": "spawn_agent", "agent": "review", "prompt": "focused task", "description": "short label", "background": false, "reason": "why" },
+    { "type": "worker_output", "workerId": "worker-id", "reason": "why" }
+  ]
+}
+
+Use delegation for independent review, exploration, or verification work. The spawned agent inherits CodeForge's local endpoint, workspace context, permission policy, and approval bridge.`;
+
+const workerMemoryToolInstruction = `This worker may also request approval to save durable local memory:
+
+{
+  "actions": [
+    { "type": "memory_write", "text": "stable preference or repository fact", "scope": "agent", "agent": "agent-name", "reason": "why this should persist" }
+  ]
+}
+
+Only save stable user preferences or repository facts that should affect future sessions. Memory writes are persistent, local, inspectable, and approval-gated.`;
+
+const workerMcpResourceToolInstruction = `This worker may also read resources from explicitly configured local/on-prem MCP servers:
+
+{
+  "actions": [
+    { "type": "mcp_list_resources", "serverId": "configured-server", "reason": "why" },
+    { "type": "mcp_read_resource", "serverId": "configured-server", "uri": "resource-uri", "reason": "why" }
+  ]
+}
+
+Never invent MCP server IDs.`;
 
 export class WorkerManager {
   private readonly options: WorkerManagerOptions;
@@ -104,6 +211,10 @@ export class WorkerManager {
     if (!definition) {
       throw new Error(`Unknown worker kind: ${kind}`);
     }
+    return this.spawnDefinition(definition, prompt);
+  }
+
+  spawnDefinition(definition: WorkerDefinition, prompt: string): WorkerSummary {
     const trimmedPrompt = prompt.trim();
     if (!trimmedPrompt) {
       throw new Error(`Usage: ${definition.slashCommand} <task>`);
@@ -162,6 +273,23 @@ export class WorkerManager {
     return [...header, "", ...transcript].join("\n");
   }
 
+  summary(workerId: string): WorkerSummary | undefined {
+    const task = this.tasks.get(workerId);
+    return task ? summarizeWorker(task) : undefined;
+  }
+
+  async waitFor(workerId: string, timeoutMs: number, signal?: AbortSignal): Promise<WorkerSummary | undefined> {
+    const started = Date.now();
+    while (!signal?.aborted && Date.now() - started < timeoutMs) {
+      const summary = this.summary(workerId);
+      if (!summary || summary.status !== "running") {
+        return summary;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return this.summary(workerId);
+  }
+
   restoreFromSessionRecords(records: readonly SessionRecord[]): void {
     for (const task of this.tasks.values()) {
       task.abortController?.abort();
@@ -172,7 +300,7 @@ export class WorkerManager {
       if (record.type !== "worker") {
         continue;
       }
-      const definition = findWorkerDefinition(record.worker.kind);
+      const definition = findWorkerDefinition(record.worker.kind) ?? restoredWorkerDefinition(record.worker);
       if (!definition) {
         continue;
       }
@@ -224,7 +352,7 @@ export class WorkerManager {
       this.appendTranscript(task, "status", `Calling ${provider.profile.label} / ${model}.`);
 
       const context = new ContextBuilder(this.options.workspace, this.effectiveContextLimits(), {
-        memories: await this.options.memories(),
+        memories: await this.options.memories(task.definition),
         mcpResources: this.options.mcpResources()
       });
       const contextItems = await context.build(abort.signal);
@@ -275,7 +403,7 @@ export class WorkerManager {
 
         const continued = await this.executeInvocations(task, invocations);
         if (!continued) {
-          this.finish(task, "failed", "Worker stopped because every requested tool action was outside its allowed read-only scope.");
+          this.finish(task, "failed", "Worker stopped because every requested tool action was outside its allowed scope.");
           return;
         }
       }
@@ -320,22 +448,31 @@ export class WorkerManager {
         this.appendWorkerToolResult(task, invocation, toolError(validation.message ?? "Tool input failed validation."));
         continue;
       }
-      if (!task.definition.allowedToolNames.includes(invocation.action.type)) {
-        this.appendWorkerToolResult(task, invocation, toolError(`${task.definition.label} workers cannot use ${invocation.action.type}. Worker tools are scoped to read-only workspace inspection.`));
+      if (!toolAllowedForWorker(task.definition, invocation.action.type)) {
+        this.appendWorkerToolResult(task, invocation, toolError(`${task.definition.label} workers cannot use ${invocation.action.type}. This worker is scoped to: ${task.definition.allowedToolNames.join(", ")}.`));
         continue;
       }
-      if (!isLocalReadOnlyAction(invocation.action)) {
-        this.appendWorkerToolResult(task, invocation, toolError(`${invocation.action.type} is not available to read-only workers yet.`));
+      if (isLocalReadOnlyAction(invocation.action)) {
+        const decision = evaluateActionPermission(invocation.action, this.options.permissionPolicy());
+        if (decision.behavior !== "allow") {
+          this.appendWorkerToolResult(task, invocation, toolError(`${invocation.action.type} was not allowed by the parent permission policy. ${decision.reason}`));
+          continue;
+        }
+        anyAllowed = true;
+        trackActionPath(task, invocation.action);
+        executable.push(invocation);
         continue;
       }
-      const decision = evaluateActionPermission(invocation.action, this.options.permissionPolicy());
-      if (decision.behavior !== "allow") {
-        this.appendWorkerToolResult(task, invocation, toolError(`${invocation.action.type} was not allowed by the parent permission policy. ${decision.reason}`));
-        continue;
-      }
+
       anyAllowed = true;
       trackActionPath(task, invocation.action);
-      executable.push(invocation);
+      if (executable.length > 0) {
+        await this.executeReadOnlyInvocations(task, executable.splice(0));
+      }
+      this.appendTranscript(task, "status", `requested: ${invocation.action.type}`);
+      const result = await this.options.executeAction(invocation.action, invocation.toolCallId, summarizeWorker(task));
+      trackResultPaths(task, result);
+      this.appendWorkerToolResult(task, invocation, result);
     }
 
     if (executable.length === 0) {
@@ -343,6 +480,11 @@ export class WorkerManager {
       return anyAllowed;
     }
 
+    await this.executeReadOnlyInvocations(task, executable);
+    return true;
+  }
+
+  private async executeReadOnlyInvocations(task: WorkerTask, executable: readonly ToolInvocation[]): Promise<void> {
     const results = await executeLocalReadOnlyTools(executable, {
       workspace: this.options.workspace,
       readFileMaxBytes: 48000,
@@ -355,7 +497,6 @@ export class WorkerManager {
       trackResultPaths(task, result.content);
       this.appendWorkerToolResult(task, result.invocation, result.content);
     }
-    return true;
   }
 
   private appendWorkerToolResult(task: WorkerTask, invocation: ToolInvocation, content: string): void {
@@ -379,7 +520,7 @@ export class WorkerManager {
     return [
       definition.systemPrompt,
       "",
-      workerToolInstruction,
+      workerToolInstruction(definition),
       "",
       "Network policy: CodeForge is local/offline first and only talks to configured local or on-prem OpenAI-compatible endpoints. Never suggest sending workspace data to a public service."
     ].join("\n");
@@ -405,7 +546,10 @@ export class WorkerManager {
     }
     task.summary = firstLine(trimmed);
     task.updatedAt = Date.now();
-    this.emitChanged();
+    if (!task.lastSummaryEmitAt || task.updatedAt - task.lastSummaryEmitAt >= summaryEmitIntervalMs) {
+      task.lastSummaryEmitAt = task.updatedAt;
+      this.emitChanged();
+    }
   }
 
   private finish(task: WorkerTask, status: WorkerStatus, message: string): void {
@@ -433,9 +577,12 @@ export class WorkerManager {
       workerId: task.id,
       createdAt: Date.now(),
       role,
-      text
+      text: clipTranscriptText(text)
     };
     task.transcript.push(entry);
+    while (task.transcript.length > maxTranscriptEntries) {
+      task.transcript.shift();
+    }
     task.updatedAt = entry.createdAt;
     const summary = summarizeWorker(task);
     this.options.record((sessionId) => ({
@@ -470,6 +617,49 @@ function toolsForWorker(definition: WorkerDefinition): readonly ToolDefinition[]
   return toolDefinitions.filter((tool) => definition.allowedToolNames.includes(tool.name));
 }
 
+function workerToolInstruction(definition: WorkerDefinition): string {
+  const canEdit = definition.allowedToolNames.some((tool) => tool === "edit_file" || tool === "write_file" || tool === "propose_patch" || tool === "open_diff");
+  const canCommand = definition.allowedToolNames.some((tool) => tool === "run_command");
+  const canAutomate = definition.allowedToolNames.some((tool) => tool === "spawn_agent" || tool === "worker_output");
+  const canRemember = definition.allowedToolNames.some((tool) => tool === "memory_write");
+  const canCodeIntel = definition.allowedToolNames.some((tool) => tool === "code_hover" || tool === "code_definition" || tool === "code_references" || tool === "code_symbols");
+  const canState = definition.allowedToolNames.some((tool) => tool === "tool_list" || tool === "task_create" || tool === "task_update" || tool === "task_list" || tool === "task_get");
+  const canQuestion = definition.allowedToolNames.some((tool) => tool === "ask_user_question");
+  const canMcpResource = definition.allowedToolNames.some((tool) => tool === "mcp_list_resources" || tool === "mcp_read_resource");
+  const canNotebook = definition.allowedToolNames.some((tool) => tool === "notebook_read" || tool === "notebook_edit_cell");
+  return [
+    workerReadToolInstruction,
+    canCodeIntel ? workerCodeIntelToolInstruction : undefined,
+    canState ? workerStateToolInstruction : undefined,
+    canQuestion ? workerQuestionToolInstruction : undefined,
+    canNotebook ? workerNotebookToolInstruction : undefined,
+    canEdit ? workerEditToolInstruction : undefined,
+    canCommand ? workerCommandToolInstruction : undefined,
+    canAutomate ? workerAutomationToolInstruction : undefined,
+    canRemember ? workerMemoryToolInstruction : undefined,
+    canMcpResource ? workerMcpResourceToolInstruction : undefined
+  ].filter((part): part is string => Boolean(part)).join("\n\n");
+}
+
+function toolAllowedForWorker(definition: WorkerDefinition, toolName: AgentAction["type"]): boolean {
+  return definition.allowedToolNames.includes(toolName);
+}
+
+function restoredWorkerDefinition(worker: WorkerSummary): WorkerDefinition | undefined {
+  if (worker.kind !== "custom") {
+    return undefined;
+  }
+  return {
+    kind: "custom",
+    label: worker.label,
+    description: "Restored workspace-local CodeForge agent.",
+    slashCommand: "/agent-run",
+    maxTurns: 1,
+    allowedToolNames: [],
+    systemPrompt: "Restored workspace-local CodeForge agent."
+  };
+}
+
 function summarizeWorker(task: WorkerTask): WorkerSummary {
   return {
     id: task.id,
@@ -491,7 +681,7 @@ function summarizeWorker(task: WorkerTask): WorkerSummary {
 }
 
 function trackActionPath(task: WorkerTask, action: AgentAction): void {
-  if (action.type === "read_file") {
+  if (action.type === "read_file" || action.type === "write_file" || action.type === "edit_file") {
     task.filesInspected.add(action.path);
   } else if (action.type === "list_diagnostics" && action.path) {
     task.filesInspected.add(action.path);
@@ -499,11 +689,11 @@ function trackActionPath(task: WorkerTask, action: AgentAction): void {
 }
 
 function trackResultPaths(task: WorkerTask, content: string): void {
-  const pattern = /(?:^|\s)([A-Za-z0-9_.@-]+(?:\/[A-Za-z0-9_.@-]+)+)(?::\d+)?/gm;
+  const pattern = /(?:^|\s)([A-Za-z0-9_.@-]+(?:\/[A-Za-z0-9_.@-]+)*(?:\.[A-Za-z0-9]+)?)(?::\d+)?/gm;
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(content)) !== null) {
     const path = match[1];
-    if (path && !path.startsWith("http")) {
+    if (path && looksLikeWorkspacePath(path)) {
       task.filesInspected.add(path);
     }
     if (task.filesInspected.size >= 40) {
@@ -519,6 +709,26 @@ function toolError(message: string): string {
 function finalSummary(assistantText: string, fallback: string | undefined): string {
   const trimmed = assistantText.trim();
   return trimmed || fallback || "Worker completed without a final text response.";
+}
+
+function clipTranscriptText(text: string): string {
+  if (Buffer.byteLength(text, "utf8") <= maxTranscriptTextBytes) {
+    return text;
+  }
+  const marker = "\n\n[CodeForge clipped this worker transcript entry to keep local session history bounded.]";
+  const markerBytes = Buffer.byteLength(marker, "utf8");
+  const budget = Math.max(1, maxTranscriptTextBytes - markerBytes);
+  return `${Buffer.from(text).subarray(0, budget).toString("utf8")}${marker}`;
+}
+
+function looksLikeWorkspacePath(value: string): boolean {
+  if (!value || value.startsWith("http") || value.includes("://") || value.includes("\0")) {
+    return false;
+  }
+  if (value === "." || value === ".." || value.includes("..")) {
+    return false;
+  }
+  return value.includes("/") || /\.[A-Za-z0-9]{1,8}$/.test(value);
 }
 
 function firstLine(value: string): string {

@@ -60,6 +60,8 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
       await this.controller.sendPrompt(message.text.trim());
     } else if (message.type === "approve" && typeof message.id === "string") {
       await this.controller.approve(message.id);
+    } else if (message.type === "answerQuestion" && typeof message.id === "string" && isAnswerRecord(message.answers)) {
+      await this.controller.answerQuestion(message.id, message.answers);
     } else if (message.type === "previewApproval" && typeof message.id === "string") {
       await this.controller.previewApproval(message.id);
     } else if (message.type === "reject" && typeof message.id === "string") {
@@ -76,6 +78,8 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
       this.controller.stopWorker(message.workerId);
     } else if (message.type === "workerOutput" && typeof message.workerId === "string") {
       this.controller.showWorkerOutput(message.workerId);
+    } else if (message.type === "workerAttach" && typeof message.workerId === "string") {
+      this.controller.attachWorkerOutput(message.workerId);
     } else if (message.type === "selectModel" && typeof message.model === "string") {
       await this.controller.selectModel(message.model);
     } else if (message.type === "selectProfile" && typeof message.profileId === "string") {
@@ -279,10 +283,18 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
   }
 }
 
+function isAnswerRecord(value: unknown): value is Record<string, string> {
+  return typeof value === "object"
+    && value !== null
+    && !Array.isArray(value)
+    && Object.values(value).every((item) => typeof item === "string");
+}
+
 interface WebviewMessage {
   readonly type: string;
   readonly text?: string;
   readonly id?: string;
+  readonly answers?: Record<string, string>;
   readonly sessionId?: string;
   readonly workerId?: string;
   readonly serverId?: string;

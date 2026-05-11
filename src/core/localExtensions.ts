@@ -3,6 +3,8 @@ import { AgentAction, RunCommandAction, WorkspacePort } from "./types";
 const commandsGlob = ".codeforge/commands/*.md";
 const skillsFileGlob = ".codeforge/skills/*.md";
 const skillsDirectoryGlob = ".codeforge/skills/*/SKILL.md";
+const agentsFileGlob = ".codeforge/agents/*.md";
+const agentsDirectoryGlob = ".codeforge/agents/*/AGENT.md";
 const hooksPath = ".codeforge/hooks.json";
 
 export interface LocalCommand {
@@ -18,6 +20,16 @@ export interface LocalSkill {
   readonly name: string;
   readonly path: string;
   readonly description?: string;
+  readonly body: string;
+}
+
+export interface LocalAgent {
+  readonly name: string;
+  readonly path: string;
+  readonly label?: string;
+  readonly description?: string;
+  readonly tools: readonly string[];
+  readonly maxTurns?: number;
   readonly body: string;
 }
 
@@ -81,6 +93,34 @@ export async function loadLocalSkills(workspace: WorkspacePort, signal?: AbortSi
       name,
       path,
       description: metadataValue(parsed.metadata, "description"),
+      body: parsed.body.trim()
+    });
+  }
+  return [...byName.values()];
+}
+
+export async function loadLocalAgents(workspace: WorkspacePort, signal?: AbortSignal): Promise<readonly LocalAgent[]> {
+  const paths = [
+    ...await safeGlob(workspace, agentsFileGlob, 100, signal),
+    ...await safeGlob(workspace, agentsDirectoryGlob, 100, signal)
+  ].sort();
+  const byName = new Map<string, LocalAgent>();
+  for (const path of paths) {
+    const name = agentNameFromPath(path);
+    if (!name || !isSafeExtensionName(name) || byName.has(name)) {
+      continue;
+    }
+    const parsed = parseMarkdownFile(await workspace.readTextFile(path, 128000, signal));
+    if (!parsed.body.trim()) {
+      continue;
+    }
+    byName.set(name, {
+      name,
+      path,
+      label: metadataValue(parsed.metadata, "label"),
+      description: metadataValue(parsed.metadata, "description"),
+      tools: metadataList(parsed.metadata, "tools").map((tool) => tool.toLowerCase()),
+      maxTurns: metadataPositiveInteger(parsed.metadata, "max-turns") ?? metadataPositiveInteger(parsed.metadata, "maxTurns"),
       body: parsed.body.trim()
     });
   }
@@ -167,6 +207,21 @@ export function formatLocalSkillList(skills: readonly LocalSkill[]): string {
   return [
     "Local CodeForge skills:",
     ...skills.map((skill) => `- ${skill.name}${skill.description ? ` - ${skill.description}` : ""} (${skill.path})`)
+  ].join("\n");
+}
+
+export function formatLocalAgentList(agents: readonly LocalAgent[]): string {
+  if (agents.length === 0) {
+    return "No local CodeForge agents found. Add markdown files under .codeforge/agents/*.md or .codeforge/agents/<name>/AGENT.md.";
+  }
+  return [
+    "Local CodeForge agents:",
+    ...agents.map((agent) => {
+      const label = agent.label && agent.label !== agent.name ? `${agent.label} ` : "";
+      const tools = agent.tools.length > 0 ? ` [tools: ${agent.tools.join(", ")}]` : " [tools: read]";
+      const description = agent.description ? ` - ${agent.description}` : "";
+      return `- ${agent.name}${label ? ` (${label.trim()})` : ""}${description}${tools} (${agent.path})`;
+    })
   ].join("\n");
 }
 
@@ -269,6 +324,15 @@ function metadataList(metadata: Readonly<Record<string, string>>, key: string): 
   return raw.replace(/^\[/, "").replace(/\]$/, "").split(",").map((item) => stripQuotes(item.trim())).filter(Boolean);
 }
 
+function metadataPositiveInteger(metadata: Readonly<Record<string, string>>, key: string): number | undefined {
+  const raw = metadataValue(metadata, key);
+  if (!raw) {
+    return undefined;
+  }
+  const value = Number.parseInt(raw, 10);
+  return Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
 function replaceTemplateArgs(value: string, args: string): string {
   return value.replace(/\{\{\s*(args|input)\s*\}\}/gi, args.trim());
 }
@@ -289,6 +353,14 @@ function extensionNameFromPath(path: string): string | undefined {
 function skillNameFromPath(path: string): string | undefined {
   const parts = path.split("/");
   if (parts.at(-1) === "SKILL.md") {
+    return parts.at(-2);
+  }
+  return extensionNameFromPath(path);
+}
+
+function agentNameFromPath(path: string): string | undefined {
+  const parts = path.split("/");
+  if (parts.at(-1) === "AGENT.md") {
     return parts.at(-2);
   }
   return extensionNameFromPath(path);

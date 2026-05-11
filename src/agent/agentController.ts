@@ -1,22 +1,27 @@
 import { EventEmitter } from "events";
 import { actionProtocolInstructions, parseActionsFromAssistantText, parseToolAction, toolDefinitions } from "../core/actionProtocol";
 import { ApprovalQueue } from "../core/approvals";
+import { CodeIntelPort, UnavailableCodeIntelPort } from "../core/codeIntel";
 import { ContextBuilder } from "../core/contextBuilder";
 import { compactOldToolResults } from "../core/contextCompaction";
 import { buildContextUsage, ContextUsage, formatBytes } from "../core/contextUsage";
 import {
   formatLocalCommandList,
+  formatLocalAgentList,
   formatLocalSkillList,
   loadLocalCommands,
+  loadLocalAgents,
   loadLocalHooks,
   loadLocalSkills,
+  LocalAgent,
   LocalHook,
   localHookMatches,
   renderLocalCommand,
   renderLocalSkillPrompt
 } from "../core/localExtensions";
 import { executeLocalReadOnlyTools, LocalToolProgress } from "../core/localToolExecutor";
-import { MemoryStore } from "../core/memory";
+import { MemoryEntry, MemoryStore } from "../core/memory";
+import { NotebookPort, UnavailableNotebookPort } from "../core/notebooks";
 import {
   callConfiguredMcpTool,
   configuredMcpServerStatuses,
@@ -36,6 +41,7 @@ import {
   AgentMode,
   ApprovalRequest,
   ChatMessage,
+  CodeForgeTask,
   CommandResult,
   ContextItem,
   ContextLimits,
@@ -49,15 +55,16 @@ import {
   RunCommandAction,
   TokenUsage,
   ToolCall,
+  UserQuestion,
   WorkspacePort
 } from "../core/types";
-import { isApprovalAction, isLocalReadOnlyAction, ToolInvocation, toolSummary, validateAction } from "../core/toolRegistry";
+import { codeForgeTools, isApprovalAction, isLocalReadOnlyAction, isReadOnlyAction, ToolInvocation, toolSummary, validateAction } from "../core/toolRegistry";
 import { DiffService } from "../adapters/diffService";
 import { TerminalRunner } from "../adapters/terminalRunner";
 import { CodeForgeConfigService, CodeForgeSettingsUpdate } from "../adapters/vscodeConfig";
 import { WorkerManager } from "./workerManager";
-import { isWorkerKind, workerCommandList } from "../core/workerAgents";
-import { WorkerKind, WorkerSummary } from "../core/workerTypes";
+import { findWorkerDefinition, isWorkerKind, workerCommandList } from "../core/workerAgents";
+import { WorkerDefinition, WorkerKind, WorkerSummary } from "../core/workerTypes";
 
 export type AgentUiEvent =
   | { readonly type: "sessionReset" }
@@ -190,13 +197,17 @@ export class AgentController {
   private readonly diff: DiffService;
   private readonly sessionStore: SessionStore | undefined;
   private readonly memoryStore: MemoryStore | undefined;
+  private readonly codeIntel: CodeIntelPort;
+  private readonly notebooks: NotebookPort;
   private readonly workers: WorkerManager;
   private readonly events = new EventEmitter();
   private readonly approvals = new ApprovalQueue();
+  private readonly workerApprovalWaiters = new Map<string, { readonly workerId: string; readonly resolve: (text: string) => void }>();
   private readonly capabilityCache = new Map<string, ProviderCapabilities>();
   private readonly endpointCache = new Map<string, OpenAiEndpointInspection>();
   private readonly selectedModelByProfile = new Map<string, string>();
   private messages: ChatMessage[] = [];
+  private tasks = new Map<string, CodeForgeTask>();
   private lastContextItems: readonly ContextItem[] = [];
   private mcpContextItems: ContextItem[] = [];
   private lastTokenUsage: TokenUsage | undefined;
@@ -210,7 +221,9 @@ export class AgentController {
     terminal: TerminalRunner,
     diff: DiffService,
     sessionStore?: SessionStore,
-    memoryStore?: MemoryStore
+    memoryStore?: MemoryStore,
+    codeIntel: CodeIntelPort = new UnavailableCodeIntelPort(),
+    notebooks: NotebookPort = new UnavailableNotebookPort()
   ) {
     this.config = config;
     this.workspace = workspace;
@@ -218,16 +231,19 @@ export class AgentController {
     this.diff = diff;
     this.sessionStore = sessionStore;
     this.memoryStore = memoryStore;
+    this.codeIntel = codeIntel;
+    this.notebooks = notebooks;
     this.workers = new WorkerManager({
       workspace: this.workspace,
       contextLimits: () => this.effectiveContextLimits(),
-      memories: async () => this.memoryStore ? await this.memoryStore.list() : [],
+      memories: (definition) => this.memoriesForWorker(definition),
       mcpResources: () => this.mcpContextItems,
       createProvider: () => this.createProvider(),
       resolveModel: (provider, signal) => this.resolveModel(provider, signal),
       capabilities: (provider, model, signal) => this.capabilities(provider, model, signal),
       selectedModelInfo: () => this.selectedModelInfo(),
       permissionPolicy: () => this.config.getPermissionPolicy(),
+      executeAction: (action, toolCallId, worker) => this.executeWorkerAction(action, toolCallId, worker),
       record: (factory) => this.persistSessionRecord(factory),
       onDidChange: (workers) => this.emit({ type: "workers", workers }),
       onNotice: (message) => this.emit({ type: "message", role: "system", text: message })
@@ -242,6 +258,7 @@ export class AgentController {
   async initializeSession(): Promise<void> {
     try {
       this.messages = [];
+      this.tasks.clear();
       this.lastContextItems = [];
       this.mcpContextItems = [];
       this.lastTokenUsage = undefined;
@@ -249,6 +266,7 @@ export class AgentController {
       this.sessionStartPromise = undefined;
       this.workers.clear();
       this.approvals.clear();
+      this.workerApprovalWaiters.clear();
       this.emit({ type: "sessionReset" });
       this.emitContextUsage();
       await this.publishState();
@@ -408,6 +426,7 @@ export class AgentController {
     this.runningAbort?.abort();
     this.runningAbort = undefined;
     this.messages = [];
+    this.tasks.clear();
     this.lastContextItems = [];
     this.mcpContextItems = [];
     this.lastTokenUsage = undefined;
@@ -415,6 +434,7 @@ export class AgentController {
     this.sessionStartPromise = undefined;
     this.workers.clear();
     this.approvals.clear();
+    this.workerApprovalWaiters.clear();
     this.emit({ type: "sessionReset" });
     this.emitContextUsage();
     void this.publishState();
@@ -450,6 +470,20 @@ export class AgentController {
     } else {
       this.emit({ type: "error", text: `No worker found for ${workerId}.` });
     }
+  }
+
+  attachWorkerOutput(workerId: string): void {
+    const output = this.workers.output(workerId);
+    if (!output) {
+      this.emit({ type: "error", text: `No worker found for ${workerId}.` });
+      return;
+    }
+    this.appendMessage({
+      role: "user",
+      content: `CodeForge attached worker output for future model context:\n\n${output}`
+    });
+    this.emit({ type: "message", role: "system", text: `Attached worker output ${workerId} to this chat context.` });
+    this.emitContextUsage();
   }
 
   async sendPrompt(prompt: string): Promise<void> {
@@ -505,12 +539,36 @@ export class AgentController {
       this.emit({ type: "error", text: "That approval request is no longer pending." });
       return;
     }
+    const workerWaiter = this.workerApprovalWaiters.get(id);
 
     const validation = validateAction(approval.action);
     if (!validation.ok) {
       await this.recordApprovalResolved(id, false, validation.message ?? "Stored approval failed validation.");
+      if (workerWaiter) {
+        this.workerApprovalWaiters.delete(id);
+        workerWaiter.resolve(toolError(validation.message ?? "Stored approval failed validation."));
+      }
       this.emit({ type: "approvalResolved", id, accepted: false, text: "Stored approval failed validation." });
       this.emit({ type: "error", text: validation.message ?? "Stored approval failed validation." });
+      await this.publishState();
+      return;
+    }
+
+    if (approval.origin === "worker" && !workerWaiter) {
+      const text = "This worker approval expired because the worker is no longer running.";
+      await this.recordApprovalResolved(id, false, text);
+      this.emit({ type: "approvalResolved", id, accepted: false, text });
+      this.emit({ type: "error", text });
+      await this.publishState();
+      return;
+    }
+    if (workerWaiter && !this.workers.list().some((worker) => worker.id === workerWaiter.workerId && worker.status === "running")) {
+      const text = "This worker approval expired because the worker was stopped before approval.";
+      this.workerApprovalWaiters.delete(id);
+      workerWaiter.resolve(toolError(text));
+      await this.recordApprovalResolved(id, false, text);
+      this.emit({ type: "approvalResolved", id, accepted: false, text });
+      this.emit({ type: "error", text });
       await this.publishState();
       return;
     }
@@ -518,6 +576,20 @@ export class AgentController {
     await this.recordApprovalResolved(id, true, "Accepted.");
     try {
       const transcriptResult = await this.executePermittedAction(approval.action, approval.toolCallId);
+      if (workerWaiter) {
+        this.workerApprovalWaiters.delete(id);
+        workerWaiter.resolve(transcriptResult);
+        this.emit({
+          type: "approvalResolved",
+          id,
+          accepted: true,
+          text: approvalAcceptedText(approval.action, transcriptResult)
+        });
+        this.emit({ type: "toolResult", text: transcriptResult });
+        this.emitContextUsage();
+        await this.publishState();
+        return;
+      }
       this.appendToolResult(approval.toolCallId, approval.toolName ?? approval.action.type, transcriptResult);
       this.emit({
         type: "approvalResolved",
@@ -562,7 +634,24 @@ export class AgentController {
     const approval = this.approvals.take(id);
     if (approval) {
       const text = `${approval.action.type}\n\nUser rejected this tool request.`;
+      const workerWaiter = this.workerApprovalWaiters.get(id);
       await this.recordApprovalResolved(id, false, "Rejected.");
+      if (approval.origin === "worker" && !workerWaiter) {
+        this.emit({ type: "approvalResolved", id, accepted: false, text: "Rejected." });
+        this.emit({ type: "toolResult", text });
+        this.emitContextUsage();
+        void this.publishState();
+        return;
+      }
+      if (workerWaiter) {
+        this.workerApprovalWaiters.delete(id);
+        workerWaiter.resolve(text);
+        this.emit({ type: "approvalResolved", id, accepted: false, text: "Rejected." });
+        this.emit({ type: "toolResult", text });
+        this.emitContextUsage();
+        void this.publishState();
+        return;
+      }
       this.appendToolResult(approval.toolCallId, approval.toolName ?? approval.action.type, text);
       this.emit({ type: "approvalResolved", id, accepted: false, text: "Rejected." });
       this.emit({ type: "toolResult", text });
@@ -708,7 +797,7 @@ export class AgentController {
         continue;
       }
 
-      if (agentMode !== "agent") {
+      if (!isReadOnlyAction(invocation.action) && agentMode !== "agent") {
         this.appendDeniedOrInvalidToolResult(invocation, `${agentModeLabel(agentMode)} mode is read-only. Use read-only workspace context and switch to Agent mode before applying edits or running commands.`);
         continuedWithLocalContext = true;
         index++;
@@ -729,7 +818,7 @@ export class AgentController {
         return false;
       }
 
-      if (isApprovalAction(invocation.action) || invocation.action.type === "open_diff") {
+      if (isApprovalAction(invocation.action) || invocation.action.type === "open_diff" || isInternalAutomationAction(invocation.action) || isInternalStateAction(invocation.action) || isInternalReadAction(invocation.action)) {
         const text = await this.executePermittedAction(invocation.action, invocation.toolCallId);
         this.appendToolResult(invocation.toolCallId, invocation.action.type, text);
         this.emit({ type: "toolResult", text });
@@ -747,8 +836,8 @@ export class AgentController {
     return continuedWithLocalContext;
   }
 
-  private async requestApproval(action: AgentAction, toolCallId: string | undefined, decision: PermissionDecision): Promise<void> {
-    const approval = this.approvals.createForAction(action, decision, toolCallId, this.approvalMetadata(action, decision));
+  private async requestApproval(action: AgentAction, toolCallId: string | undefined, decision: PermissionDecision, metadata?: { readonly detail?: string; readonly risk?: string; readonly origin?: ApprovalRequest["origin"] }): Promise<ApprovalRequest> {
+    const approval = this.approvals.createForAction(action, decision, toolCallId, metadata ?? this.approvalMetadata(action, decision));
     if (action.type === "propose_patch") {
       await this.diff.previewPatch(action.patch);
     } else if (action.type === "write_file") {
@@ -758,6 +847,7 @@ export class AgentController {
     }
     await this.recordApprovalRequested(approval);
     this.emit({ type: "approvalRequested", approval });
+    return approval;
   }
 
   private approvalMetadata(action: AgentAction, decision: PermissionDecision): { readonly detail?: string; readonly risk?: string } {
@@ -771,6 +861,30 @@ export class AgentController {
           `Tool: ${action.toolName}`,
           `Permission: ${decision.reason}`
         ].join("\n")
+      };
+    }
+
+    if (action.type === "ask_user_question") {
+      return {
+        risk: "requires user input",
+        detail: action.questions.map((question, index) => {
+          const options = question.options.map((option) => `  - ${option.label}: ${option.description}`).join("\n");
+          return `${index + 1}. ${question.question}\n${options}`;
+        }).join("\n\n")
+      };
+    }
+
+    if (action.type === "notebook_edit_cell") {
+      return {
+        risk: "workspace notebook edit",
+        detail: [
+          `Path: ${action.path}`,
+          `Cell: ${action.index}`,
+          action.kind ? `Kind: ${action.kind}` : undefined,
+          action.language ? `Language: ${action.language}` : undefined,
+          "",
+          action.content
+        ].filter((line): line is string => line !== undefined).join("\n")
       };
     }
 
@@ -822,6 +936,203 @@ export class AgentController {
     });
   }
 
+  private async executeWorkerAction(action: AgentAction, toolCallId: string | undefined, worker: WorkerSummary): Promise<string> {
+    const validation = validateAction(action);
+    if (!validation.ok) {
+      return toolError(validation.message ?? "Tool input failed validation.");
+    }
+
+    if (!isReadOnlyAction(action) && this.config.getAgentMode() !== "agent") {
+      return toolError(`${agentModeLabel(this.config.getAgentMode())} mode is read-only. Switch to Agent mode before allowing workers to edit files, run commands, or call local services.`);
+    }
+
+    const decision = evaluateActionPermission(action, this.config.getPermissionPolicy());
+    if (decision.behavior === "deny") {
+      return toolError(`${action.type} was denied by the parent permission policy. ${decision.reason}`);
+    }
+
+    if (decision.behavior === "ask") {
+      const approval = await this.requestApproval(action, toolCallId, decision, this.workerApprovalMetadata(worker, action, decision));
+      this.emit({
+        type: "toolUse",
+        toolUse: {
+          id: toolCallId ?? `${worker.id}-${approval.id}`,
+          name: action.type,
+          summary: `${worker.label} worker requested ${toolSummary(action)}`,
+          status: "approval",
+          readOnly: false
+        }
+      });
+      return new Promise((resolve) => {
+        this.workerApprovalWaiters.set(approval.id, { workerId: worker.id, resolve });
+      });
+    }
+
+    return this.executePermittedAction(action, toolCallId);
+  }
+
+  private async memoriesForWorker(definition: WorkerDefinition): Promise<readonly MemoryEntry[]> {
+    if (!this.memoryStore) {
+      return [];
+    }
+    if (definition.kind === "custom" && definition.name) {
+      return this.memoryStore.list({ scope: "agent", namespace: definition.name, includeShared: true });
+    }
+    return this.memoryStore.list();
+  }
+
+  private workerApprovalMetadata(worker: WorkerSummary, action: AgentAction, decision: PermissionDecision): { readonly detail?: string; readonly risk?: string; readonly origin: "worker" } {
+    const base = this.approvalMetadata(action, decision);
+    return {
+      origin: "worker",
+      risk: base.risk,
+      detail: [
+        `Requested by worker: ${worker.label} (${worker.id})`,
+        `Worker task: ${worker.prompt}`,
+        base.detail
+      ].filter((line): line is string => Boolean(line)).join("\n")
+    };
+  }
+
+  async answerQuestion(id: string, answers: Readonly<Record<string, string>>): Promise<void> {
+    const approval = this.approvals.take(id);
+    if (!approval) {
+      this.emit({ type: "error", text: "That question is no longer pending." });
+      return;
+    }
+    if (approval.action.type !== "ask_user_question") {
+      this.emit({ type: "error", text: "That approval request is not a user question." });
+      return;
+    }
+
+    const validation = validateAction(approval.action);
+    if (!validation.ok) {
+      await this.recordApprovalResolved(id, false, validation.message ?? "Stored question failed validation.");
+      this.emit({ type: "approvalResolved", id, accepted: false, text: validation.message ?? "Stored question failed validation." });
+      return;
+    }
+
+    const missing = approval.action.questions.find((question) => !answers[question.question]?.trim());
+    if (missing) {
+      this.approvals.restore([...this.approvals.list(), approval]);
+      this.emit({ type: "error", text: `Answer required: ${missing.question}` });
+      this.emit({ type: "approvalRequested", approval });
+      return;
+    }
+
+    const text = formatQuestionAnswers(approval.action.questions, answers);
+    const workerWaiter = this.workerApprovalWaiters.get(id);
+    await this.recordApprovalResolved(id, true, "Answered.");
+    if (workerWaiter) {
+      this.workerApprovalWaiters.delete(id);
+      workerWaiter.resolve(text);
+      this.emit({ type: "approvalResolved", id, accepted: true, text: "Answered." });
+      this.emit({ type: "toolResult", text });
+      this.emitContextUsage();
+      await this.publishState();
+      return;
+    }
+
+    this.appendToolResult(approval.toolCallId, approval.toolName ?? approval.action.type, text);
+    this.emit({ type: "approvalResolved", id, accepted: true, text: "Answered." });
+    this.emit({ type: "toolResult", text });
+    this.emitContextUsage();
+    await this.publishState();
+    void this.continueAfterToolResult();
+  }
+
+  private formatToolList(): string {
+    const lines = codeForgeTools.map((tool) => {
+      const approval = tool.requiresApproval ? "approval" : "auto";
+      const concurrent = tool.concurrencySafe ? "concurrent" : "serial";
+      return `- ${tool.name} | risk=${tool.risk} | ${approval} | ${concurrent} | ${tool.description}`;
+    });
+    return `tool_list\n\n${lines.join("\n")}`;
+  }
+
+  private async createTask(action: Extract<AgentAction, { readonly type: "task_create" }>): Promise<string> {
+    const now = Date.now();
+    const task: CodeForgeTask = {
+      id: `task-${now}-${Math.random().toString(16).slice(2)}`,
+      subject: action.subject.trim(),
+      description: action.description?.trim() || undefined,
+      activeForm: action.activeForm?.trim() || undefined,
+      status: "pending",
+      owner: action.owner?.trim() || undefined,
+      blocks: uniqueStrings(action.blocks),
+      blockedBy: uniqueStrings(action.blockedBy),
+      metadata: action.metadata,
+      createdAt: now,
+      updatedAt: now
+    };
+    this.tasks.set(task.id, task);
+    await this.recordTask(task, "created");
+    await this.publishState();
+    return `task_create ${task.id}\n\n${formatTask(task)}`;
+  }
+
+  private async updateTask(action: Extract<AgentAction, { readonly type: "task_update" }>): Promise<string> {
+    const existing = this.tasks.get(action.taskId);
+    if (!existing) {
+      return toolError(`No task found for ${action.taskId}.`);
+    }
+    const now = Date.now();
+    const nextStatus = action.status ?? existing.status;
+    const task: CodeForgeTask = {
+      ...existing,
+      subject: action.subject?.trim() || existing.subject,
+      description: action.description !== undefined ? action.description.trim() || undefined : existing.description,
+      activeForm: action.activeForm !== undefined ? action.activeForm.trim() || undefined : existing.activeForm,
+      status: nextStatus,
+      owner: action.owner !== undefined ? action.owner.trim() || undefined : existing.owner,
+      blocks: action.blocks !== undefined ? uniqueStrings(action.blocks) : existing.blocks,
+      blockedBy: action.blockedBy !== undefined ? uniqueStrings(action.blockedBy) : existing.blockedBy,
+      metadata: action.metadata !== undefined ? { ...(existing.metadata ?? {}), ...action.metadata } : existing.metadata,
+      updatedAt: now,
+      completedAt: nextStatus === "completed" ? existing.completedAt ?? now : nextStatus === "cancelled" ? existing.completedAt ?? now : existing.completedAt
+    };
+    this.tasks.set(task.id, task);
+    await this.recordTask(task, "updated");
+    await this.publishState();
+    return `task_update ${task.id}\n\n${formatTask(task)}`;
+  }
+
+  private listTasks(action: Extract<AgentAction, { readonly type: "task_list" }>): string {
+    const tasks = [...this.tasks.values()]
+      .filter((task) => !action.status || task.status === action.status)
+      .filter((task) => !action.owner || task.owner === action.owner)
+      .sort((a, b) => a.createdAt - b.createdAt);
+    if (tasks.length === 0) {
+      return "task_list\n\nNo tasks.";
+    }
+    return `task_list\n\n${tasks.map(formatTaskLine).join("\n")}`;
+  }
+
+  private getTask(taskId: string): string {
+    const task = this.tasks.get(taskId);
+    return task ? `task_get ${task.id}\n\n${formatTask(task)}` : toolError(`No task found for ${taskId}.`);
+  }
+
+  private async listMcpResourcesForTool(serverId: string | undefined): Promise<string> {
+    const inspections = await inspectConfiguredMcpServers(
+      this.config.getMcpServers(),
+      this.config.getNetworkPolicy(),
+      serverId,
+      this.runningAbort?.signal
+    );
+    return `mcp_list_resources${serverId ? ` ${serverId}` : ""}\n\n${formatMcpInspectionReport(inspections, "resources")}`;
+  }
+
+  private async recordTask(task: CodeForgeTask, event: "created" | "updated"): Promise<void> {
+    await this.appendSessionRecord((sessionId) => ({
+      type: "task",
+      sessionId,
+      createdAt: Date.now(),
+      event,
+      task
+    }));
+  }
+
   private async executePermittedAction(action: AgentAction, toolCallId: string | undefined): Promise<string> {
     await this.runLocalHooks("preTool", action);
     let transcriptResult: string;
@@ -837,6 +1148,98 @@ export class AgentController {
         }
       );
       transcriptResult = result.content;
+      await this.runLocalHooks("postTool", action);
+      return transcriptResult;
+    }
+
+    if (action.type === "spawn_agent") {
+      transcriptResult = await this.executeSpawnAgentAction(action);
+      await this.runLocalHooks("postTool", action);
+      return transcriptResult;
+    }
+
+    if (action.type === "worker_output") {
+      transcriptResult = this.workers.output(action.workerId) ?? `worker_output ${action.workerId}\n\nNo worker found.`;
+      await this.runLocalHooks("postTool", action);
+      return transcriptResult;
+    }
+
+    if (action.type === "ask_user_question") {
+      transcriptResult = toolError("ask_user_question requires a user answer and cannot be auto-approved.");
+      await this.runLocalHooks("postTool", action);
+      return transcriptResult;
+    }
+
+    if (action.type === "tool_list") {
+      transcriptResult = this.formatToolList();
+      await this.runLocalHooks("postTool", action);
+      return transcriptResult;
+    }
+
+    if (action.type === "task_create") {
+      transcriptResult = await this.createTask(action);
+      await this.runLocalHooks("postTool", action);
+      return transcriptResult;
+    }
+
+    if (action.type === "task_update") {
+      transcriptResult = await this.updateTask(action);
+      await this.runLocalHooks("postTool", action);
+      return transcriptResult;
+    }
+
+    if (action.type === "task_list") {
+      transcriptResult = this.listTasks(action);
+      await this.runLocalHooks("postTool", action);
+      return transcriptResult;
+    }
+
+    if (action.type === "task_get") {
+      transcriptResult = this.getTask(action.taskId);
+      await this.runLocalHooks("postTool", action);
+      return transcriptResult;
+    }
+
+    if (action.type === "code_hover" || action.type === "code_definition" || action.type === "code_references" || action.type === "code_symbols") {
+      transcriptResult = await this.codeIntel.execute(action, this.runningAbort?.signal);
+      await this.runLocalHooks("postTool", action);
+      return transcriptResult;
+    }
+
+    if (action.type === "notebook_read") {
+      transcriptResult = await this.notebooks.execute(action, this.runningAbort?.signal);
+      await this.runLocalHooks("postTool", action);
+      return transcriptResult;
+    }
+
+    if (action.type === "mcp_list_resources") {
+      transcriptResult = await this.listMcpResourcesForTool(action.serverId);
+      await this.runLocalHooks("postTool", action);
+      return transcriptResult;
+    }
+
+    if (action.type === "mcp_read_resource") {
+      const resource = await readConfiguredMcpResource(
+        this.config.getMcpServers(),
+        this.config.getNetworkPolicy(),
+        action.serverId,
+        action.uri,
+        this.runningAbort?.signal
+      );
+      transcriptResult = `mcp_read_resource ${resource.serverId}:${resource.uri}\n\n${resource.content}`;
+      await this.runLocalHooks("postTool", action);
+      return transcriptResult;
+    }
+
+    if (action.type === "memory_write") {
+      if (!this.memoryStore) {
+        throw new Error("Local memory is not available in this environment.");
+      }
+      const memory = await this.memoryStore.add(action.text, {
+        scope: action.scope ?? "workspace",
+        namespace: action.scope === "agent" ? action.agent : undefined
+      });
+      transcriptResult = `memory_write ${memory.id}\n\nSaved ${memory.scope ?? "workspace"} memory${memory.namespace ? ` for ${memory.namespace}` : ""}.`;
       await this.runLocalHooks("postTool", action);
       return transcriptResult;
     }
@@ -879,6 +1282,13 @@ export class AgentController {
         action,
         this.runningAbort?.signal
       );
+      await this.runLocalHooks("postTool", action);
+      return transcriptResult;
+    }
+
+    if (action.type === "notebook_edit_cell") {
+      await this.recordCheckpoint(action, `Before editing notebook ${action.path} cell ${action.index}.`);
+      transcriptResult = await this.notebooks.execute(action, this.runningAbort?.signal);
       await this.runLocalHooks("postTool", action);
       return transcriptResult;
     }
@@ -1163,11 +1573,22 @@ export class AgentController {
     this.sessionId = snapshot.id;
     this.sessionStartPromise = undefined;
     this.messages = [...snapshot.messages];
+    this.restoreTasksFromSessionRecords(snapshot.records);
     this.lastContextItems = [];
     this.mcpContextItems = [];
     this.lastTokenUsage = undefined;
     this.approvals.restore(snapshot.pendingApprovals);
+    this.workerApprovalWaiters.clear();
     this.workers.restoreFromSessionRecords(snapshot.records);
+  }
+
+  private restoreTasksFromSessionRecords(records: readonly SessionRecord[]): void {
+    this.tasks.clear();
+    for (const record of records) {
+      if (record.type === "task") {
+        this.tasks.set(record.task.id, record.task);
+      }
+    }
   }
 
   private emit(event: AgentUiEvent): void {
@@ -1229,7 +1650,14 @@ export class AgentController {
         this.showWorkers();
         return;
       case "/worker":
-        this.handleWorkerCommand(rest);
+        await this.handleWorkerCommand(rest);
+        return;
+      case "/agents":
+        await this.showLocalAgents();
+        return;
+      case "/agent-run":
+      case "/run-agent":
+        await this.handleLocalAgentCommand(rest);
         return;
       case "/explore":
         this.startWorker("explore", rest);
@@ -1239,6 +1667,9 @@ export class AgentController {
         return;
       case "/verify":
         this.startWorker("verify", rest);
+        return;
+      case "/implement":
+        this.startWorker("implement", rest);
         return;
       case "/plan-worker":
       case "/planworker":
@@ -1294,7 +1725,7 @@ export class AgentController {
         this.emit({
           type: "message",
           role: "system",
-          text: `Unknown command ${command}. Available commands: /new, /compact, /context, /commands, /mcp, /workers, /worker, /explore, /review, /verify, /skills, /skill, /memory, /clear, /stop, /history, /resume, /fork, /diff, /export, /model, /models, /agent, /ask, /plan, /manual, /smart, /full-auto, /config.`
+          text: `Unknown command ${command}. Available commands: /new, /compact, /context, /commands, /mcp, /workers, /worker, /agents, /agent-run, /explore, /review, /verify, /implement, /skills, /skill, /memory, /clear, /stop, /history, /resume, /fork, /diff, /export, /model, /models, /agent, /ask, /plan, /manual, /smart, /full-auto, /config.`
         });
     }
   }
@@ -1310,16 +1741,33 @@ export class AgentController {
   }
 
   private startWorker(kind: WorkerKind, prompt: string): void {
+    if (kind === "custom") {
+      this.emit({ type: "error", text: "Use /agent-run <name> <task> to start a workspace-local agent." });
+      return;
+    }
     try {
       const worker = this.workers.spawn(kind, prompt);
-      this.emit({
-        type: "message",
-        role: "system",
-        text: `${worker.label} worker started: ${worker.id}\n\nUse /worker output ${worker.id} to view its transcript or /worker stop ${worker.id} to stop it.`
-      });
+      this.emitWorkerStarted(worker);
     } catch (error) {
       this.emit({ type: "error", text: errorMessage(error) });
     }
+  }
+
+  private startWorkerDefinition(definition: WorkerDefinition, prompt: string): void {
+    try {
+      const worker = this.workers.spawnDefinition(definition, prompt);
+      this.emitWorkerStarted(worker);
+    } catch (error) {
+      this.emit({ type: "error", text: errorMessage(error) });
+    }
+  }
+
+  private emitWorkerStarted(worker: WorkerSummary): void {
+    this.emit({
+      type: "message",
+      role: "system",
+      text: `${worker.label} worker started: ${worker.id}\n\nUse /worker output ${worker.id} to view its transcript or /worker stop ${worker.id} to stop it.`
+    });
   }
 
   private showWorkers(): void {
@@ -1328,7 +1776,7 @@ export class AgentController {
     this.emit({ type: "message", role: "system", text: formatWorkerList(workers) });
   }
 
-  private handleWorkerCommand(rest: string): void {
+  private async handleWorkerCommand(rest: string): Promise<void> {
     const [subcommandRaw, ...tail] = rest.trim().split(/\s+/);
     const subcommand = subcommandRaw?.toLowerCase() || "list";
     if (isWorkerKind(subcommand)) {
@@ -1341,6 +1789,12 @@ export class AgentController {
       case "status":
         this.showWorkers();
         return;
+      case "agent":
+      case "local": {
+        const [agentName, ...taskParts] = tail;
+        await this.startLocalAgent(agentName, taskParts.join(" "));
+        return;
+      }
       case "output":
       case "show":
       case "open": {
@@ -1350,6 +1804,15 @@ export class AgentController {
           return;
         }
         this.showWorkerOutput(workerId);
+        return;
+      }
+      case "attach": {
+        const workerId = tail[0];
+        if (!workerId) {
+          this.emit({ type: "message", role: "system", text: "Usage: /worker attach <worker-id>" });
+          return;
+        }
+        this.attachWorkerOutput(workerId);
         return;
       }
       case "stop":
@@ -1491,6 +1954,77 @@ export class AgentController {
     this.emit({ type: "message", role: "system", text: formatLocalSkillList(skills) });
   }
 
+  private async showLocalAgents(): Promise<void> {
+    const agents = await loadLocalAgents(this.workspace);
+    this.emit({ type: "message", role: "system", text: formatLocalAgentList(agents) });
+  }
+
+  private async handleLocalAgentCommand(rest: string): Promise<void> {
+    const [firstRaw, ...tail] = rest.trim().split(/\s+/);
+    const first = firstRaw?.toLowerCase() || "";
+    if (!first || first === "list") {
+      await this.showLocalAgents();
+      return;
+    }
+
+    const name = first === "run" ? tail.shift()?.toLowerCase() : first;
+    const task = (first === "run" ? tail : rest.trim().split(/\s+/).slice(1)).join(" ").trim();
+    await this.startLocalAgent(name, task);
+  }
+
+  private async startLocalAgent(name: string | undefined, task: string): Promise<void> {
+    const normalizedName = name?.trim().toLowerCase();
+    if (!normalizedName) {
+      this.emit({ type: "message", role: "system", text: "Usage: /agent-run <agent-name> <task> or /agents." });
+      return;
+    }
+
+    const agents = await loadLocalAgents(this.workspace);
+    const agent = agents.find((item) => item.name.toLowerCase() === normalizedName);
+    if (!agent) {
+      this.emit({ type: "message", role: "system", text: `No local CodeForge agent named ${normalizedName}.\n\n${formatLocalAgentList(agents)}` });
+      return;
+    }
+
+    this.startWorkerDefinition(localAgentWorkerDefinition(agent), task || `Run ${agent.name} against the current workspace context.`);
+  }
+
+  private async executeSpawnAgentAction(action: Extract<AgentAction, { readonly type: "spawn_agent" }>): Promise<string> {
+    const definition = await this.resolveSpawnAgentDefinition(action.agent);
+    const worker = this.workers.spawnDefinition(definition, action.prompt);
+    this.emitWorkerStarted(worker);
+    if (action.background === true) {
+      return `spawn_agent ${worker.id}\n\nLaunched ${worker.label} in the background. Use worker_output with workerId "${worker.id}" to inspect progress.`;
+    }
+
+    const completed = await this.workers.waitFor(worker.id, 120000, this.runningAbort?.signal);
+    const output = this.workers.output(worker.id);
+    if (!completed || completed.status === "running") {
+      return `spawn_agent ${worker.id}\n\n${worker.label} is still running after the foreground wait window. Use worker_output with workerId "${worker.id}" to inspect progress.\n\n${output ?? ""}`.trim();
+    }
+    return output ?? `spawn_agent ${worker.id}\n\n${worker.label} finished with status ${completed.status}.`;
+  }
+
+  private async resolveSpawnAgentDefinition(name: string | undefined): Promise<WorkerDefinition> {
+    const normalized = name?.trim().toLowerCase() || "implement";
+    const builtInName = normalized === "general" || normalized === "general-purpose" || normalized === "agent"
+      ? "implement"
+      : normalized;
+    if (isWorkerKind(builtInName) && builtInName !== "custom") {
+      const definition = findWorkerDefinition(builtInName);
+      if (definition) {
+        return definition;
+      }
+    }
+
+    const agents = await loadLocalAgents(this.workspace);
+    const agent = agents.find((item) => item.name.toLowerCase() === normalized);
+    if (!agent) {
+      throw new Error(`No CodeForge agent named ${normalized}. Built-ins: explore, plan, review, verify, implement. Local agents: ${agents.map((item) => item.name).join(", ") || "none"}.`);
+    }
+    return localAgentWorkerDefinition(agent);
+  }
+
   private async handleSkillCommand(rest: string): Promise<void> {
     const [firstRaw, ...tail] = rest.trim().split(/\s+/);
     const first = firstRaw?.toLowerCase() || "";
@@ -1580,6 +2114,7 @@ export class AgentController {
     }
 
     this.approvals.clear();
+    this.workerApprovalWaiters.clear();
     await this.startNewSession(`Fork of ${source?.title ?? "CodeForge session"}`);
     this.replaceMessages(messages, "restore");
     await this.publishTranscript();
@@ -1736,7 +2271,10 @@ export class AgentController {
           this.emit({ type: "message", role: "system", text: "No local CodeForge memories are saved." });
           return;
         }
-        const lines = memories.map((memory) => `${memory.id} | ${new Date(memory.createdAt).toLocaleString()} | ${memory.text}`);
+        const lines = memories.map((memory) => {
+          const scope = memory.scope === "agent" && memory.namespace ? `agent:${memory.namespace}` : memory.scope ?? "workspace";
+          return `${memory.id} | ${scope} | ${new Date(memory.createdAt).toLocaleString()} | ${memory.text}`;
+        });
         this.emit({ type: "message", role: "system", text: `Local CodeForge memories:\n${lines.join("\n")}` });
         return;
       }
@@ -1982,6 +2520,146 @@ function formatWorkerList(workers: readonly WorkerSummary[]): string {
   return `Workers:\n${lines.join("\n")}\n\nUse /worker output <id> to view a transcript or /worker stop <id> to stop a running worker.`;
 }
 
+function formatQuestionAnswers(questions: readonly UserQuestion[], answers: Readonly<Record<string, string>>): string {
+  const lines = questions.map((question) => `- ${question.question} -> ${answers[question.question]}`);
+  return `ask_user_question\n\nUser answered CodeForge's question(s):\n${lines.join("\n")}\n\nContinue with these answers in mind.`;
+}
+
+function uniqueStrings(values: readonly string[] | undefined): readonly string[] {
+  return [...new Set((values ?? []).map((value) => value.trim()).filter(Boolean))];
+}
+
+function formatTaskLine(task: CodeForgeTask): string {
+  const owner = task.owner ? ` owner=${task.owner}` : "";
+  const blockedBy = task.blockedBy.length > 0 ? ` blockedBy=${task.blockedBy.join(",")}` : "";
+  return `- ${task.id} [${task.status}]${owner}${blockedBy} ${task.subject}`;
+}
+
+function formatTask(task: CodeForgeTask): string {
+  return [
+    `ID: ${task.id}`,
+    `Status: ${task.status}`,
+    `Subject: ${task.subject}`,
+    task.description ? `Description: ${task.description}` : undefined,
+    task.activeForm ? `Active: ${task.activeForm}` : undefined,
+    task.owner ? `Owner: ${task.owner}` : undefined,
+    task.blocks.length > 0 ? `Blocks: ${task.blocks.join(", ")}` : undefined,
+    task.blockedBy.length > 0 ? `Blocked by: ${task.blockedBy.join(", ")}` : undefined,
+    task.metadata && Object.keys(task.metadata).length > 0 ? `Metadata: ${JSON.stringify(task.metadata)}` : undefined,
+    `Created: ${new Date(task.createdAt).toISOString()}`,
+    `Updated: ${new Date(task.updatedAt).toISOString()}`,
+    task.completedAt ? `Completed: ${new Date(task.completedAt).toISOString()}` : undefined
+  ].filter((line): line is string => Boolean(line)).join("\n");
+}
+
+const localAgentReadTools = ["list_files", "glob_files", "read_file", "search_text", "grep_text", "list_diagnostics"] as const;
+const localAgentCodeIntelTools = ["code_hover", "code_definition", "code_references", "code_symbols"] as const;
+const localAgentNotebookReadTools = ["notebook_read"] as const;
+const localAgentNotebookEditTools = ["notebook_edit_cell"] as const;
+const localAgentStateTools = ["tool_list", "task_create", "task_update", "task_list", "task_get"] as const;
+const localAgentQuestionTools = ["ask_user_question"] as const;
+const localAgentEditTools = ["open_diff", "propose_patch", "write_file", "edit_file"] as const;
+const localAgentCommandTools = ["run_command"] as const;
+const localAgentMcpTools = ["mcp_call_tool", "mcp_list_resources", "mcp_read_resource"] as const;
+const localAgentAutomationTools = ["spawn_agent", "worker_output"] as const;
+const localAgentMemoryTools = ["memory_write"] as const;
+
+function localAgentWorkerDefinition(agent: LocalAgent): WorkerDefinition {
+  const label = agent.label?.trim() || agent.name;
+  return {
+    kind: "custom",
+    name: agent.name,
+    label,
+    slashCommand: `/agent-run ${agent.name}`,
+    description: agent.description ?? `Workspace-local CodeForge agent ${agent.name}.`,
+    maxTurns: Math.max(1, Math.min(12, agent.maxTurns ?? 6)),
+    allowedToolNames: localAgentAllowedToolNames(agent),
+    local: true,
+    systemPrompt: [
+      `You are the workspace-local CodeForge agent "${label}" running inside VS Code.`,
+      "This is a local/offline-first extension workflow. Use only the configured local or on-prem OpenAI API endpoint and CodeForge-provided workspace tools.",
+      `Agent definition file: ${agent.path}`,
+      agent.description ? `Agent description: ${agent.description}` : undefined,
+      "Follow the agent instructions exactly unless they conflict with CodeForge safety, workspace permission policy, or the user's latest request.",
+      "Use the workspace tools you are allowed to use. Any edit, command, or MCP side effect is routed through the parent VS Code approval and permission policy.",
+      "Do not use public web services, hosted marketplaces, or network resources outside configured local/on-prem endpoints.",
+      "Agent instructions:",
+      agent.body,
+      "When reporting, include these plain labels when they fit: Scope, Result, Key files, Files changed, Issues, Confidence."
+    ].filter((line): line is string => Boolean(line)).join("\n")
+  };
+}
+
+function localAgentAllowedToolNames(agent: LocalAgent): readonly WorkerDefinition["allowedToolNames"][number][] {
+  const requested = agent.tools.length > 0 ? agent.tools : ["read"];
+  const allowed = new Set<string>();
+  const knownToolNames = new Set(toolDefinitions.map((tool) => tool.name));
+  for (const rawTool of requested) {
+    const tool = rawTool.toLowerCase();
+    if (tool === "read" || tool === "readonly" || tool === "read-only") {
+      addTools(allowed, localAgentReadTools);
+      addTools(allowed, localAgentCodeIntelTools);
+      addTools(allowed, localAgentNotebookReadTools);
+    } else if (tool === "code" || tool === "lsp" || tool === "symbols") {
+      addTools(allowed, localAgentReadTools);
+      addTools(allowed, localAgentCodeIntelTools);
+    } else if (tool === "state" || tool === "task" || tool === "tasks" || tool === "todo" || tool === "todos") {
+      addTools(allowed, localAgentStateTools);
+    } else if (tool === "ask" || tool === "question" || tool === "questions") {
+      addTools(allowed, localAgentQuestionTools);
+    } else if (tool === "edit" || tool === "write" || tool === "files") {
+      addTools(allowed, localAgentReadTools);
+      addTools(allowed, localAgentCodeIntelTools);
+      addTools(allowed, localAgentNotebookReadTools);
+      addTools(allowed, localAgentStateTools);
+      addTools(allowed, localAgentQuestionTools);
+      addTools(allowed, localAgentEditTools);
+      addTools(allowed, localAgentNotebookEditTools);
+    } else if (tool === "notebook" || tool === "notebooks") {
+      addTools(allowed, localAgentNotebookReadTools);
+      addTools(allowed, localAgentNotebookEditTools);
+    } else if (tool === "command" || tool === "shell" || tool === "bash" || tool === "terminal") {
+      addTools(allowed, localAgentReadTools);
+      addTools(allowed, localAgentCommandTools);
+    } else if (tool === "mcp" || tool === "service") {
+      addTools(allowed, localAgentReadTools);
+      addTools(allowed, localAgentMcpTools);
+    } else if (tool === "agent" || tool === "agents" || tool === "delegate") {
+      addTools(allowed, localAgentReadTools);
+      addTools(allowed, localAgentAutomationTools);
+    } else if (tool === "memory" || tool === "remember") {
+      addTools(allowed, localAgentReadTools);
+      addTools(allowed, localAgentMemoryTools);
+    } else if (tool === "all") {
+      addTools(allowed, localAgentReadTools);
+      addTools(allowed, localAgentCodeIntelTools);
+      addTools(allowed, localAgentNotebookReadTools);
+      addTools(allowed, localAgentStateTools);
+      addTools(allowed, localAgentQuestionTools);
+      addTools(allowed, localAgentEditTools);
+      addTools(allowed, localAgentNotebookEditTools);
+      addTools(allowed, localAgentCommandTools);
+      addTools(allowed, localAgentMcpTools);
+      addTools(allowed, localAgentAutomationTools);
+      addTools(allowed, localAgentMemoryTools);
+    } else if (knownToolNames.has(tool)) {
+      allowed.add(tool);
+    }
+  }
+  if (allowed.size === 0) {
+    addTools(allowed, localAgentReadTools);
+    addTools(allowed, localAgentCodeIntelTools);
+    addTools(allowed, localAgentNotebookReadTools);
+  }
+  return [...allowed];
+}
+
+function addTools(target: Set<string>, tools: readonly string[]): void {
+  for (const tool of tools) {
+    target.add(tool);
+  }
+}
+
 function transcriptEventForMessage(message: ChatMessage): AgentUiEvent | undefined {
   if (message.role === "system") {
     return undefined;
@@ -2016,6 +2694,10 @@ function stripWorkspaceContext(content: string): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function toolError(message: string): string {
+  return `<tool_use_error>Error: ${message}</tool_use_error>`;
 }
 
 function isCheckpointRecord(record: SessionRecord): record is Extract<SessionRecord, { readonly type: "checkpoint" }> {
@@ -2109,7 +2791,46 @@ function agentModeInstructions(mode: AgentMode): string {
   ].join("\n");
 }
 
-const readOnlyToolNames = new Set(["list_files", "glob_files", "read_file", "search_text", "grep_text", "list_diagnostics"]);
+const readOnlyToolNames = new Set([
+  "list_files",
+  "glob_files",
+  "read_file",
+  "search_text",
+  "grep_text",
+  "list_diagnostics",
+  "ask_user_question",
+  "tool_list",
+  "task_list",
+  "task_get",
+  "code_hover",
+  "code_definition",
+  "code_references",
+  "code_symbols",
+  "mcp_list_resources",
+  "mcp_read_resource",
+  "notebook_read"
+]);
+
+function isInternalAutomationAction(action: AgentAction): boolean {
+  return action.type === "spawn_agent" || action.type === "worker_output";
+}
+
+function isInternalStateAction(action: AgentAction): boolean {
+  return action.type === "task_create" || action.type === "task_update";
+}
+
+function isInternalReadAction(action: AgentAction): boolean {
+  return action.type === "tool_list"
+    || action.type === "task_list"
+    || action.type === "task_get"
+    || action.type === "code_hover"
+    || action.type === "code_definition"
+    || action.type === "code_references"
+    || action.type === "code_symbols"
+    || action.type === "mcp_list_resources"
+    || action.type === "mcp_read_resource"
+    || action.type === "notebook_read";
+}
 
 function formatCommandResult(action: RunCommandAction, result: CommandResult): string {
   const status = result.timedOut
@@ -2157,6 +2878,40 @@ function approvalAcceptedText(action: AgentAction, transcriptResult: string): st
       return `Searched for ${action.query}.`;
     case "list_diagnostics":
       return action.path ? `Listed diagnostics for ${action.path}.` : "Listed workspace diagnostics.";
+    case "spawn_agent":
+      return `Launched agent ${action.agent || "implement"}.`;
+    case "worker_output":
+      return `Read worker output ${action.workerId}.`;
+    case "ask_user_question":
+      return "Answered question.";
+    case "tool_list":
+      return "Listed tools.";
+    case "task_create":
+      return "Created task.";
+    case "task_update":
+      return `Updated task ${action.taskId}.`;
+    case "task_list":
+      return "Listed tasks.";
+    case "task_get":
+      return `Read task ${action.taskId}.`;
+    case "code_hover":
+      return `Read hover at ${action.path}:${action.line}:${action.character}.`;
+    case "code_definition":
+      return `Found definitions at ${action.path}:${action.line}:${action.character}.`;
+    case "code_references":
+      return `Found references at ${action.path}:${action.line}:${action.character}.`;
+    case "code_symbols":
+      return "Listed code symbols.";
+    case "mcp_list_resources":
+      return "Listed MCP resources.";
+    case "mcp_read_resource":
+      return `Read MCP resource ${action.serverId}:${action.uri}.`;
+    case "notebook_read":
+      return `Read notebook ${action.path}.`;
+    case "notebook_edit_cell":
+      return `Edited notebook ${action.path} cell ${action.index}.`;
+    case "memory_write":
+      return "Saved local memory.";
     case "write_file":
       return `Wrote ${action.path}.`;
     case "edit_file":

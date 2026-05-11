@@ -173,6 +173,23 @@ export type AgentAction =
   | SearchTextAction
   | GrepTextAction
   | ListDiagnosticsAction
+  | SpawnAgentAction
+  | WorkerOutputAction
+  | AskUserQuestionAction
+  | ToolListAction
+  | TaskCreateAction
+  | TaskUpdateAction
+  | TaskListAction
+  | TaskGetAction
+  | CodeHoverAction
+  | CodeDefinitionAction
+  | CodeReferencesAction
+  | CodeSymbolsAction
+  | McpListResourcesAction
+  | McpReadResourceAction
+  | NotebookReadAction
+  | NotebookEditCellAction
+  | MemoryWriteAction
   | ProposePatchAction
   | WriteFileAction
   | EditFileAction
@@ -221,6 +238,169 @@ export interface ListDiagnosticsAction {
   readonly reason?: string;
 }
 
+export interface SpawnAgentAction {
+  readonly type: "spawn_agent";
+  readonly agent?: string;
+  readonly prompt: string;
+  readonly description?: string;
+  readonly background?: boolean;
+  readonly reason?: string;
+}
+
+export interface WorkerOutputAction {
+  readonly type: "worker_output";
+  readonly workerId: string;
+  readonly reason?: string;
+}
+
+export interface MemoryWriteAction {
+  readonly type: "memory_write";
+  readonly text: string;
+  readonly scope?: "workspace" | "user" | "agent";
+  readonly agent?: string;
+  readonly reason?: string;
+}
+
+export interface QuestionOption {
+  readonly label: string;
+  readonly description: string;
+  readonly preview?: string;
+}
+
+export interface UserQuestion {
+  readonly question: string;
+  readonly header: string;
+  readonly options: readonly QuestionOption[];
+  readonly multiSelect?: boolean;
+}
+
+export interface AskUserQuestionAction {
+  readonly type: "ask_user_question";
+  readonly questions: readonly UserQuestion[];
+  readonly reason?: string;
+}
+
+export interface ToolListAction {
+  readonly type: "tool_list";
+  readonly reason?: string;
+}
+
+export type CodeForgeTaskStatus = "pending" | "in_progress" | "blocked" | "completed" | "cancelled";
+
+export interface CodeForgeTask {
+  readonly id: string;
+  readonly subject: string;
+  readonly description?: string;
+  readonly activeForm?: string;
+  readonly status: CodeForgeTaskStatus;
+  readonly owner?: string;
+  readonly blocks: readonly string[];
+  readonly blockedBy: readonly string[];
+  readonly metadata?: Readonly<Record<string, unknown>>;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+  readonly completedAt?: number;
+}
+
+export interface TaskCreateAction {
+  readonly type: "task_create";
+  readonly subject: string;
+  readonly description?: string;
+  readonly activeForm?: string;
+  readonly owner?: string;
+  readonly blocks?: readonly string[];
+  readonly blockedBy?: readonly string[];
+  readonly metadata?: Readonly<Record<string, unknown>>;
+  readonly reason?: string;
+}
+
+export interface TaskUpdateAction {
+  readonly type: "task_update";
+  readonly taskId: string;
+  readonly subject?: string;
+  readonly description?: string;
+  readonly activeForm?: string;
+  readonly status?: CodeForgeTaskStatus;
+  readonly owner?: string;
+  readonly blocks?: readonly string[];
+  readonly blockedBy?: readonly string[];
+  readonly metadata?: Readonly<Record<string, unknown>>;
+  readonly reason?: string;
+}
+
+export interface TaskListAction {
+  readonly type: "task_list";
+  readonly status?: CodeForgeTaskStatus;
+  readonly owner?: string;
+  readonly reason?: string;
+}
+
+export interface TaskGetAction {
+  readonly type: "task_get";
+  readonly taskId: string;
+  readonly reason?: string;
+}
+
+export interface CodePosition {
+  readonly path: string;
+  readonly line: number;
+  readonly character: number;
+}
+
+export interface CodeHoverAction extends CodePosition {
+  readonly type: "code_hover";
+  readonly reason?: string;
+}
+
+export interface CodeDefinitionAction extends CodePosition {
+  readonly type: "code_definition";
+  readonly reason?: string;
+}
+
+export interface CodeReferencesAction extends CodePosition {
+  readonly type: "code_references";
+  readonly includeDeclaration?: boolean;
+  readonly reason?: string;
+}
+
+export interface CodeSymbolsAction {
+  readonly type: "code_symbols";
+  readonly path?: string;
+  readonly query?: string;
+  readonly reason?: string;
+}
+
+export interface McpListResourcesAction {
+  readonly type: "mcp_list_resources";
+  readonly serverId?: string;
+  readonly reason?: string;
+}
+
+export interface McpReadResourceAction {
+  readonly type: "mcp_read_resource";
+  readonly serverId: string;
+  readonly uri: string;
+  readonly reason?: string;
+}
+
+export type NotebookCellKindName = "code" | "markdown";
+
+export interface NotebookReadAction {
+  readonly type: "notebook_read";
+  readonly path: string;
+  readonly reason?: string;
+}
+
+export interface NotebookEditCellAction {
+  readonly type: "notebook_edit_cell";
+  readonly path: string;
+  readonly index: number;
+  readonly content: string;
+  readonly language?: string;
+  readonly kind?: NotebookCellKindName;
+  readonly reason?: string;
+}
+
 export interface ProposePatchAction {
   readonly type: "propose_patch";
   readonly patch: string;
@@ -264,7 +444,7 @@ export interface McpCallToolAction {
   readonly reason?: string;
 }
 
-export type ApprovalKind = "read" | "search" | "edit" | "preview" | "command" | "service";
+export type ApprovalKind = "read" | "search" | "automation" | "question" | "memory" | "state" | "edit" | "preview" | "command" | "service";
 
 export interface ApprovalRequest {
   readonly id: string;
@@ -275,6 +455,7 @@ export interface ApprovalRequest {
   readonly risk?: string;
   readonly permissionReason?: string;
   readonly permissionSource?: PermissionDecision["source"];
+  readonly origin?: "agent" | "worker";
   readonly toolCallId?: string;
   readonly toolName?: string;
   readonly action: AgentAction;

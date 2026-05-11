@@ -16,6 +16,7 @@ export class ApprovalQueue {
       risk: metadata.risk ?? riskForAction(action),
       permissionReason: permission.reason,
       permissionSource: permission.source,
+      origin: metadata.origin,
       toolCallId,
       toolName: action.type,
       action,
@@ -60,6 +61,7 @@ export class ApprovalQueue {
 export interface ApprovalMetadata {
   readonly detail?: string;
   readonly risk?: string;
+  readonly origin?: ApprovalRequest["origin"];
 }
 
 function summarizeAction(action: AgentAction): string {
@@ -76,10 +78,32 @@ function approvalKind(action: AgentAction): ApprovalKind {
     case "grep_text":
     case "list_diagnostics":
       return "search";
+    case "spawn_agent":
+    case "worker_output":
+      return "automation";
+    case "ask_user_question":
+      return "question";
+    case "memory_write":
+      return "memory";
+    case "tool_list":
+    case "task_list":
+    case "task_get":
+    case "code_hover":
+    case "code_definition":
+    case "code_references":
+    case "code_symbols":
+    case "mcp_list_resources":
+    case "mcp_read_resource":
+    case "notebook_read":
+      return "read";
+    case "task_create":
+    case "task_update":
+      return "state";
     case "open_diff":
       return "preview";
     case "write_file":
     case "edit_file":
+    case "notebook_edit_cell":
     case "propose_patch":
       return "edit";
     case "run_command":
@@ -101,6 +125,40 @@ function titleForAction(action: AgentAction): string {
     case "grep_text":
     case "list_diagnostics":
       return "Search workspace";
+    case "spawn_agent":
+      return "Launch agent";
+    case "worker_output":
+      return "Read worker output";
+    case "ask_user_question":
+      return "Answer question";
+    case "memory_write":
+      return "Save memory";
+    case "tool_list":
+      return "List tools";
+    case "task_create":
+      return "Create task";
+    case "task_update":
+      return "Update task";
+    case "task_list":
+      return "List tasks";
+    case "task_get":
+      return "Read task";
+    case "code_hover":
+      return "Read hover";
+    case "code_definition":
+      return "Find definition";
+    case "code_references":
+      return "Find references";
+    case "code_symbols":
+      return "List symbols";
+    case "mcp_list_resources":
+      return "List MCP resources";
+    case "mcp_read_resource":
+      return "Read MCP resource";
+    case "notebook_read":
+      return "Read notebook";
+    case "notebook_edit_cell":
+      return "Edit notebook cell";
     case "open_diff":
       return "Open diff preview";
     case "write_file":
@@ -125,10 +183,33 @@ function riskForAction(action: AgentAction): string {
     case "grep_text":
     case "list_diagnostics":
       return "read-only workspace access";
+    case "spawn_agent":
+    case "worker_output":
+      return "local agent automation";
+    case "ask_user_question":
+      return "requires user answer";
+    case "memory_write":
+      return "persistent local memory";
+    case "tool_list":
+    case "task_list":
+    case "task_get":
+    case "code_hover":
+    case "code_definition":
+    case "code_references":
+    case "code_symbols":
+    case "notebook_read":
+      return "read-only local state";
+    case "task_create":
+    case "task_update":
+      return "local session task state";
+    case "mcp_list_resources":
+    case "mcp_read_resource":
+      return "configured local service resource";
     case "open_diff":
       return "VS Code diff preview";
     case "write_file":
     case "edit_file":
+    case "notebook_edit_cell":
     case "propose_patch":
       return "workspace edit";
     case "run_command":

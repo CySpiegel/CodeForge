@@ -8,7 +8,7 @@ import {
   SessionSummary
 } from "../core/session";
 import { validateAction } from "../core/toolRegistry";
-import { AgentAction, ApprovalRequest, ChatMessage, ToolCall } from "../core/types";
+import { AgentAction, ApprovalRequest, ChatMessage, CodeForgeTask, CodeForgeTaskStatus, ToolCall } from "../core/types";
 import { WorkerKind, WorkerSessionEvent, WorkerStatus, WorkerSummary, WorkerTranscriptEntry, WorkerTranscriptRole } from "../core/workerTypes";
 
 const latestSessionKey = "codeforge.sessions.latest";
@@ -270,6 +270,18 @@ function toSessionRecord(value: unknown): SessionRecord | undefined {
         }
         : undefined;
     }
+    case "task": {
+      const task = toCodeForgeTask(value.task);
+      return task && (value.event === "created" || value.event === "updated")
+        ? {
+          type: "task",
+          sessionId: value.sessionId,
+          createdAt: value.createdAt,
+          event: value.event,
+          task
+        }
+        : undefined;
+    }
     case "event":
       return isEventLevel(value.level) && typeof value.text === "string"
         ? { type: "event", sessionId: value.sessionId, createdAt: value.createdAt, level: value.level, text: value.text }
@@ -313,6 +325,30 @@ function isApprovalRequest(value: unknown): value is ApprovalRequest {
     && toAgentAction(value.action) !== undefined;
 }
 
+function toCodeForgeTask(value: unknown): CodeForgeTask | undefined {
+  if (!isObject(value) || typeof value.id !== "string" || typeof value.subject !== "string" || !isTaskStatus(value.status) || typeof value.createdAt !== "number" || typeof value.updatedAt !== "number") {
+    return undefined;
+  }
+  return {
+    id: value.id,
+    subject: value.subject,
+    description: typeof value.description === "string" ? value.description : undefined,
+    activeForm: typeof value.activeForm === "string" ? value.activeForm : undefined,
+    status: value.status,
+    owner: typeof value.owner === "string" ? value.owner : undefined,
+    blocks: Array.isArray(value.blocks) ? value.blocks.filter((item): item is string => typeof item === "string") : [],
+    blockedBy: Array.isArray(value.blockedBy) ? value.blockedBy.filter((item): item is string => typeof item === "string") : [],
+    metadata: isObject(value.metadata) ? value.metadata : undefined,
+    createdAt: value.createdAt,
+    updatedAt: value.updatedAt,
+    completedAt: typeof value.completedAt === "number" ? value.completedAt : undefined
+  };
+}
+
+function isTaskStatus(value: unknown): value is CodeForgeTaskStatus {
+  return value === "pending" || value === "in_progress" || value === "blocked" || value === "completed" || value === "cancelled";
+}
+
 function toAgentAction(value: unknown): AgentAction | undefined {
   if (!isObject(value)) {
     return undefined;
@@ -326,7 +362,7 @@ function isChatRole(value: unknown): value is ChatMessage["role"] {
 }
 
 function isApprovalKind(value: unknown): value is ApprovalRequest["kind"] {
-  return value === "read" || value === "search" || value === "edit" || value === "preview" || value === "command" || value === "service";
+      return value === "read" || value === "search" || value === "automation" || value === "question" || value === "memory" || value === "state" || value === "edit" || value === "preview" || value === "command" || value === "service";
 }
 
 function isReplacementReason(value: unknown): value is "compact" | "restore" {
@@ -371,7 +407,7 @@ function toWorkerTranscriptEntry(value: unknown): WorkerTranscriptEntry | undefi
 }
 
 function isWorkerKind(value: unknown): value is WorkerKind {
-  return value === "explore" || value === "plan" || value === "review" || value === "verify";
+  return value === "explore" || value === "plan" || value === "review" || value === "verify" || value === "implement" || value === "custom";
 }
 
 function isWorkerStatus(value: unknown): value is WorkerStatus {
