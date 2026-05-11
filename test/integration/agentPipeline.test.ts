@@ -250,6 +250,29 @@ test("Manual approval pauses side effects, then approve resumes the model loop",
   assert.equal(harness.workspace.files.get("APPROVED.md"), "approved");
 });
 
+test("Manual approval prompts before repo file reads and resumes after approval", async () => {
+  const harness = createControllerHarness({
+    mode: "ask",
+    permissionMode: "manual",
+    files: { "README.md": "# CodeForge\n" },
+    responses: [
+      { toolCalls: [toolCall("read_file", { path: "README.md" })] },
+      { content: "README was read after approval." }
+    ]
+  });
+
+  await harness.controller.sendPrompt("Read the README.");
+  const approval = harness.events.find((event) => event.type === "approvalRequested");
+  assert.ok(approval && approval.type === "approvalRequested");
+  assert.equal(approval.approval.action.type, "read_file");
+  assert.equal(harness.events.some((event) => event.type === "toolResult" && /read_file README\.md/.test(event.text)), false);
+
+  await harness.controller.approve(approval.approval.id);
+  await waitForEvent(harness.events, (event) => event.type === "message" && event.role === "assistant" && /README was read after approval/.test(event.text));
+
+  assert.ok(harness.events.some((event) => event.type === "toolResult" && /read_file README\.md/.test(event.text)));
+});
+
 test("Manual rejection resumes the model loop so the assistant can choose another path", async () => {
   const harness = createControllerHarness({
     mode: "agent",

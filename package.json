@@ -179,7 +179,7 @@
             "smart",
             "fullAuto"
           ],
-          "description": "Approval mode for local tools. Manual asks before edits and commands; Smart allows read/search and small edits but asks before commands or risky edits; Full Auto proceeds without most prompts."
+          "description": "Approval mode for local tools. Manual asks before repo reads and local actions; Smart allows read/search and small edits but asks before commands or risky edits; Full Auto proceeds without most prompts."
         },
         "codeforge.permissions.rules": {
           "type": "array",

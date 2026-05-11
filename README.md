@@ -50,7 +50,7 @@ CodeForge is local-first by default:
 
 Approval modes:
 
-- **Manual**: asks before meaningful actions such as edits, commands, and service calls.
+- **Manual**: asks before repo reads and local actions such as edits, commands, automation, memory, and service calls.
 - **Smart**: allows routine reads and low-risk edits, asks before commands and risky changes.
 - **Full Auto**: allows most actions without interruption; best used in disposable branches or containers.
 

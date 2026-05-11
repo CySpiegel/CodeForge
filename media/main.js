@@ -135,7 +135,7 @@
     { name: "cancel", description: "Stop the current request" }
   ];
   const permissionModeOptions = [
-    { value: "manual", label: "Manual", description: "Ask before edits and local commands" },
+    { value: "manual", label: "Manual", description: "Ask before repo reads and local actions" },
     { value: "smart", label: "Smart", description: "Allow reads and small edits; ask before risky actions" },
     { value: "fullAuto", label: "Full Auto", description: "Proceed without most approval prompts" }
   ];

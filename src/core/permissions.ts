@@ -182,11 +182,11 @@ function decisionFromModeConstraint(action: AgentAction, mode: PermissionMode): 
     };
   }
 
-  if (mode === "manual" && isSideEffectAction(action)) {
+  if (mode === "manual" && isManualApprovalAction(action)) {
     return {
       behavior: "ask",
       source: "mode",
-      reason: "Manual approval mode asks before edits and local commands."
+      reason: "Manual approval mode asks before local reads, edits, commands, automation, memory, and service calls."
     };
   }
 
@@ -264,6 +264,10 @@ function permissionRuleDescription(rule: PermissionRule): string {
 
 function isSideEffectAction(action: AgentAction): boolean {
   return action.type === "propose_patch" || action.type === "write_file" || action.type === "edit_file" || action.type === "notebook_edit_cell" || action.type === "memory_write" || action.type === "run_command" || action.type === "mcp_call_tool";
+}
+
+function isManualApprovalAction(action: AgentAction): boolean {
+  return action.type !== "tool_list" && action.type !== "tool_search";
 }
 
 function isRiskyEditAction(action: AgentAction): boolean {
