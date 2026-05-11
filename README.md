@@ -1,8 +1,8 @@
 # CodeForge
 
-CodeForge is a Visual Studio Code extension that turns a local or on-prem OpenAI-compatible LLM endpoint into a coding assistant inside your editor.
+CodeForge is a Visual Studio Code extension that turns a configured OpenAI-compatible LLM endpoint into a coding assistant inside your editor.
 
-It is designed for offline-first development. CodeForge does not require a cloud AI account, does not include public provider presets, and keeps model traffic pointed at endpoints you configure, such as vLLM, LiteLLM, or LM Studio running locally or on your private network.
+It is designed for explicit endpoint control. CodeForge does not include public provider presets and keeps model traffic pointed at endpoints you configure, such as vLLM, LiteLLM, LM Studio, or a corporate/cloud OpenAI-compatible gateway.
 
 ## What CodeForge Does
 
@@ -19,11 +19,11 @@ CodeForge gives your local model a VS Code-native coding workflow:
 - maintain workspace chat history
 - keep and manage explicit local memories
 - use local slash commands, skills, and custom agents
-- connect to explicitly configured local or on-prem MCP servers
+- connect to explicitly configured MCP servers
 
 The extension is not a CLI tool and does not use a browser or website preview workflow. All normal interaction happens inside the VS Code side panel and editor commands.
 
-## Local Endpoint Support
+## Endpoint Support
 
 CodeForge talks to OpenAI API style endpoints. The endpoint implementation can be anything that follows that API shape.
 
@@ -32,7 +32,7 @@ Common examples:
 - LM Studio: `http://127.0.0.1:1234`
 - LiteLLM: `http://127.0.0.1:4000`
 - vLLM: `http://127.0.0.1:8000`
-- private on-prem OpenAI-compatible hosts explicitly allowed in settings
+- custom OpenAI-compatible endpoint origins explicitly allowed when saved in settings
 
 Model discovery uses `/v1/models`. When the endpoint exposes model metadata, CodeForge uses it for context length and reasoning-model indicators. Chat requests use `/v1/chat/completions`, including native OpenAI tool calls when the selected model and server support them.
 
@@ -42,9 +42,8 @@ CodeForge is local-first by default:
 
 - no telemetry
 - no bundled cloud-provider presets
-- public IP destinations are blocked by default
 - localhost and private IP ranges are allowed
-- on-prem hostnames must be explicitly allowlisted
+- custom endpoint origins are allowed only after you save that URL in settings
 - API keys are stored in VS Code SecretStorage
 - edits, commands, MCP calls, and memory writes go through typed validation and approval policy
 - permission decisions, approvals, and tool execution are visible in the run inspector
@@ -132,15 +131,15 @@ Project instructions can be placed in `CODEFORGE.md`.
 
 ## Setup
 
-1. Start a local or on-prem OpenAI-compatible server.
+1. Start or identify an OpenAI-compatible endpoint.
 2. Open CodeForge in VS Code.
 3. Open the CodeForge settings panel.
 4. Add or edit an **OpenAI API** endpoint profile.
-5. Set the base URL, such as `http://127.0.0.1:1234`.
+5. Set the base URL, such as `http://127.0.0.1:1234` or your corporate endpoint URL.
 6. Select a model returned by the endpoint.
 7. Run `/doctor` to verify the configuration.
 
-If your endpoint is on a private hostname, add that hostname to the network allowlist. Public IP destinations remain blocked.
+Saving a custom endpoint automatically allows that exact origin in `codeforge.network.allowlist`.
 
 ## Development
 

@@ -12,6 +12,26 @@ export function assertUrlAllowed(rawUrl: string, policy: NetworkPolicy): void {
   }
 }
 
+export function allowlistEntryForUrl(rawUrl: string): string | undefined {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return undefined;
+  }
+
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    return undefined;
+  }
+
+  const host = normalizeHost(url.hostname);
+  if (!host || isLocalhost(host) || isPrivateIp(host)) {
+    return undefined;
+  }
+
+  return url.origin.toLowerCase();
+}
+
 export function isUrlAllowed(rawUrl: string, policy: NetworkPolicy): UrlPolicyResult {
   let url: URL;
   try {
@@ -29,13 +49,6 @@ export function isUrlAllowed(rawUrl: string, policy: NetworkPolicy): UrlPolicyRe
     return { allowed: true };
   }
 
-  if (parseIpv4(host) !== undefined) {
-    return {
-      allowed: false,
-      reason: `Blocked public IP network destination ${url.origin}. CodeForge only permits localhost, private IP ranges, and explicitly configured on-prem hostnames.`
-    };
-  }
-
   for (const entry of policy.allowlist) {
     if (matchesAllowlistEntry(url, host, entry.trim())) {
       return { allowed: true };
@@ -44,7 +57,7 @@ export function isUrlAllowed(rawUrl: string, policy: NetworkPolicy): UrlPolicyRe
 
   return {
     allowed: false,
-    reason: `Blocked network destination ${url.origin}. Add an on-prem hostname to codeforge.network.allowlist only when it resolves inside your private network.`
+    reason: `Blocked network destination ${url.origin}. Save this URL as your CodeForge endpoint to allow this exact origin.`
   };
 }
 

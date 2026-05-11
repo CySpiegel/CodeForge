@@ -107,7 +107,7 @@
         "codeforge.profiles": {
           "type": "array",
           "default": [],
-          "description": "Local and on-prem OpenAI API profiles. API keys are stored separately in VS Code SecretStorage.",
+          "description": "OpenAI API-compatible endpoint profiles. API keys are stored separately in VS Code SecretStorage.",
           "items": {
             "type": "object",
             "required": [
@@ -163,7 +163,7 @@
         "codeforge.network.allowlist": {
           "type": "array",
           "default": [],
-          "description": "Explicit on-prem hostname allowlist for local/private LLM endpoints. Public IP destinations remain blocked.",
+          "description": "Explicit endpoint origin allowlist for OpenAI API compatible backends. Saving a custom endpoint URL adds its exact origin automatically.",
           "items": {
             "type": "string"
           }
@@ -227,7 +227,7 @@
         "codeforge.mcp.servers": {
           "type": "array",
           "default": [],
-          "description": "Explicit local or on-prem MCP server configurations. CodeForge never connects to MCP servers unless configured here and requested by a tool call.",
+          "description": "Explicit MCP server configurations. CodeForge never connects to MCP servers unless configured here and requested by a tool call.",
           "items": {
             "type": "object",
             "required": [

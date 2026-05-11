@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { assertUrlAllowed } from "../core/networkPolicy";
+import { allowlistEntryForUrl, assertUrlAllowed, isUrlAllowed } from "../core/networkPolicy";
 import { normalizePermissionPolicy, parsePermissionRules } from "../core/permissions";
 import { normalizeSettingsPermissionMode } from "../core/settingsMigration";
 import { AgentMode, ContextLimits, McpServerConfig, NetworkPolicy, PermissionMode, PermissionPolicy, PermissionRule, ProviderProfile } from "../core/types";
@@ -14,8 +14,12 @@ export class CodeForgeConfigService {
   }
 
   getNetworkPolicy(): NetworkPolicy {
+    const configuredAllowlist = this.config().get<readonly string[]>("network.allowlist", []);
+    const profileOrigins = this.getProfiles()
+      .map((profile) => allowlistEntryForUrl(profile.baseUrl))
+      .filter((entry): entry is string => entry !== undefined);
     return {
-      allowlist: this.config().get<readonly string[]>("network.allowlist", [])
+      allowlist: normalizeAllowlist([...configuredAllowlist, ...profileOrigins])
     };
   }
 
@@ -96,13 +100,20 @@ export class CodeForgeConfigService {
 
   async updateSettings(settings: Partial<CodeForgeSettingsUpdate>): Promise<void> {
     const config = this.config();
-    const allowlist = settings.allowlist ?? this.getNetworkPolicy().allowlist;
+    const existingAllowlist = normalizeAllowlist(this.getNetworkPolicy().allowlist);
+    let allowlist = normalizeAllowlist(settings.allowlist ?? existingAllowlist);
     const baseUrl = settings.baseUrl?.trim();
     const model = settings.model?.trim() || undefined;
     const profileLabel = settings.profileLabel?.trim() || "OpenAI API";
     if (settings.baseUrl !== undefined) {
       if (!baseUrl) {
         throw new Error("OpenAI API Base URL is required.");
+      }
+      if (!isUrlAllowed(baseUrl, { allowlist }).allowed) {
+        const endpointEntry = allowlistEntryForUrl(baseUrl);
+        if (endpointEntry) {
+          allowlist = normalizeAllowlist([...allowlist, endpointEntry]);
+        }
       }
       assertUrlAllowed(baseUrl, { allowlist });
     }
@@ -132,8 +143,8 @@ export class CodeForgeConfigService {
     if (settings.model !== undefined) {
       await config.update("model", settings.model.trim(), vscode.ConfigurationTarget.Workspace);
     }
-    if (settings.allowlist) {
-      await config.update("network.allowlist", settings.allowlist, vscode.ConfigurationTarget.Global);
+    if (settings.allowlist !== undefined || !sameStringArray(allowlist, existingAllowlist)) {
+      await config.update("network.allowlist", allowlist, vscode.ConfigurationTarget.Global);
     }
     if (settings.maxFiles !== undefined) {
       await config.update("context.maxFiles", clampNumber(settings.maxFiles, 1, 200, 24), vscode.ConfigurationTarget.Global);
@@ -251,6 +262,25 @@ const defaultProfiles: readonly ProviderProfile[] = [
 
 function isValidProfile(profile: ProviderProfile): boolean {
   return Boolean(profile.id && profile.label && profile.baseUrl);
+}
+
+function normalizeAllowlist(entries: readonly string[]): readonly string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const entry of entries) {
+    const trimmed = entry.trim();
+    const key = trimmed.toLowerCase();
+    if (!trimmed || seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    result.push(trimmed);
+  }
+  return result;
+}
+
+function sameStringArray(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 function isAgentMode(value: unknown): value is AgentMode {

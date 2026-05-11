@@ -474,7 +474,7 @@ export class AgentController {
         detail: endpointPolicy.allowed
           ? `${originLabel(profile.baseUrl)} is allowed by the local/offline endpoint policy.`
           : endpointPolicy.reason ?? `${profile.baseUrl} is blocked by the local/offline endpoint policy.`,
-        recommendation: endpointPolicy.allowed ? undefined : "Use localhost, a private IP, or an explicitly allowlisted on-prem hostname."
+        recommendation: endpointPolicy.allowed ? undefined : "Save the endpoint URL in CodeForge settings to allow that exact origin."
       });
 
       if (endpointPolicy.allowed) {
@@ -648,7 +648,7 @@ export class AgentController {
         category: "MCP",
         name: "Configured servers",
         status: "pass",
-        detail: "No MCP servers configured. MCP is optional and remains local/on-prem only."
+        detail: "No MCP servers configured. MCP is optional and only uses explicitly configured servers."
       });
       return;
     }
@@ -2169,7 +2169,7 @@ export class AgentController {
           mcpTools.push({
             name,
             description: [
-              `Call MCP tool ${tool.name} on configured local/on-prem server ${inspection.status.id}.`,
+              `Call MCP tool ${tool.name} on configured server ${inspection.status.id}.`,
               tool.description
             ].filter((line): line is string => Boolean(line)).join(" "),
             parameters: mcpToolParameters(tool.inputSchema)
@@ -2230,7 +2230,7 @@ export class AgentController {
   private systemMessage(): ChatMessage {
     return {
       role: "system",
-      content: `${actionProtocolInstructions}\n\n${agentModeInstructions(this.config.getAgentMode())}\n\nNetwork policy: CodeForge is local/offline first and only talks to configured local or on-prem vLLM/LiteLLM-compatible endpoints. Never suggest sending workspace data to a public service.`
+      content: `${actionProtocolInstructions}\n\n${agentModeInstructions(this.config.getAgentMode())}\n\nNetwork policy: CodeForge only talks to user-configured OpenAI API-compatible endpoints and configured MCP servers. Do not use network resources outside those explicit configurations.`
     };
   }
 
@@ -2729,7 +2729,7 @@ export class AgentController {
   private showMcpServers(): void {
     const statuses = configuredMcpServerStatuses(this.config.getMcpServers(), this.config.getNetworkPolicy());
     if (statuses.length === 0) {
-      this.emit({ type: "message", role: "system", text: "No MCP servers are configured. Add explicit local/on-prem servers in CodeForge settings before using MCP tools." });
+      this.emit({ type: "message", role: "system", text: "No MCP servers are configured. Add explicit servers in CodeForge settings before using MCP tools." });
       return;
     }
 
@@ -3549,12 +3549,12 @@ function localAgentWorkerDefinition(agent: LocalAgent): WorkerDefinition {
     local: true,
     systemPrompt: [
       `You are the workspace-local CodeForge agent "${label}" running inside VS Code.`,
-      "This is a local/offline-first extension workflow. Use only the configured local or on-prem OpenAI API endpoint and CodeForge-provided workspace tools.",
+      "Use only the configured OpenAI API-compatible endpoint and CodeForge-provided workspace tools.",
       `Agent definition file: ${agent.path}`,
       agent.description ? `Agent description: ${agent.description}` : undefined,
       "Follow the agent instructions exactly unless they conflict with CodeForge safety, workspace permission policy, or the user's latest request.",
       "Use the workspace tools you are allowed to use. Any edit, command, or MCP side effect is routed through the parent VS Code approval and permission policy.",
-      "Do not use public web services, hosted marketplaces, or network resources outside configured local/on-prem endpoints.",
+      "Do not use network resources outside explicitly configured endpoints.",
       "Agent instructions:",
       agent.body,
       "When reporting, include these plain labels when they fit: Scope, Result, Key files, Files changed, Issues, Confidence."
@@ -3877,7 +3877,7 @@ function formatMcpToolSchemaSearchResult(functionName: string, serverId: string,
     "Schema:",
     JSON.stringify({
       name: functionName,
-      description: `Call MCP tool ${tool.name} on configured local/on-prem server ${serverId}. ${tool.description ?? ""}`.trim(),
+      description: `Call MCP tool ${tool.name} on configured server ${serverId}. ${tool.description ?? ""}`.trim(),
       parameters: mcpToolParameters(tool.inputSchema)
     }, null, 2)
   ].filter((line): line is string => line !== undefined).join("\n");

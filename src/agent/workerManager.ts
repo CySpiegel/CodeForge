@@ -191,7 +191,7 @@ const workerMemoryToolInstruction = `This worker may also request approval to sa
 
 Only save stable user preferences or repository facts that should affect future sessions. Memory writes are persistent, local, inspectable, and approval-gated.`;
 
-const workerMcpResourceToolInstruction = `This worker may also read resources from explicitly configured local/on-prem MCP servers:
+const workerMcpResourceToolInstruction = `This worker may also read resources from explicitly configured MCP servers:
 
 {
   "actions": [
@@ -566,7 +566,7 @@ export class WorkerManager {
       "",
       workerToolInstruction(definition),
       "",
-      "Network policy: CodeForge is local/offline first and only talks to configured local or on-prem OpenAI-compatible endpoints. Never suggest sending workspace data to a public service."
+      "Network policy: CodeForge only talks to user-configured OpenAI API-compatible endpoints and configured MCP servers. Do not use network resources outside those explicit configurations."
     ].join("\n");
   }
 

@@ -2,12 +2,12 @@
 
 CodeForge is a VS Code extension only. There will be no CLI edition and no browser or website workflow. The goal is to bring the strongest harness techniques from Harnes into a local-first editor workflow while preserving the original CodeForge principles:
 
-- local and on-prem OpenAI-compatible endpoints only
+- user-configured OpenAI-compatible endpoints only
 - supported endpoint targets are vLLM and LiteLLM-compatible `/v1` servers
 - no telemetry
 - offline and private workspace posture first
-- public IP destinations blocked
-- explicit hostname configuration is for private/on-prem LLM endpoints only
+- custom endpoint origins are allowed only after they are explicitly saved in settings
+- endpoint configuration supports corporate routing where approved services may not look like private LAN addresses
 - file writes and shell commands gated by typed approval flows
 - ports-and-adapters architecture with VS Code isolated behind adapters
 - small, typed core modules with focused tests
@@ -57,7 +57,7 @@ Status: initial implementation in place.
 Scope:
 - Add a core permission engine with explicit `deny -> ask -> allow` precedence.
 - Support session, workspace, and user scopes.
-- Add rule types for tools, workspace paths, shell command prefixes, and private/on-prem endpoint access.
+- Add rule types for tools, workspace paths, shell command prefixes, and configured endpoint access.
 - Add permission modes suitable for an extension:
   - `default`: reads allowed, writes and commands ask.
   - `review`: all writes and commands ask, even if allowlisted.
@@ -199,7 +199,7 @@ Scope:
 - Add MCP client support through an adapter.
 - Allow only explicitly configured MCP servers.
 - Apply the same permission engine to MCP tools.
-- Default to local transports, localhost endpoints, and private on-prem service hostnames.
+- Default to explicit user-configured transports and endpoint origins.
 - Add network-policy checks for any HTTP/SSE MCP transports.
 - Surface MCP resources in context only when requested or selected.
 
@@ -263,7 +263,7 @@ Scope:
 - Include AskUserQuestion-style interaction so agents can pause and ask the user a structured question during a coding workflow.
 - Include task/todo tools for durable multi-step work tracking.
 - Include LSP code intelligence tools for hover, definitions, references, and symbols through VS Code APIs.
-- Include direct MCP resource list/read tools for configured local/on-prem MCP servers.
+- Include direct MCP resource list/read tools for configured MCP servers.
 - Include notebook edit support through VS Code notebook APIs.
 - Include tool discovery for the model so local agents can inspect available CodeForge tools without guessing.
 - Include local persistent memory improvements:
@@ -271,7 +271,7 @@ Scope:
   - user preference memory
   - agent-specific memory namespaces
   - explicit user controls for inspect/remove/clear
-- Exclude web fetch/search tools until explicitly re-scoped for local/on-prem use only.
+- Exclude web fetch/search tools until explicitly re-scoped for configured endpoint use only.
 - Exclude cron/scheduled job tools for now.
 
 Exit criteria:
@@ -292,7 +292,7 @@ Scope:
 - Apply the same invalid native tool feedback path to worker agents.
 - Batch all concurrency-safe tools by registry metadata.
 - Add `postToolFailure` local hook support for runtime tool failures.
-- Surface configured local/on-prem MCP tools as concrete native function tools in Agent mode, with execution still mediated by CodeForge permissions and approvals.
+- Surface configured MCP tools as concrete native function tools in Agent mode, with execution still mediated by CodeForge permissions and approvals.
 - Add `tool_search` and deferred schema loading for the main agent and worker agents to reduce prompt/tool overhead for local models.
 
 Remaining reliability work moves to Phase 10.
@@ -311,7 +311,7 @@ Phase 10 entry baseline:
 
 Scope:
 - Add extension-host integration tests for core flows.
-- Add endpoint diagnostics for LiteLLM and vLLM-compatible on-prem servers.
+- Add endpoint diagnostics for LiteLLM and vLLM-compatible servers.
 - Add `/doctor` for local config, network policy, model capability, and workspace permissions.
 - Add migration handling for settings and session schema versions.
 - Add release packaging checks.

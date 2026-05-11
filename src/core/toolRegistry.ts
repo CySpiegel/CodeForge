@@ -800,7 +800,7 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
   },
   {
     name: "mcp_list_resources",
-    description: "List resources from explicitly configured local/on-prem MCP servers.",
+    description: "List resources from explicitly configured MCP servers.",
     searchHint: "list mcp resources",
     risk: "service",
     concurrencySafe: true,
@@ -830,7 +830,7 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
   },
   {
     name: "mcp_read_resource",
-    description: "Read a resource from an explicitly configured local/on-prem MCP server.",
+    description: "Read a resource from an explicitly configured MCP server.",
     searchHint: "read mcp resource",
     risk: "service",
     concurrencySafe: true,
@@ -1218,7 +1218,7 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
   },
   {
     name: "mcp_call_tool",
-    description: "Call a tool on an explicitly configured local/on-prem MCP server after permission approval.",
+    description: "Call a tool on an explicitly configured MCP server after permission approval.",
     searchHint: "call mcp tool",
     risk: "command",
     concurrencySafe: false,

@@ -1,6 +1,6 @@
 # Claude Code Clean-Room Parity Review
 
-This review is based on public Claude Code documentation and observable product behavior, not leaked or unlicensed source code. CodeForge should replicate useful harness capabilities clean-room while remaining a VS Code extension that talks only to local or on-prem vLLM/LiteLLM-compatible endpoints.
+This review is based on public Claude Code documentation and observable product behavior, not leaked or unlicensed source code. CodeForge should replicate useful harness capabilities clean-room while remaining a VS Code extension that talks only to user-configured OpenAI API-compatible endpoints.
 
 ## Source Boundary
 
