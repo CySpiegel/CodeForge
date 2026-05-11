@@ -1,4 +1,4 @@
-import { parseActionsFromAssistantText, parseToolAction } from "../core/actionProtocol";
+import { parseActionsFromAssistantText, parseToolActionDetailed } from "../core/actionProtocol";
 import { ContextBuilder } from "../core/contextBuilder";
 import { executeLocalReadOnlyTools, LocalToolProgress } from "../core/localToolExecutor";
 import { MemoryEntry } from "../core/memory";
@@ -56,6 +56,11 @@ interface WorkerTask {
   transcript: WorkerTranscriptEntry[];
   abortController?: AbortController;
   lastSummaryEmitAt?: number;
+}
+
+interface WorkerInvocationParseResult {
+  readonly invocations: readonly ToolInvocation[];
+  readonly hadInvalidNativeToolCalls: boolean;
 }
 
 const maxTranscriptEntries = 120;
@@ -395,13 +400,16 @@ export class WorkerManager {
           }
         }
 
-        const invocations = this.invocationsFromAssistant(task, nativeToolCalls, assistantText, iteration);
-        if (invocations.length === 0) {
+        const parsedInvocations = this.invocationsFromAssistant(task, nativeToolCalls, assistantText, iteration);
+        if (parsedInvocations.invocations.length === 0) {
+          if (parsedInvocations.hadInvalidNativeToolCalls) {
+            continue;
+          }
           this.finish(task, "completed", finalSummary(assistantText, task.summary));
           return;
         }
 
-        const continued = await this.executeInvocations(task, invocations);
+        const continued = await this.executeInvocations(task, parsedInvocations.invocations);
         if (!continued) {
           this.finish(task, "failed", "Worker stopped because every requested tool action was outside its allowed scope.");
           return;
@@ -417,24 +425,29 @@ export class WorkerManager {
     }
   }
 
-  private invocationsFromAssistant(task: WorkerTask, nativeToolCalls: readonly ToolCall[], assistantText: string, iteration: number): readonly ToolInvocation[] {
-    const native = nativeToolCalls.map((toolCall): ToolInvocation | undefined => {
-      const action = parseToolAction(toolCall.name, toolCall.argumentsJson);
-      return action
-        ? {
+  private invocationsFromAssistant(task: WorkerTask, nativeToolCalls: readonly ToolCall[], assistantText: string, iteration: number): WorkerInvocationParseResult {
+    const native: ToolInvocation[] = [];
+    let hadInvalidNativeToolCalls = false;
+    for (const toolCall of nativeToolCalls) {
+      const parsed = parseToolActionDetailed(toolCall.name, toolCall.argumentsJson);
+      if (parsed.ok) {
+        native.push({
           id: toolCall.id,
-          action,
+          action: parsed.action,
           source: "native",
           toolCallId: toolCall.id
-        }
-        : undefined;
-    }).filter((item): item is ToolInvocation => Boolean(item));
+        });
+      } else {
+        hadInvalidNativeToolCalls = true;
+        this.appendInvalidNativeToolCallResult(task, toolCall, parsed.message);
+      }
+    }
     const fallback = parseActionsFromAssistantText(assistantText).map((action, index): ToolInvocation => ({
       id: `${task.id}-json-${iteration}-${index}`,
       action,
       source: "json"
     }));
-    return [...native, ...fallback];
+    return { invocations: [...native, ...fallback], hadInvalidNativeToolCalls };
   }
 
   private async executeInvocations(task: WorkerTask, invocations: readonly ToolInvocation[]): Promise<boolean> {
@@ -470,7 +483,12 @@ export class WorkerManager {
         await this.executeReadOnlyInvocations(task, executable.splice(0));
       }
       this.appendTranscript(task, "status", `requested: ${invocation.action.type}`);
-      const result = await this.options.executeAction(invocation.action, invocation.toolCallId, summarizeWorker(task));
+      let result: string;
+      try {
+        result = await this.options.executeAction(invocation.action, invocation.toolCallId, summarizeWorker(task));
+      } catch (error) {
+        result = toolError(error instanceof Error ? error.message : String(error));
+      }
       trackResultPaths(task, result);
       this.appendWorkerToolResult(task, invocation, result);
     }
@@ -506,6 +524,13 @@ export class WorkerManager {
       task.messages.push({ role: "user", content: `CodeForge worker local tool result:\n\n${content}` });
     }
     this.appendTranscript(task, "tool", content);
+  }
+
+  private appendInvalidNativeToolCallResult(task: WorkerTask, toolCall: ToolCall, message: string): void {
+    const content = toolError(message);
+    task.messages.push({ role: "tool", name: toolCall.name || "tool", toolCallId: toolCall.id, content });
+    this.appendTranscript(task, "tool", content);
+    this.touch(task);
   }
 
   private onToolProgress(task: WorkerTask, progress: LocalToolProgress): void {

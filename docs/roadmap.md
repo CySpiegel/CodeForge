@@ -280,6 +280,22 @@ Exit criteria:
 - Persistent memory remains local, inspectable, and user-controllable.
 - No public network capability is added.
 
+## Phase 9C: Harnes-Style Orchestration Parity
+
+Purpose: make the internal model/tool loop resilient enough for real repository work, not just simple one-shot actions.
+
+Status: implemented for the critical orchestration gaps found in review. CodeForge now preserves invalid native tool calls in the transcript and returns explicit tool-result errors so local models can self-correct. The top-level agent loop has an agent-grade turn budget, concurrency-safe tools are batched by tool metadata rather than only by the small local read-tool subset, runtime tool failures return tool errors instead of breaking the loop, and configured MCP tools can be exposed as concrete native model tools while still routing through the existing `mcp_call_tool` permission path.
+
+Scope:
+- Raise the top-level model/tool loop from a short fixed cap to separate Agent and Ask/Plan turn budgets.
+- Preserve every native tool call in the assistant transcript and always pair failed parses with a tool-result error.
+- Apply the same invalid native tool feedback path to worker agents.
+- Batch all concurrency-safe tools by registry metadata.
+- Add `postToolFailure` local hook support for runtime tool failures.
+- Surface configured local/on-prem MCP tools as concrete native function tools in Agent mode, with execution still mediated by CodeForge permissions and approvals.
+
+Remaining reliability work moves to Phase 10.
+
 ## Phase 10: Packaging, Reliability, And Local Operations
 
 Purpose: make CodeForge dependable for daily use.

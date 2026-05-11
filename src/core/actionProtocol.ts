@@ -5,6 +5,10 @@ interface ActionEnvelope {
   readonly actions?: readonly unknown[];
 }
 
+export type ToolActionParseResult =
+  | { readonly ok: true; readonly action: AgentAction }
+  | { readonly ok: false; readonly message: string };
+
 export const actionProtocolInstructions = `You are CodeForge, a self-hosted-first coding harness inside VS Code.
 
 Prefer concise answers. When you need workspace data, request one or more actions using this exact JSON shape:
@@ -65,12 +69,34 @@ export function parseActionsFromAssistantText(text: string): readonly AgentActio
 }
 
 export function parseToolAction(name: string, argumentsJson: string): AgentAction | undefined {
-  try {
-    const parsed = JSON.parse(argumentsJson) as Record<string, unknown>;
-    return normalizeAction({ ...parsed, type: name });
-  } catch {
-    return undefined;
+  const result = parseToolActionDetailed(name, argumentsJson);
+  return result.ok ? result.action : undefined;
+}
+
+export function parseToolActionDetailed(name: string, argumentsJson: string): ToolActionParseResult {
+  const toolName = name.trim();
+  if (!toolName) {
+    return { ok: false, message: "Tool call did not include a function name." };
   }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(argumentsJson || "{}");
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return { ok: false, message: `Arguments for ${toolName} must be valid JSON. ${detail}` };
+  }
+
+  if (!isRecord(parsed)) {
+    return { ok: false, message: `Arguments for ${toolName} must be a JSON object.` };
+  }
+
+  const action = normalizeAction({ ...parsed, type: toolName });
+  if (!action) {
+    return { ok: false, message: `Tool ${toolName} is unknown or missing required parameters.` };
+  }
+
+  return { ok: true, action };
 }
 
 function extractJsonCandidates(text: string): readonly string[] {

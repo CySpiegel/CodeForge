@@ -1235,6 +1235,10 @@ export function isReadOnlyAction(action: AgentAction): boolean {
     || action.type === "worker_output";
 }
 
+export function isConcurrencySafeAction(action: AgentAction): boolean {
+  return Boolean(findTool(action.type)?.concurrencySafe);
+}
+
 export function isApprovalAction(action: AgentAction): action is AskUserQuestionAction | ProposePatchAction | WriteFileAction | EditFileAction | NotebookEditCellAction | MemoryWriteAction | RunCommandAction | McpCallToolAction {
   const tool = findTool(action.type);
   return Boolean(tool?.requiresApproval);

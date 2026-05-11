@@ -33,7 +33,7 @@ export interface LocalAgent {
   readonly body: string;
 }
 
-export type LocalHookEvent = "preTool" | "postTool";
+export type LocalHookEvent = "preTool" | "postTool" | "postToolFailure";
 
 export interface LocalHook {
   readonly name: string;
@@ -257,7 +257,7 @@ function parseLocalHook(value: unknown, path: string, index: number): LocalHook 
 }
 
 function parseHookEvent(value: unknown): LocalHookEvent | undefined {
-  return value === "preTool" || value === "postTool" ? value : undefined;
+  return value === "preTool" || value === "postTool" || value === "postToolFailure" ? value : undefined;
 }
 
 function parseTools(value: unknown): readonly string[] {

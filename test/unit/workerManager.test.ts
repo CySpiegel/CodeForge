@@ -1,10 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { WorkerManager } from "../../src/agent/workerManager";
-import { LlmProvider, LlmRequest, LlmStreamEvent, PermissionPolicy, ProviderCapabilities, ProviderProfile, WorkspacePort } from "../../src/core/types";
+import { LlmProvider, LlmRequest, LlmStreamEvent, PermissionPolicy, ProviderCapabilities, ProviderProfile, ToolCall, WorkspacePort } from "../../src/core/types";
 import { WorkerSummary } from "../../src/core/workerTypes";
 
 type ExecuteWorkerAction = ConstructorParameters<typeof WorkerManager>[0]["executeAction"];
+type FakeResponse = string | { readonly toolCalls: readonly ToolCall[] };
 
 test("worker manager runs read-only tools and completes with a transcript", async () => {
   const manager = createWorkerManager([
@@ -206,6 +207,21 @@ test("implementation worker can dispatch approval-gated notebook edits", async (
   assert.deepEqual(actions, ["notebook_edit_cell"]);
 });
 
+test("worker manager returns native tool-call parse errors and lets the worker retry", async () => {
+  const manager = createWorkerManager([
+    { toolCalls: [{ id: "call-1", name: "read_file", argumentsJson: "{\"path\":123}" }] },
+    "Scope: retry\nResult: retried after bad tool call\nKey files: none\nFiles changed: none\nIssues: none\nConfidence: medium"
+  ]);
+
+  const worker = manager.spawn("explore", "handle invalid native args");
+  const completed = await waitForWorker(manager, worker.id, "completed");
+  const output = manager.output(worker.id) ?? "";
+
+  assert.equal(completed.status, "completed");
+  assert.match(output, /missing required parameters/);
+  assert.match(output, /retried after bad tool call/);
+});
+
 test("worker manager applies parent permission policy to read-only actions", async () => {
   const manager = createWorkerManager(
     [JSON.stringify({ actions: [{ type: "read_file", path: "secrets.txt" }] })],
@@ -221,7 +237,7 @@ test("worker manager applies parent permission policy to read-only actions", asy
 });
 
 function createWorkerManager(
-  responses: readonly string[],
+  responses: readonly FakeResponse[],
   permissionPolicy: PermissionPolicy = { mode: "smart", rules: [] },
   executeAction: ExecuteWorkerAction = async () => "<tool_use_error>Error: no worker side-effect bridge configured</tool_use_error>"
 ): WorkerManager {
@@ -263,12 +279,16 @@ class FakeProvider implements LlmProvider {
   };
   private index = 0;
 
-  constructor(private readonly responses: readonly string[]) {}
+  constructor(private readonly responses: readonly FakeResponse[]) {}
 
   async *streamChat(_request: LlmRequest): AsyncIterable<LlmStreamEvent> {
-    const text = this.responses[Math.min(this.index, this.responses.length - 1)] ?? "";
+    const response = this.responses[Math.min(this.index, this.responses.length - 1)] ?? "";
     this.index++;
-    yield { type: "content", text };
+    if (typeof response === "string") {
+      yield { type: "content", text: response };
+    } else {
+      yield { type: "toolCalls", toolCalls: response.toolCalls };
+    }
     yield { type: "usage", usage: { promptTokens: 100, completionTokens: 20, totalTokens: 120 } };
     yield { type: "done" };
   }

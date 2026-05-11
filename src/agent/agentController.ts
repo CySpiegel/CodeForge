@@ -1,5 +1,5 @@
 import { EventEmitter } from "events";
-import { actionProtocolInstructions, parseActionsFromAssistantText, parseToolAction, toolDefinitions } from "../core/actionProtocol";
+import { actionProtocolInstructions, parseActionsFromAssistantText, parseToolActionDetailed, ToolActionParseResult, toolDefinitions } from "../core/actionProtocol";
 import { ApprovalQueue } from "../core/approvals";
 import { CodeIntelPort, UnavailableCodeIntelPort } from "../core/codeIntel";
 import { ContextBuilder } from "../core/contextBuilder";
@@ -55,10 +55,11 @@ import {
   RunCommandAction,
   TokenUsage,
   ToolCall,
+  ToolDefinition,
   UserQuestion,
   WorkspacePort
 } from "../core/types";
-import { codeForgeTools, isApprovalAction, isLocalReadOnlyAction, isReadOnlyAction, ToolInvocation, toolSummary, validateAction } from "../core/toolRegistry";
+import { codeForgeTools, isApprovalAction, isConcurrencySafeAction, isLocalReadOnlyAction, isReadOnlyAction, ToolInvocation, toolSummary, validateAction } from "../core/toolRegistry";
 import { DiffService } from "../adapters/diffService";
 import { TerminalRunner } from "../adapters/terminalRunner";
 import { CodeForgeConfigService, CodeForgeSettingsUpdate } from "../adapters/vscodeConfig";
@@ -189,6 +190,19 @@ export interface AgentSessionSummary {
 }
 
 export type AgentWorkerSummary = WorkerSummary;
+
+const maxAgentToolTurns = 25;
+const maxReadOnlyToolTurns = 12;
+
+interface InvalidNativeToolCall {
+  readonly toolCall: ToolCall;
+  readonly message: string;
+}
+
+interface McpToolBinding {
+  readonly serverId: string;
+  readonly toolName: string;
+}
 
 export class AgentController {
   private readonly config: CodeForgeConfigService;
@@ -662,21 +676,27 @@ export class AgentController {
   }
 
   private async runModelLoop(provider: LlmProvider, model: string, abort: AbortController): Promise<void> {
-    for (let iteration = 0; iteration < 3; iteration++) {
+    const maxToolTurns = this.config.getAgentMode() === "agent" ? maxAgentToolTurns : maxReadOnlyToolTurns;
+    for (let iteration = 0; iteration < maxToolTurns; iteration++) {
       this.compactOldToolResultsIfNeeded();
       this.emit({ type: "status", text: `Calling ${provider.profile.label} / ${model}` });
       const capabilities = await this.capabilities(provider, model, abort.signal);
       const agentMode = this.config.getAgentMode();
+      const mcpToolBindings = new Map<string, McpToolBinding>();
+      const requestTools = capabilities.nativeToolCalls
+        ? await this.toolDefinitionsForRequest(agentMode, mcpToolBindings, abort.signal)
+        : undefined;
       let assistantText = "";
       const nativeToolCalls: ToolCall[] = [];
       const invocations: ToolInvocation[] = [];
+      const invalidNativeToolCalls: InvalidNativeToolCall[] = [];
 
       this.lastTokenUsage = undefined;
       this.emitContextUsage();
       for await (const event of provider.streamChat({
         model,
         messages: this.messages,
-        tools: capabilities.nativeToolCalls ? toolDefinitionsForAgentMode(agentMode) : undefined,
+        tools: requestTools,
         signal: abort.signal
       })) {
         if (event.type === "content") {
@@ -684,15 +704,17 @@ export class AgentController {
           this.emit({ type: "assistantDelta", text: event.text });
         } else if (event.type === "toolCalls") {
           for (const toolCall of event.toolCalls) {
-            const action = parseToolAction(toolCall.name, toolCall.argumentsJson);
-            if (action) {
-              nativeToolCalls.push(toolCall);
+            nativeToolCalls.push(toolCall);
+            const parsed = this.parseNativeToolCall(toolCall, mcpToolBindings);
+            if (parsed.ok) {
               invocations.push({
                 id: toolCall.id,
-                action,
+                action: parsed.action,
                 source: "native",
                 toolCallId: toolCall.id
               });
+            } else {
+              invalidNativeToolCalls.push({ toolCall, message: parsed.message });
             }
           }
         } else if (event.type === "usage") {
@@ -709,6 +731,10 @@ export class AgentController {
         this.emitContextUsage();
       }
 
+      for (const invalidToolCall of invalidNativeToolCalls) {
+        this.appendInvalidNativeToolCallResult(invalidToolCall);
+      }
+
       const fallbackActions = parseActionsFromAssistantText(assistantText).map((action, index): ToolInvocation => ({
         id: `json-${Date.now()}-${iteration}-${index}`,
         action,
@@ -716,6 +742,9 @@ export class AgentController {
       }));
       const actions = [...invocations, ...fallbackActions];
       if (actions.length === 0) {
+        if (invalidNativeToolCalls.length > 0) {
+          continue;
+        }
         this.emit({ type: "status", text: "Idle" });
         return;
       }
@@ -730,7 +759,7 @@ export class AgentController {
       }
     }
 
-    this.emit({ type: "status", text: "Stopped after the maximum local tool loop count." });
+    this.emit({ type: "status", text: `Stopped after the maximum local tool turn count (${maxToolTurns}).` });
   }
 
   private async handleActions(invocations: readonly ToolInvocation[]): Promise<boolean> {
@@ -740,12 +769,19 @@ export class AgentController {
     const agentMode = this.config.getAgentMode();
 
     while (index < invocations.length) {
-      const localBatch: ToolInvocation[] = [];
-      while (index < invocations.length && isLocalReadOnlyAction(invocations[index].action)) {
+      const concurrentBatch: ToolInvocation[] = [];
+      while (index < invocations.length && isConcurrencySafeAction(invocations[index].action)) {
         const invocation = invocations[index];
         const validation = validateAction(invocation.action);
         if (!validation.ok) {
           this.appendDeniedOrInvalidToolResult(invocation, validation.message ?? "Tool input failed validation.");
+          continuedWithLocalContext = true;
+          index++;
+          continue;
+        }
+
+        if (!isReadOnlyAction(invocation.action) && agentMode !== "agent") {
+          this.appendDeniedOrInvalidToolResult(invocation, `${agentModeLabel(agentMode)} mode is read-only. Use read-only workspace context and switch to Agent mode before applying edits or running commands.`);
           continuedWithLocalContext = true;
           index++;
           continue;
@@ -759,29 +795,22 @@ export class AgentController {
           continue;
         }
         if (decision.behavior === "ask") {
+          if (concurrentBatch.length > 0) {
+            break;
+          }
           await this.requestApproval(invocation.action, invocation.toolCallId, decision);
           this.emitToolUseForInvocation(invocation, "approval", false);
           return false;
         }
 
-        localBatch.push(invocation);
+        concurrentBatch.push(invocation);
         index++;
       }
 
-      if (localBatch.length > 0) {
-        const results = await executeLocalReadOnlyTools(localBatch, {
-          workspace: this.workspace,
-          readFileMaxBytes: 48000,
-          searchLimit: 30,
-          signal: this.runningAbort?.signal,
-          onProgress: (progress) => this.emitToolProgress(progress)
-        });
-        for (const result of results) {
-          this.appendToolResult(result.invocation.toolCallId, result.invocation.action.type, result.content);
-          this.emit({ type: "toolResult", text: result.content });
-          this.emitContextUsage();
-        }
+      if (concurrentBatch.length > 0) {
+        await this.executeConcurrentInvocations(concurrentBatch);
         continuedWithLocalContext = true;
+        continue;
       }
 
       if (index >= invocations.length) {
@@ -819,10 +848,7 @@ export class AgentController {
       }
 
       if (isApprovalAction(invocation.action) || invocation.action.type === "open_diff" || isInternalAutomationAction(invocation.action) || isInternalStateAction(invocation.action) || isInternalReadAction(invocation.action)) {
-        const text = await this.executePermittedAction(invocation.action, invocation.toolCallId);
-        this.appendToolResult(invocation.toolCallId, invocation.action.type, text);
-        this.emit({ type: "toolResult", text });
-        this.emitToolUseForInvocation(invocation, "completed", false);
+        await this.executePermittedInvocation(invocation);
       } else {
         const text = `<tool_use_error>Error: Unsupported tool ${invocation.action.type}</tool_use_error>`;
         this.appendToolResult(invocation.toolCallId, invocation.action.type, text);
@@ -834,6 +860,60 @@ export class AgentController {
     }
 
     return continuedWithLocalContext;
+  }
+
+  private appendInvalidNativeToolCallResult(invalid: InvalidNativeToolCall): void {
+    const text = toolError(invalid.message);
+    this.appendToolResult(invalid.toolCall.id, invalid.toolCall.name || "tool", text);
+    this.emit({
+      type: "toolUse",
+      toolUse: {
+        id: invalid.toolCall.id,
+        name: invalid.toolCall.name || "tool",
+        summary: `Invalid tool call: ${invalid.toolCall.name || "unknown"}`,
+        status: "failed",
+        readOnly: false
+      }
+    });
+    this.emit({ type: "toolResult", text });
+    this.emitContextUsage();
+  }
+
+  private async executeConcurrentInvocations(invocations: readonly ToolInvocation[]): Promise<void> {
+    const results = await Promise.all(invocations.map(async (invocation) => {
+      this.emitToolUseForInvocation(invocation, "running", isReadOnlyAction(invocation.action));
+      const text = await this.executeActionWithFailureHooks(invocation.action, invocation.toolCallId);
+      return { invocation, text };
+    }));
+
+    for (const result of results) {
+      this.appendToolResult(result.invocation.toolCallId, result.invocation.action.type, result.text);
+      this.emit({ type: "toolResult", text: result.text });
+      this.emitToolUseForInvocation(result.invocation, isToolErrorText(result.text) ? "failed" : "completed", isReadOnlyAction(result.invocation.action));
+      this.emitContextUsage();
+    }
+  }
+
+  private async executePermittedInvocation(invocation: ToolInvocation): Promise<void> {
+    this.emitToolUseForInvocation(invocation, "running", isReadOnlyAction(invocation.action));
+    const text = await this.executeActionWithFailureHooks(invocation.action, invocation.toolCallId);
+    this.appendToolResult(invocation.toolCallId, invocation.action.type, text);
+    this.emit({ type: "toolResult", text });
+    this.emitToolUseForInvocation(invocation, isToolErrorText(text) ? "failed" : "completed", isReadOnlyAction(invocation.action));
+  }
+
+  private async executeActionWithFailureHooks(action: AgentAction, toolCallId: string | undefined): Promise<string> {
+    try {
+      return await this.executePermittedAction(action, toolCallId);
+    } catch (error) {
+      const content = toolError(errorMessage(error));
+      try {
+        await this.runLocalHooks("postToolFailure", action);
+        return content;
+      } catch (hookError) {
+        return `${content}\n${toolError(`postToolFailure hook failed: ${errorMessage(hookError)}`)}`;
+      }
+    }
   }
 
   private async requestApproval(action: AgentAction, toolCallId: string | undefined, decision: PermissionDecision, metadata?: { readonly detail?: string; readonly risk?: string; readonly origin?: ApprovalRequest["origin"] }): Promise<ApprovalRequest> {
@@ -1307,7 +1387,7 @@ export class AgentController {
     return transcriptResult;
   }
 
-  private async runLocalHooks(event: "preTool" | "postTool", action: AgentAction): Promise<void> {
+  private async runLocalHooks(event: LocalHook["event"], action: AgentAction): Promise<void> {
     const hooks = (await loadLocalHooks(this.workspace, this.runningAbort?.signal))
       .filter((hook) => localHookMatches(hook, event, action));
     for (const hook of hooks) {
@@ -1315,7 +1395,7 @@ export class AgentController {
     }
   }
 
-  private async runLocalHook(hook: LocalHook, event: "preTool" | "postTool", action: AgentAction): Promise<void> {
+  private async runLocalHook(hook: LocalHook, event: LocalHook["event"], action: AgentAction): Promise<void> {
     const validation = validateAction(hook.command);
     if (!validation.ok) {
       throw new Error(`Local hook ${hook.name} is invalid: ${validation.message ?? "Command validation failed."}`);
@@ -1441,6 +1521,79 @@ export class AgentController {
     const capabilities = await provider.probeCapabilities(model, signal);
     this.capabilityCache.set(key, capabilities);
     return capabilities;
+  }
+
+  private async toolDefinitionsForRequest(mode: AgentMode, mcpToolBindings: Map<string, McpToolBinding>, signal: AbortSignal): Promise<readonly ToolDefinition[]> {
+    const baseTools = [...toolDefinitionsForAgentMode(mode)];
+    if (mode !== "agent" || this.config.getMcpServers().length === 0) {
+      return baseTools;
+    }
+
+    try {
+      const inspections = await inspectConfiguredMcpServers(
+        this.config.getMcpServers(),
+        this.config.getNetworkPolicy(),
+        undefined,
+        signal
+      );
+      const usedNames = new Set(baseTools.map((tool) => tool.name));
+      const mcpTools: ToolDefinition[] = [];
+      for (const inspection of inspections) {
+        if (inspection.error || !inspection.status.valid || !inspection.status.enabled) {
+          continue;
+        }
+        for (const tool of inspection.tools) {
+          const name = mcpFunctionName(inspection.status.id, tool.name, usedNames);
+          usedNames.add(name);
+          mcpToolBindings.set(name, { serverId: inspection.status.id, toolName: tool.name });
+          mcpTools.push({
+            name,
+            description: [
+              `Call MCP tool ${tool.name} on configured local/on-prem server ${inspection.status.id}.`,
+              tool.description
+            ].filter((line): line is string => Boolean(line)).join(" "),
+            parameters: mcpToolParameters(tool.inputSchema)
+          });
+        }
+      }
+      return [...baseTools, ...mcpTools];
+    } catch {
+      return baseTools;
+    }
+  }
+
+  private parseNativeToolCall(toolCall: ToolCall, mcpToolBindings: ReadonlyMap<string, McpToolBinding>): ToolActionParseResult {
+    const parsed = parseToolActionDetailed(toolCall.name, toolCall.argumentsJson);
+    if (parsed.ok) {
+      return parsed;
+    }
+
+    const binding = mcpToolBindings.get(toolCall.name);
+    if (!binding) {
+      return parsed;
+    }
+
+    let args: unknown;
+    try {
+      args = JSON.parse(toolCall.argumentsJson || "{}");
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      return { ok: false, message: `Arguments for ${toolCall.name} must be valid JSON. ${detail}` };
+    }
+    if (!isRecord(args)) {
+      return { ok: false, message: `Arguments for ${toolCall.name} must be a JSON object.` };
+    }
+
+    return {
+      ok: true,
+      action: {
+        type: "mcp_call_tool",
+        serverId: binding.serverId,
+        toolName: binding.toolName,
+        arguments: args,
+        reason: `Call MCP tool ${binding.toolName} on ${binding.serverId}`
+      }
+    };
   }
 
   private ensureSystemMessage(): void {
@@ -2700,6 +2853,14 @@ function toolError(message: string): string {
   return `<tool_use_error>Error: ${message}</tool_use_error>`;
 }
 
+function isToolErrorText(text: string): boolean {
+  return text.includes("<tool_use_error>");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function isCheckpointRecord(record: SessionRecord): record is Extract<SessionRecord, { readonly type: "checkpoint" }> {
   return record.type === "checkpoint";
 }
@@ -2763,6 +2924,37 @@ function toolDefinitionsForAgentMode(mode: AgentMode): typeof toolDefinitions {
     return toolDefinitions;
   }
   return toolDefinitions.filter((tool) => readOnlyToolNames.has(tool.name));
+}
+
+function mcpFunctionName(serverId: string, toolName: string, usedNames: ReadonlySet<string>): string {
+  const server = safeToolNameSegment(serverId).slice(0, 18) || "server";
+  const tool = safeToolNameSegment(toolName).slice(0, 36) || "tool";
+  const base = `mcp__${server}__${tool}`.slice(0, 64);
+  if (!usedNames.has(base)) {
+    return base;
+  }
+  for (let index = 2; index < 1000; index++) {
+    const suffix = `_${index}`;
+    const candidate = `${base.slice(0, 64 - suffix.length)}${suffix}`;
+    if (!usedNames.has(candidate)) {
+      return candidate;
+    }
+  }
+  return `${base.slice(0, 55)}_${Date.now().toString(36).slice(-8)}`;
+}
+
+function safeToolNameSegment(value: string): string {
+  return value.trim().replace(/[^a-zA-Z0-9_-]+/g, "_").replace(/^_+|_+$/g, "");
+}
+
+function mcpToolParameters(inputSchema: unknown): Record<string, unknown> {
+  if (isRecord(inputSchema) && inputSchema.type === "object") {
+    return inputSchema;
+  }
+  return {
+    type: "object",
+    additionalProperties: true
+  };
 }
 
 function agentModeInstructions(mode: AgentMode): string {
