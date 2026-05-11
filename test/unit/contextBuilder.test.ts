@@ -4,7 +4,7 @@ import { ContextBuilder } from "../../src/core/contextBuilder";
 import { MemoryEntry } from "../../src/core/memory";
 import { ContextItem, SearchResult, WorkspaceDiagnostic, WorkspacePort } from "../../src/core/types";
 
-test("loads local project instructions and explicit memories before workspace files", async () => {
+test("loads local project instructions and explicit memories before repo files", async () => {
   const memories: MemoryEntry[] = [
     { id: "memory-1", text: "Prefer focused tests.", createdAt: 1 }
   ];
@@ -20,7 +20,7 @@ test("loads local project instructions and explicit memories before workspace fi
   assert.match(builder.format(items), /Prefer focused tests/);
 });
 
-test("attaches the active editor even when the file is otherwise empty", async () => {
+test("does not attach active or open editor files unless they are pinned", async () => {
   const active: ContextItem = {
     kind: "activeFile",
     label: "src/new-file.ts",
@@ -33,8 +33,9 @@ test("attaches the active editor even when the file is otherwise empty", async (
 
   const items = await builder.build();
 
-  assert.ok(items.find((item) => item.kind === "activeFile" && item.label === "src/new-file.ts"));
-  assert.equal(items.filter((item) => item.label === "src/new-file.ts").length, 1);
+  assert.equal(items.some((item) => item.kind === "activeFile"), false);
+  assert.equal(items.some((item) => item.kind === "openFile"), false);
+  assert.equal(items.some((item) => item.label === "src/new-file.ts"), false);
 });
 
 class FakeWorkspace implements WorkspacePort {

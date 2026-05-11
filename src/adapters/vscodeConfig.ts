@@ -91,11 +91,11 @@ export class CodeForgeConfigService {
   }
 
   async setModel(model: string): Promise<void> {
-    await this.config().update("model", model, vscode.ConfigurationTarget.Workspace);
+    await this.updateRepoSetting("model", model);
   }
 
   async setAgentMode(mode: AgentMode): Promise<void> {
-    await this.config().update("agent.mode", mode, vscode.ConfigurationTarget.Workspace);
+    await this.updateRepoSetting("agent.mode", mode);
   }
 
   async updateSettings(settings: Partial<CodeForgeSettingsUpdate>): Promise<void> {
@@ -141,7 +141,7 @@ export class CodeForgeConfigService {
       });
     }
     if (settings.model !== undefined) {
-      await config.update("model", settings.model.trim(), vscode.ConfigurationTarget.Workspace);
+      await this.updateRepoSetting("model", settings.model.trim());
     }
     if (settings.allowlist !== undefined || !sameStringArray(allowlist, existingAllowlist)) {
       await config.update("network.allowlist", allowlist, vscode.ConfigurationTarget.Global);
@@ -159,18 +159,28 @@ export class CodeForgeConfigService {
       await config.update("commands.outputLimitBytes", clampNumber(settings.commandOutputLimitBytes, 16000, 2_000_000, 200000), vscode.ConfigurationTarget.Global);
     }
     if (settings.permissionMode !== undefined) {
-      await config.update("permissions.mode", settings.permissionMode, vscode.ConfigurationTarget.Workspace);
+      await this.updateRepoSetting("permissions.mode", settings.permissionMode);
     }
     if (settings.permissionRules !== undefined) {
-      await config.update("permissions.rules", settings.permissionRules, vscode.ConfigurationTarget.Workspace);
+      await this.updateRepoSetting("permissions.rules", settings.permissionRules);
     }
     if (settings.mcpServers !== undefined) {
-      await config.update("mcp.servers", normalizeMcpServerConfigs(settings.mcpServers), vscode.ConfigurationTarget.Workspace);
+      await this.updateRepoSetting("mcp.servers", normalizeMcpServerConfigs(settings.mcpServers));
     }
   }
 
   private config(): vscode.WorkspaceConfiguration {
-    return vscode.workspace.getConfiguration(sectionName);
+    return vscode.workspace.getConfiguration(sectionName, this.primaryRepoFolderUri());
+  }
+
+  private async updateRepoSetting(key: string, value: unknown): Promise<void> {
+    const folder = this.primaryRepoFolderUri();
+    const config = vscode.workspace.getConfiguration(sectionName, folder);
+    await config.update(key, value, folder ? vscode.ConfigurationTarget.WorkspaceFolder : vscode.ConfigurationTarget.Global);
+  }
+
+  private primaryRepoFolderUri(): vscode.Uri | undefined {
+    return vscode.workspace.workspaceFolders?.[0]?.uri;
   }
 
   private async createOpenAiProfile(profile: {

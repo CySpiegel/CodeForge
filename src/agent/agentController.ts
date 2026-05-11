@@ -203,6 +203,7 @@ export type AgentWorkerSummary = WorkerSummary;
 
 export interface AgentActiveContextSummary {
   readonly activeFile?: string;
+  readonly workspaceReady: boolean;
   readonly pinnedFiles: readonly string[];
 }
 
@@ -381,19 +382,24 @@ export class AgentController {
 
   async initializeSession(): Promise<void> {
     try {
-      this.messages = [];
-      this.tasks.clear();
-      this.lastContextItems = [];
-      this.mcpContextItems = [];
-      this.pinnedFiles.clear();
-      this.inspectorEntries = [];
-      this.auditEntries = [];
-      this.lastTokenUsage = undefined;
-      this.sessionId = undefined;
-      this.sessionStartPromise = undefined;
-      this.workers.clear();
-      this.approvals.clear();
-      this.workerApprovalWaiters.clear();
+      const latest = await this.sessionStore?.readLatest();
+      if (latest) {
+        this.applySession(latest);
+      } else {
+        this.messages = [];
+        this.tasks.clear();
+        this.lastContextItems = [];
+        this.mcpContextItems = [];
+        this.pinnedFiles.clear();
+        this.inspectorEntries = [];
+        this.auditEntries = [];
+        this.lastTokenUsage = undefined;
+        this.sessionId = undefined;
+        this.sessionStartPromise = undefined;
+        this.workers.clear();
+        this.approvals.clear();
+        this.workerApprovalWaiters.clear();
+      }
       this.emit({ type: "sessionReset" });
       this.emitInspector();
       this.emitContextUsage();
@@ -608,21 +614,21 @@ export class AgentController {
     try {
       const files = await this.workspace.listTextFiles(5, signal);
       checks.push({
-        category: "Workspace",
+        category: "Repo Folder",
         name: "File discovery",
         status: files.length > 0 ? "pass" : "warn",
         detail: files.length > 0
-          ? `Workspace search can see files including ${files.slice(0, 3).join(", ")}.`
-          : "No workspace text files were returned.",
-        recommendation: files.length > 0 ? undefined : "Open a folder/workspace with project files before asking CodeForge to inspect code."
+          ? `Repo search can see files including ${files.slice(0, 3).join(", ")}.`
+          : "No repo text files were returned.",
+        recommendation: files.length > 0 ? undefined : "Open the repo folder before asking CodeForge to inspect code."
       });
     } catch (error) {
       checks.push({
-        category: "Workspace",
+        category: "Repo Folder",
         name: "File discovery",
         status: "fail",
         detail: errorMessage(error),
-        recommendation: "Check VS Code workspace trust and filesystem access for the open folder."
+        recommendation: "Check VS Code trust and filesystem access for the open repo folder."
       });
     }
   }
@@ -671,9 +677,9 @@ export class AgentController {
   private addPersistenceDoctorChecks(checks: DoctorCheck[]): void {
     checks.push({
       category: "Persistence",
-      name: "Workspace chat history",
+      name: "Repo chat history",
       status: this.sessionStore ? "pass" : "warn",
-      detail: this.sessionStore ? "Workspace-scoped chat sessions are available." : "Session storage is not available in this environment."
+      detail: this.sessionStore ? "Repo-scoped chat sessions are available." : "Session storage is not available in this environment."
     });
     checks.push({
       category: "Persistence",
@@ -722,7 +728,7 @@ export class AgentController {
   async pinActiveFile(): Promise<void> {
     const active = await this.workspace.getActiveTextDocument(1);
     if (!active || active.label.startsWith("Unsaved active")) {
-      this.emit({ type: "error", text: "Open a saved workspace file before pinning active context." });
+      this.emit({ type: "error", text: "Focus a repo file to pin it, or use /pin <repo-relative path>." });
       return;
     }
     await this.pinFile(active.label);
@@ -731,7 +737,7 @@ export class AgentController {
   async pinFile(path: string): Promise<void> {
     const normalized = path.trim().replace(/^Pinned:\s*/, "");
     if (!normalized) {
-      this.emit({ type: "error", text: "Provide a workspace-relative file path to pin." });
+      this.emit({ type: "error", text: "Provide a repo-relative file path to pin." });
       return;
     }
     try {
@@ -906,7 +912,7 @@ export class AgentController {
 
   newSession(): void {
     this.reset();
-    this.emit({ type: "status", text: "Started a new chat session for this workspace." });
+    this.emit({ type: "status", text: "Started a new chat session for this repo." });
   }
 
   cancel(): void {
@@ -1238,7 +1244,7 @@ export class AgentController {
         }
 
         if (!isReadOnlyAction(invocation.action) && agentMode !== "agent") {
-          const reason = `${agentModeLabel(agentMode)} mode is read-only. Use read-only workspace context and switch to Agent mode before applying edits or running commands.`;
+          const reason = `${agentModeLabel(agentMode)} mode is read-only. Use read-only repo context and switch to Agent mode before applying edits or running commands.`;
           this.recordAudit(invocation.action, { behavior: "deny", source: "default", reason }, "denied");
           this.appendDeniedOrInvalidToolResult(invocation, reason);
           continuedWithLocalContext = true;
@@ -1289,7 +1295,7 @@ export class AgentController {
       }
 
       if (!isReadOnlyAction(invocation.action) && agentMode !== "agent") {
-        const reason = `${agentModeLabel(agentMode)} mode is read-only. Use read-only workspace context and switch to Agent mode before applying edits or running commands.`;
+        const reason = `${agentModeLabel(agentMode)} mode is read-only. Use read-only repo context and switch to Agent mode before applying edits or running commands.`;
         this.recordAudit(invocation.action, { behavior: "deny", source: "default", reason }, "denied");
         this.appendDeniedOrInvalidToolResult(invocation, reason);
         continuedWithLocalContext = true;
@@ -2832,7 +2838,7 @@ export class AgentController {
       return;
     }
 
-    this.startWorkerDefinition(localAgentWorkerDefinition(agent), task || `Run ${agent.name} against the current workspace context.`);
+    this.startWorkerDefinition(localAgentWorkerDefinition(agent), task || `Run ${agent.name} against the current repo context.`);
   }
 
   private async executeSpawnAgentAction(action: Extract<AgentAction, { readonly type: "spawn_agent" }>): Promise<string> {
@@ -3055,7 +3061,7 @@ export class AgentController {
       this.emit({
         type: "message",
         role: "system",
-        text: index ? `Workspace index:\n\n${index.content}` : "Workspace index:\n\nNo workspace files found."
+        text: index ? `Repo index:\n\n${index.content}` : "Repo index:\n\nNo repo files found."
       });
     } catch (error) {
       this.emit({ type: "error", text: `Failed to build workspace index: ${errorMessage(error)}` });
@@ -3065,7 +3071,7 @@ export class AgentController {
   private formatPinnedFilesReport(): string {
     const pinned = [...this.pinnedFiles];
     return pinned.length === 0
-      ? "Pinned context files: none. Use /pin with an open workspace file or /pin <path>."
+      ? "Pinned context files: none. The open repo folder is still used automatically; use /pin <path> only when you want to force a specific file into every request."
       : `Pinned context files:\n${pinned.map((path) => `- ${path}`).join("\n")}`;
   }
 
@@ -3259,8 +3265,10 @@ export class AgentController {
 
   private async activeContextSummary(): Promise<AgentActiveContextSummary> {
     const active = await this.workspace.getActiveTextDocument(1).catch(() => undefined);
+    const workspaceReady = await this.workspace.listTextFiles(1).then((files) => files.length > 0).catch(() => false);
     return {
       activeFile: active && !active.label.startsWith("Unsaved active") ? active.label : undefined,
+      workspaceReady,
       pinnedFiles: [...this.pinnedFiles]
     };
   }
@@ -3699,11 +3707,11 @@ function contextItemKindLabel(kind: ContextItem["kind"]): string {
     case "openFile":
       return "Open file";
     case "fileTree":
-      return "Workspace file list";
+      return "Repo file list";
     case "file":
-      return "Workspace file";
+      return "Repo file";
     case "workspaceIndex":
-      return "Workspace index";
+      return "Repo index";
   }
 }
 

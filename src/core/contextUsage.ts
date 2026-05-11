@@ -120,7 +120,7 @@ function bucketForMessage(message: ChatMessage): { key: string; label: string } 
     return { key: "toolResults", label: "Tool results" };
   }
   if (message.content.startsWith("CodeForge workspace context:\n\n")) {
-    return { key: "workspaceContext", label: "Workspace context messages" };
+    return { key: "workspaceContext", label: "Repo context messages" };
   }
   return { key: "user", label: "User messages" };
 }
@@ -140,10 +140,10 @@ function bucketForContextItem(item: ContextItem): { key: string; label: string }
     case "openFile":
       return { key: "openFiles", label: "Open files" };
     case "fileTree":
-      return { key: "fileTree", label: "Workspace file list" };
+      return { key: "fileTree", label: "Repo file list" };
     case "file":
-      return { key: "files", label: "Workspace files" };
+      return { key: "files", label: "Repo files" };
     case "workspaceIndex":
-      return { key: "workspaceIndex", label: "Workspace index" };
+      return { key: "workspaceIndex", label: "Repo index" };
   }
 }

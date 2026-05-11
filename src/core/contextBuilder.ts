@@ -64,36 +64,6 @@ export class ContextBuilder {
       }
     }
 
-    const activeDocument = await this.workspace.getActiveTextDocument(Math.min(32000, budget));
-    if (activeDocument && budget > 0) {
-      const trimmed = trimToBudget(activeDocument.content, budget);
-      if (trimmed) {
-        items.push({ ...activeDocument, content: trimmed });
-        budget -= byteLength(trimmed);
-      }
-    }
-
-    const selection = await this.workspace.getActiveSelection(Math.min(16000, budget));
-    if (selection && budget > 0) {
-      items.push(selection);
-      budget -= byteLength(selection.content);
-    }
-
-    const openDocuments = await this.workspace.getOpenTextDocuments(Math.min(24000, Math.max(0, budget)));
-    for (const item of openDocuments) {
-      if (items.length >= this.limits.maxFiles || budget <= 0) {
-        break;
-      }
-      if (activeDocument?.label === item.label) {
-        continue;
-      }
-      const trimmed = trimToBudget(item.content, budget);
-      if (trimmed) {
-        items.push({ ...item, content: trimmed });
-        budget -= byteLength(trimmed);
-      }
-    }
-
     if (budget > 0 && items.length < this.limits.maxFiles) {
       const index = await buildWorkspaceIndex(this.workspace, {
         maxFiles: Math.min(500, Math.max(this.limits.maxFiles * 10, 80)),
@@ -116,7 +86,7 @@ export class ContextBuilder {
       if (trimmedTree) {
         items.push({
           kind: "fileTree",
-          label: "Workspace file list",
+          label: "Repo file list",
           content: trimmedTree
         });
       }
@@ -127,7 +97,7 @@ export class ContextBuilder {
 
   format(items: readonly ContextItem[]): string {
     if (items.length === 0) {
-      return "No workspace context is currently attached.";
+      return "No repo context is currently attached.";
     }
 
     return items.map(formatContextItem).join("\n\n");

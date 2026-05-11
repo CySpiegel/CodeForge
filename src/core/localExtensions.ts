@@ -181,7 +181,7 @@ export function renderLocalSkillPrompt(skill: LocalSkill, task: string): string 
     "Skill instructions:",
     skill.body,
     "User task:",
-    task.trim() || "Apply this skill to the current workspace context."
+    task.trim() || "Apply this skill to the current repo context."
   ].filter((part): part is string => Boolean(part)).join("\n\n");
 }
 

@@ -34,11 +34,6 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
     this.disposeControllerListener = this.controller.onEvent((event) => {
       void this.post(event);
     });
-    void this.controller.publishTranscript()
-      .then(() => this.controller.refreshModels())
-      .catch((error) => {
-        void this.post({ type: "error", text: errorMessage(error) });
-      });
   }
 
   async focus(): Promise<void> {
@@ -87,6 +82,9 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
     } else if (message.type === "refreshCommands") {
       await this.controller.publishState();
     } else if (message.type === "refreshModels") {
+      await this.controller.refreshModels();
+    } else if (message.type === "webviewReady") {
+      await this.controller.publishTranscript();
       await this.controller.refreshModels();
     } else if (message.type === "setAgentMode") {
       const agentMode = parseAgentMode(message.agentMode);
@@ -309,7 +307,7 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
           <button id="compactContext" class="context-ring" type="button" aria-label="Compact context" aria-describedby="contextTooltip">
             <span id="contextValue">0%</span>
           </button>
-          <button id="pinActiveFile" class="context-action" type="button" title="Pin active file" aria-label="Pin active file">Pin</button>
+          <button id="pinActiveFile" class="context-action" type="button" title="Pin focused file" aria-label="Pin focused file">Pin</button>
           <button id="clearPinnedFiles" class="context-action" type="button" title="Clear pinned files" aria-label="Clear pinned files">Clear pins</button>
           <button id="runInspector" class="context-action" type="button" title="Show run inspector" aria-label="Show run inspector">Run</button>
           <div id="contextTooltip" class="context-tooltip hidden" role="tooltip"></div>

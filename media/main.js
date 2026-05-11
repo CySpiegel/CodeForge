@@ -91,7 +91,7 @@
     { name: "context", description: "Show context usage and attached local context" },
     { name: "doctor", description: "Check endpoint, model, workspace, permissions, and MCP status" },
     { name: "index", description: "Build and show the offline workspace index" },
-    { name: "pin", description: "Pin active file or path into future context", argumentHint: "[path]" },
+    { name: "pin", description: "Pin focused file or path into future context", argumentHint: "[path]" },
     { name: "unpin", description: "Unpin a path or clear all pinned context", argumentHint: "[path|all]" },
     { name: "pins", description: "List pinned context files" },
     { name: "inspect", description: "Show recent run inspector events" },
@@ -592,9 +592,14 @@
   function renderActiveContext() {
     const active = state?.activeContext || {};
     const pinned = Array.isArray(active.pinnedFiles) ? active.pinnedFiles : [];
+    const workspaceReady = active.workspaceReady === true;
     if (elements.pinActiveFile) {
-      elements.pinActiveFile.textContent = active.activeFile ? "Pin file" : "No file";
-      elements.pinActiveFile.title = active.activeFile ? `Pin ${active.activeFile}` : "Open a saved workspace file to pin it";
+      elements.pinActiveFile.textContent = active.activeFile ? "Pin file" : workspaceReady ? "Repo" : "No folder";
+      elements.pinActiveFile.title = active.activeFile
+        ? `Pin ${active.activeFile} into this chat context`
+        : workspaceReady
+          ? "The open repo folder is already used as context. Use /pin <path> to force a specific file into every request."
+          : "Open a repo folder for context";
       elements.pinActiveFile.disabled = !active.activeFile;
     }
     if (elements.clearPinnedFiles) {
@@ -603,8 +608,8 @@
       elements.clearPinnedFiles.disabled = pinned.length === 0;
     }
     const bits = ["Local OpenAI API"];
-    if (active.activeFile) {
-      bits.push(`Active: ${active.activeFile}`);
+    if (workspaceReady) {
+      bits.push("Repo ready");
     }
     if (pinned.length > 0) {
       bits.push(`${pinned.length} pinned`);
@@ -2471,7 +2476,7 @@
     const header = document.createElement("div");
     header.className = "session-list-header";
     const title = document.createElement("strong");
-    title.textContent = "Workspace chat history";
+    title.textContent = "Repo chat history";
     const newChat = document.createElement("button");
     newChat.type = "button";
     newChat.className = "secondary";
@@ -2667,4 +2672,6 @@
   function cssEscape(value) {
     return typeof CSS !== "undefined" && CSS.escape ? CSS.escape(value) : String(value).replace(/["\\]/g, "\\$&");
   }
+
+  vscode.postMessage({ type: "webviewReady" });
 }());

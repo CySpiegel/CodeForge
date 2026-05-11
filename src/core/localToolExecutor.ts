@@ -143,7 +143,7 @@ function errorMessageForAction(invocation: ToolInvocation, error: unknown): stri
   if (invocation.action.type === "read_file" && isMissingFileError(message)) {
     return [
       `read_file failed for ${invocation.action.path}: ${message}`,
-      "Path discovery required: call list_files, glob_files, grep_text, or search_text to find the exact workspace-relative path before retrying read_file.",
+      "Path discovery required: call list_files, glob_files, grep_text, or search_text to find the exact repo-relative path before retrying read_file.",
       "Do not retry the same guessed path unless a discovery result returns it."
     ].join("\n");
   }

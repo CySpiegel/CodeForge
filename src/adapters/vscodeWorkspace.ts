@@ -42,12 +42,14 @@ export class VsCodeWorkspacePort implements WorkspacePort {
     }
 
     const workspacePath = toWorkspacePath(editor.document.uri);
-    const label = workspacePath ?? unsavedDocumentLabel(editor.document);
+    if (!workspacePath) {
+      return undefined;
+    }
     const text = editor.document.getText();
     const content = text || emptyActiveDocumentNote(editor.document, workspacePath);
     return {
       kind: "activeFile",
-      label,
+      label: workspacePath,
       content: trim(content, maxBytes)
     };
   }
@@ -77,7 +79,10 @@ export class VsCodeWorkspacePort implements WorkspacePort {
       return undefined;
     }
 
-    const path = toWorkspacePath(editor.document.uri) ?? editor.document.fileName;
+    const path = toWorkspacePath(editor.document.uri);
+    if (!path) {
+      return undefined;
+    }
     return {
       kind: "selection",
       label: `${path}:${editor.selection.start.line + 1}`,
@@ -160,17 +165,29 @@ export class VsCodeWorkspacePort implements WorkspacePort {
 }
 
 export function resolveWorkspaceUri(path: string): vscode.Uri {
-  const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-  if (!workspaceFolder) {
-    throw new Error("CodeForge requires an open workspace folder for file operations.");
-  }
-
-  const cleanPath = path.replace(/\\/g, "/").replace(/^\/+/, "");
   const validation = validateWorkspacePath(path);
   if (!validation.ok) {
     throw new Error(validation.message ?? `Refusing to access unsafe workspace path: ${path}`);
   }
 
+  const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
+  if (workspaceFolders.length === 0) {
+    throw new Error("CodeForge cannot see an open repo folder. Open the repo folder with File > Open Folder, then reload the CodeForge view.");
+  }
+
+  const normalizedPath = path.trim().replace(/\\/g, "/");
+  if (isAbsoluteWorkspacePath(normalizedPath)) {
+    for (const folder of workspaceFolders) {
+      const uri = absoluteUriForFolder(normalizedPath, folder.uri);
+      if (toWorkspacePath(uri)) {
+        return uri;
+      }
+    }
+    throw new Error(`Path is outside the open repo folder(s): ${path}. Open repo folders: ${workspaceFolders.map((folder) => folder.name).join(", ")}.`);
+  }
+
+  const workspaceFolder = workspaceFolders[0];
+  const cleanPath = normalizedPath.replace(/^\/+/, "");
   return vscode.Uri.joinPath(workspaceFolder.uri, cleanPath);
 }
 
@@ -186,10 +203,15 @@ function isIgnoredDocument(document: vscode.TextDocument): boolean {
   return document.languageId === "Log" || document.uri.path.includes("/node_modules/");
 }
 
-function unsavedDocumentLabel(document: vscode.TextDocument): string {
-  const language = document.languageId && document.languageId !== "plaintext" ? ` ${document.languageId}` : "";
-  const name = document.fileName || "Untitled";
-  return `Unsaved active${language} editor: ${name}`;
+function isAbsoluteWorkspacePath(path: string): boolean {
+  return path.startsWith("/") || /^[A-Za-z]:\//.test(path);
+}
+
+function absoluteUriForFolder(path: string, folder: vscode.Uri): vscode.Uri {
+  if (folder.scheme === "file") {
+    return vscode.Uri.file(path);
+  }
+  return folder.with({ path: path.startsWith("/") ? path : `/${path}` });
 }
 
 function emptyActiveDocumentNote(document: vscode.TextDocument, workspacePath: string | undefined): string {
@@ -198,7 +220,7 @@ function emptyActiveDocumentNote(document: vscode.TextDocument, workspacePath: s
   }
 
   const language = document.languageId && document.languageId !== "plaintext" ? ` ${document.languageId}` : "";
-  return `[CodeForge active${language} editor is unsaved and has no workspace path. Ask the user to save it inside the workspace before using write_file or edit_file.]`;
+  return `[CodeForge active${language} editor is unsaved and has no repo path. Ask the user to save it inside the open repo folder before using write_file or edit_file.]`;
 }
 
 function trim(value: string, maxBytes: number): string {

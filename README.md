@@ -8,13 +8,13 @@ It is designed for explicit endpoint control. CodeForge does not include public 
 
 CodeForge gives your local model a VS Code-native coding workflow:
 
-- chat with workspace context
+- chat with repo context
 - inspect and explain files
 - search the whole codebase
 - build an offline workspace index for faster codebase understanding
 - read diagnostics from VS Code
 - propose and apply file edits
-- write to the currently open workspace
+- write to the currently open repo folder
 - run approved terminal commands
 - maintain workspace chat history
 - keep and manage explicit local memories

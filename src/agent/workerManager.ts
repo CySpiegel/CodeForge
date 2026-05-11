@@ -85,7 +85,7 @@ const maxTranscriptEntries = 120;
 const maxTranscriptTextBytes = 80_000;
 const summaryEmitIntervalMs = 250;
 
-const workerReadToolInstruction = `When you need workspace data, request one or more actions using this JSON shape and only these action types:
+const workerReadToolInstruction = `When you need repo data, request one or more actions using this JSON shape and only these action types:
 
 {
   "actions": [
@@ -98,7 +98,7 @@ const workerReadToolInstruction = `When you need workspace data, request one or 
   ]
 }
 
-Use workspace-relative paths only. If a tool is denied, adjust within the allowed read-only scope.`;
+Use repo-relative paths only. If a tool is denied, adjust within the allowed read-only scope.`;
 
 const workerCodeIntelToolInstruction = `This worker may also use VS Code language-service tools when symbol-aware code intelligence is more reliable than text search:
 
@@ -124,7 +124,7 @@ const workerStateToolInstruction = `This worker may also use local task-state to
   ]
 }
 
-Tasks are local session state for coordination and progress tracking. They do not edit workspace files.`;
+Tasks are local session state for coordination and progress tracking. They do not edit repo files.`;
 
 const workerQuestionToolInstruction = `This worker may also pause and ask the user a structured question when blocked by missing requirements:
 
@@ -158,7 +158,7 @@ const workerEditToolInstruction = `This worker may also request approval-gated e
   ]
 }
 
-Read before editing. Use workspace-relative paths only. Edits are not hidden background changes; CodeForge routes them through the parent VS Code approval, diff preview, checkpoint, and permission policy.`;
+Read before editing. Use repo-relative paths only. Edits are not hidden background changes; CodeForge routes them through the parent VS Code approval, diff preview, checkpoint, and permission policy.`;
 
 const workerCommandToolInstruction = `This worker may also request approval-gated local command execution when verification or diagnostics require it:
 
@@ -168,7 +168,7 @@ const workerCommandToolInstruction = `This worker may also request approval-gate
   ]
 }
 
-Prefer VS Code-native read/search/diagnostic tools first. Keep commands workspace-scoped, foreground, and bounded. Commands are routed through the parent VS Code approval, checkpoint, timeout, output limit, and permission policy.`;
+Prefer VS Code-native read/search/diagnostic tools first. Keep commands repo-scoped, foreground, and bounded. Commands are routed through the parent VS Code approval, checkpoint, timeout, output limit, and permission policy.`;
 
 const workerAutomationToolInstruction = `This worker may also delegate focused work to another CodeForge agent:
 
@@ -179,7 +179,7 @@ const workerAutomationToolInstruction = `This worker may also delegate focused w
   ]
 }
 
-Use delegation for independent review, exploration, or verification work. The spawned agent inherits CodeForge's local endpoint, workspace context, permission policy, and approval bridge.`;
+Use delegation for independent review, exploration, or verification work. The spawned agent inherits CodeForge's local endpoint, repo context, permission policy, and approval bridge.`;
 
 const workerMemoryToolInstruction = `This worker may also request approval to save durable local memory:
 

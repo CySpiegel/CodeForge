@@ -109,7 +109,7 @@ export class TerminalRunner {
     if (!cwd || cwd === ".") {
       const folder = vscode.workspace.workspaceFolders?.[0];
       if (!folder) {
-        throw new Error("CodeForge requires an open workspace folder to run commands.");
+        throw new Error("CodeForge requires an open repo folder to run commands.");
       }
       return folder.uri.fsPath;
     }

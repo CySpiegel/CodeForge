@@ -19,7 +19,7 @@ test("/doctor runs diagnostics without consuming a chat completion", async () =>
   assert.ok(report && report.type === "message");
   assert.match(report.text, /Endpoint\n\[pass\] Network policy:/);
   assert.match(report.text, /\[pass\] Model discovery: 1 model\(s\) returned by \/v1\/models\./);
-  assert.match(report.text, /Workspace\n\[pass\] File discovery:/);
+  assert.match(report.text, /Repo Folder\n\[pass\] File discovery:/);
   assert.match(report.text, /Permissions\n\[pass\] Approval mode:/);
   assert.match(report.text, /Tooling\n\[pass\] Internal tools:/);
   assert.equal(harness.provider.requests.length, 0);

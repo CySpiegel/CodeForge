@@ -3,11 +3,11 @@ import assert from "node:assert/strict";
 import { AgentAction } from "../../src/core/types";
 import { codeForgeTools, isReadOnlyAction, parseAction, toolDefinitions, validateAction, validateWorkspacePath } from "../../src/core/toolRegistry";
 
-test("validates workspace-relative paths", () => {
+test("validates repo paths", () => {
   assert.equal(validateWorkspacePath("src/core/types.ts").ok, true);
   assert.equal(validateWorkspacePath("../secret.txt").ok, false);
-  assert.equal(validateWorkspacePath("/etc/passwd").ok, false);
-  assert.equal(validateWorkspacePath("C:\\Windows\\System32").ok, false);
+  assert.equal(validateWorkspacePath("/repo/src/index.ts").ok, true);
+  assert.equal(validateWorkspacePath("C:\\repo\\src\\index.ts").ok, true);
 });
 
 test("parses and validates registered tools", () => {

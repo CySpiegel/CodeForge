@@ -41,7 +41,9 @@ export function activate(context: vscode.ExtensionContext): void {
     statusBar,
     new vscode.Disposable(disposeStatusListener),
     vscode.workspace.registerTextDocumentContentProvider("codeforge-preview", previewProvider),
-    vscode.window.registerWebviewViewProvider(CodeForgeViewProvider.viewType, viewProvider),
+    vscode.window.registerWebviewViewProvider(CodeForgeViewProvider.viewType, viewProvider, {
+      webviewOptions: { retainContextWhenHidden: true }
+    }),
     vscode.commands.registerCommand("codeforge.openChat", () => viewProvider.focus()),
     vscode.commands.registerCommand("codeforge.newSession", async () => {
       await viewProvider.focus();

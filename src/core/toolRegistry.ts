@@ -56,8 +56,8 @@ export interface ToolInvocation {
 export const codeForgeTools: readonly CodeForgeTool[] = [
   {
     name: "list_files",
-    description: "List files in the current VS Code workspace. Use this before repo-wide reviews, architecture questions, or unfamiliar-code tasks to discover relevant workspace-relative paths.",
-    searchHint: "discover workspace files",
+    description: "List files in the open repo folder. Use this before repo-wide reviews, architecture questions, or unfamiliar-code tasks to discover exact repo-relative paths.",
+    searchHint: "discover repo files",
     risk: "read",
     concurrencySafe: true,
     requiresApproval: false,
@@ -93,7 +93,7 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
   },
   {
     name: "glob_files",
-    description: "Fast file pattern matching in the current VS Code workspace. Use this when you need files by name or extension, such as **/*.ts or src/**/*.tsx.",
+    description: "Fast file pattern matching in the open repo folder. Use this when you need files by name or extension, such as **/*.ts or src/**/*.tsx.",
     searchHint: "find files by glob pattern",
     risk: "search",
     concurrencySafe: true,
@@ -131,7 +131,7 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
   },
   {
     name: "read_file",
-    description: "Read exact text contents from one workspace file. Use this only for a specific workspace-relative path from active/open-file context, user text, or prior list_files/glob_files/grep_text/search_text output. Do not guess paths.",
+    description: "Read exact text contents from one repo file. Use this only for a specific repo-relative path from user text or prior list_files/glob_files/grep_text/search_text output. Do not guess paths.",
     searchHint: "read file contents",
     risk: "read",
     concurrencySafe: true,
@@ -161,8 +161,8 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
   },
   {
     name: "search_text",
-    description: "Search plain text across the current workspace. Prefer grep_text when you need an include glob, a bounded result count, or code-review evidence from matching files.",
-    searchHint: "search workspace text",
+    description: "Search plain text across the open repo folder. Prefer grep_text when you need an include glob, a bounded result count, or code-review evidence from matching files.",
+    searchHint: "search repo text",
     risk: "search",
     concurrencySafe: true,
     requiresApproval: false,
@@ -197,7 +197,7 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
   },
   {
     name: "grep_text",
-    description: "Search workspace file contents with a query and optional include glob. Use this for codebase reviews, symbol hunting, API usage checks, TODO/error searches, and narrowing files before read_file.",
+    description: "Search repo file contents with a query and optional include glob. Use this for codebase reviews, symbol hunting, API usage checks, TODO/error searches, and narrowing files before read_file.",
     searchHint: "search file contents",
     risk: "search",
     concurrencySafe: true,
@@ -246,7 +246,7 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
   },
   {
     name: "list_diagnostics",
-    description: "List current VS Code diagnostics for the workspace or one workspace file. Use this to inspect TypeScript, lint, language-server, and problem-panel evidence before suggesting fixes.",
+    description: "List current VS Code diagnostics for the open repo folder or one repo file. Use this to inspect TypeScript, lint, language-server, and problem-panel evidence before suggesting fixes.",
     searchHint: "list vscode diagnostics",
     risk: "read",
     concurrencySafe: true,
@@ -1332,13 +1332,13 @@ export function validateWorkspacePath(path: string): ToolValidationResult {
   }
 
   const normalized = path.replace(/\\/g, "/");
-  if (normalized.startsWith("/") || normalized.startsWith("~") || /^[A-Za-z]:/.test(normalized)) {
-    return { ok: false, message: `Refusing to access an absolute path: ${path}` };
+  if (normalized.startsWith("~")) {
+    return { ok: false, message: `Refusing to access a home-relative path: ${path}` };
   }
 
   const segments = normalized.split("/").filter(Boolean);
   if (segments.some((segment) => segment === "..")) {
-    return { ok: false, message: `Refusing to access path outside the workspace: ${path}` };
+    return { ok: false, message: `Refusing to access path outside the open repo folder: ${path}` };
   }
 
   return { ok: true };
@@ -1357,7 +1357,7 @@ export function validateWorkspaceGlob(pattern: string): ToolValidationResult {
   }
   const segments = normalized.split("/").filter(Boolean);
   if (segments.some((segment) => segment === "..")) {
-    return { ok: false, message: `Refusing to use a glob outside the workspace: ${pattern}` };
+    return { ok: false, message: `Refusing to use a glob outside the open repo folder: ${pattern}` };
   }
   return { ok: true };
 }

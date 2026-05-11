@@ -1160,11 +1160,14 @@ textarea {
 .composer {
   position: sticky;
   bottom: 0;
-  z-index: 2;
+  z-index: 20;
+  overflow: visible;
   padding: 8px 8px 4px;
 }
 
 .prompt {
+  position: relative;
+  overflow: visible;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 4px;
@@ -1418,7 +1421,7 @@ textarea {
 .endpoint-picker-menu,
 .permission-mode-menu {
   position: absolute;
-  z-index: 1000;
+  z-index: 3000;
   top: calc(100% + 3px);
   left: 0;
   min-width: 160px;
@@ -1465,6 +1468,8 @@ textarea {
 }
 
 .composer-status-row {
+  position: relative;
+  z-index: 30;
   display: flex;
   align-items: center;
   min-width: 0;

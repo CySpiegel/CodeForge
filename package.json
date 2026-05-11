@@ -148,11 +148,13 @@
         "codeforge.model": {
           "type": "string",
           "default": "",
+          "scope": "resource",
           "description": "Model ID to send to the active endpoint. If empty, the active profile defaultModel is used."
         },
         "codeforge.agent.mode": {
           "type": "string",
           "default": "agent",
+          "scope": "resource",
           "enum": [
             "agent",
             "ask",
@@ -171,6 +173,7 @@
         "codeforge.permissions.mode": {
           "type": "string",
           "default": "smart",
+          "scope": "resource",
           "enum": [
             "manual",
             "smart",
@@ -181,6 +184,7 @@
         "codeforge.permissions.rules": {
           "type": "array",
           "default": [],
+          "scope": "resource",
           "description": "Permission rules. Each rule has kind, pattern, behavior, scope, and optional description.",
           "items": {
             "type": "object",
@@ -227,6 +231,7 @@
         "codeforge.mcp.servers": {
           "type": "array",
           "default": [],
+          "scope": "resource",
           "description": "Explicit MCP server configurations. CodeForge never connects to MCP servers unless configured here and requested by a tool call.",
           "items": {
             "type": "object",
@@ -283,7 +288,7 @@
           "default": 24,
           "minimum": 1,
           "maximum": 200,
-          "description": "Maximum number of workspace context files CodeForge may include."
+          "description": "Maximum number of repo context files CodeForge may include."
         },
         "codeforge.context.maxBytes": {
           "type": "number",

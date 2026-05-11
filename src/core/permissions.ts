@@ -222,7 +222,7 @@ function defaultDecision(action: AgentAction, mode: PermissionMode): PermissionD
     return {
       behavior: "allow",
       source: "default",
-      reason: `${toolSummary(action)} does not modify workspace files or run shell commands.`
+      reason: `${toolSummary(action)} does not modify repo files or run shell commands.`
     };
   }
 
