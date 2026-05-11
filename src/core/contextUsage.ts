@@ -143,5 +143,7 @@ function bucketForContextItem(item: ContextItem): { key: string; label: string }
       return { key: "fileTree", label: "Workspace file list" };
     case "file":
       return { key: "files", label: "Workspace files" };
+    case "workspaceIndex":
+      return { key: "workspaceIndex", label: "Workspace index" };
   }
 }

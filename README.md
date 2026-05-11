@@ -11,12 +11,13 @@ CodeForge gives your local model a VS Code-native coding workflow:
 - chat with workspace context
 - inspect and explain files
 - search the whole codebase
+- build an offline workspace index for faster codebase understanding
 - read diagnostics from VS Code
 - propose and apply file edits
 - write to the currently open workspace
 - run approved terminal commands
 - maintain workspace chat history
-- keep explicit local memories
+- keep and manage explicit local memories
 - use local slash commands, skills, and custom agents
 - connect to explicitly configured local or on-prem MCP servers
 
@@ -46,6 +47,7 @@ CodeForge is local-first by default:
 - on-prem hostnames must be explicitly allowlisted
 - API keys are stored in VS Code SecretStorage
 - edits, commands, MCP calls, and memory writes go through typed validation and approval policy
+- permission decisions, approvals, and tool execution are visible in the run inspector
 
 Approval modes:
 
@@ -74,6 +76,7 @@ Modes can be selected from the chat input controls or with slash commands:
 The model can use validated internal tools instead of guessing what the workspace looks like. Tool coverage includes:
 
 - file listing, globbing, reading, and text search
+- offline workspace indexing
 - VS Code diagnostics
 - exact file writes and edits
 - unified diff proposals and previews
@@ -88,6 +91,8 @@ The model can use validated internal tools instead of guessing what the workspac
 
 Specialized tool schemas are loaded on demand with `tool_search`, keeping the active model context smaller for local models.
 
+After file edits, CodeForge checks current VS Code diagnostics for changed files and returns those results to the model so Agent mode can continue from real feedback.
+
 ## Chat Commands
 
 Useful built-in slash commands:
@@ -99,8 +104,13 @@ Useful built-in slash commands:
 /resume      Resume a saved chat
 /context     Show current context usage
 /compact     Compact the current chat context
+/index       Show the offline workspace index
+/pin         Pin the active file or a path into future context
+/inspect     Show recent model/tool/verification events
+/audit       Show permission and approval audit history
 /model       Show or set the active model
 /models      Pick from models returned by the active endpoint
+/capabilities Show cached endpoint model capabilities
 /memory      Manage explicit local memories
 /mcp         Inspect configured MCP servers
 /workers     Show background workers

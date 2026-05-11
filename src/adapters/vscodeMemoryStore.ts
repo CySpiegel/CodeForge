@@ -25,8 +25,34 @@ export class VsCodeMemoryStore implements MemoryStore {
       scope,
       namespace
     };
-    await this.update((memories) => [...memories, memory]);
+    await this.updateAll((memories) => [...memories, memory]);
     return memory;
+  }
+
+  async update(id: string, text: string, options: MemoryWriteOptions = {}): Promise<MemoryEntry | undefined> {
+    const normalized = normalizeMemoryText(text);
+    if (!normalized) {
+      throw new Error("Memory text must not be empty.");
+    }
+    const scope = normalizeMemoryScope(options.scope);
+    const namespace = scope === "agent" ? normalizeMemoryNamespace(options.namespace) : undefined;
+    if (scope === "agent" && !namespace) {
+      throw new Error("Agent memory requires a safe agent name.");
+    }
+    let updated: MemoryEntry | undefined;
+    await this.updateAll((memories) => memories.map((memory) => {
+      if (memory.id !== id) {
+        return memory;
+      }
+      updated = {
+        ...memory,
+        text: normalized,
+        scope,
+        namespace
+      };
+      return updated;
+    }));
+    return updated;
   }
 
   async list(filter?: MemoryListFilter): Promise<readonly MemoryEntry[]> {
@@ -36,7 +62,7 @@ export class VsCodeMemoryStore implements MemoryStore {
 
   async remove(id: string): Promise<boolean> {
     let removed = false;
-    await this.update((memories) => {
+    await this.updateAll((memories) => {
       const next = memories.filter((memory) => memory.id !== id);
       removed = next.length !== memories.length;
       return next;
@@ -45,10 +71,10 @@ export class VsCodeMemoryStore implements MemoryStore {
   }
 
   async clear(filter?: MemoryListFilter): Promise<void> {
-    await this.update((memories) => filter ? memories.filter((memory) => !memoryMatchesFilter(memory, filter)) : []);
+    await this.updateAll((memories) => filter ? memories.filter((memory) => !memoryMatchesFilter(memory, filter)) : []);
   }
 
-  private update(change: (memories: readonly MemoryEntry[]) => readonly MemoryEntry[]): Promise<void> {
+  private updateAll(change: (memories: readonly MemoryEntry[]) => readonly MemoryEntry[]): Promise<void> {
     this.writeQueue = this.writeQueue.then(
       () => this.updateNow(change),
       () => this.updateNow(change)

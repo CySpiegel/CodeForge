@@ -130,7 +130,7 @@ export interface ContextLimits {
 }
 
 export interface ContextItem {
-  readonly kind: "activeFile" | "selection" | "openFile" | "fileTree" | "file" | "projectInstructions" | "memory" | "mcpResource";
+  readonly kind: "activeFile" | "selection" | "openFile" | "fileTree" | "file" | "workspaceIndex" | "projectInstructions" | "memory" | "mcpResource";
   readonly label: string;
   readonly content: string;
 }

@@ -13,6 +13,18 @@
     settingsCancel: document.getElementById("settingsCancel"),
     settingsTabs: Array.from(document.querySelectorAll("[data-settings-tab]")),
     settingsPanes: Array.from(document.querySelectorAll("[data-settings-pane]")),
+    inspectorPanel: document.getElementById("inspectorPanel"),
+    inspectorContent: document.getElementById("inspectorContent"),
+    refreshInspector: document.getElementById("refreshInspector"),
+    runInspector: document.getElementById("runInspector"),
+    pinActiveFile: document.getElementById("pinActiveFile"),
+    clearPinnedFiles: document.getElementById("clearPinnedFiles"),
+    memoryText: document.getElementById("memoryText"),
+    memoryScope: document.getElementById("memoryScope"),
+    memoryNamespace: document.getElementById("memoryNamespace"),
+    addMemory: document.getElementById("addMemory"),
+    clearMemories: document.getElementById("clearMemories"),
+    memoryList: document.getElementById("memoryList"),
     endpointPickerButton: document.getElementById("endpointPickerButton"),
     endpointPickerMenu: document.getElementById("endpointPickerMenu"),
     endpointPickerLabel: document.getElementById("endpointPickerLabel"),
@@ -72,11 +84,19 @@
   let mcpDrafts = [];
   let selectedMcpId = "";
   let mcpDraftDirty = false;
+  let editingMemoryId = "";
   let contextTooltipText = "Context used: 0 / 0 tokens (0%)\nClick to compact context.";
   const builtInSlashCommands = [
     { name: "compact", description: "Compact the current session context", argumentHint: "[focus]" },
     { name: "context", description: "Show context usage and attached local context" },
     { name: "doctor", description: "Check endpoint, model, workspace, permissions, and MCP status" },
+    { name: "index", description: "Build and show the offline workspace index" },
+    { name: "pin", description: "Pin active file or path into future context", argumentHint: "[path]" },
+    { name: "unpin", description: "Unpin a path or clear all pinned context", argumentHint: "[path|all]" },
+    { name: "pins", description: "List pinned context files" },
+    { name: "inspect", description: "Show recent run inspector events" },
+    { name: "audit", description: "Show permission and approval audit history" },
+    { name: "capabilities", description: "Show cached endpoint model capabilities" },
     { name: "commands", description: "List workspace-local slash commands" },
     { name: "mcp", description: "List configured local MCP servers" },
     { name: "workers", description: "List local background workers" },
@@ -312,6 +332,50 @@
     vscode.postMessage({ type: "compactContext" });
   });
 
+  on(elements.pinActiveFile, "click", () => {
+    vscode.postMessage({ type: "pinActiveFile" });
+  });
+
+  on(elements.clearPinnedFiles, "click", () => {
+    vscode.postMessage({ type: "clearPinnedFiles" });
+  });
+
+  on(elements.runInspector, "click", () => {
+    toggleInspectorPanel();
+  });
+
+  on(elements.refreshInspector, "click", () => {
+    vscode.postMessage({ type: "refreshInspector" });
+  });
+
+  on(elements.addMemory, "click", () => {
+    const text = elements.memoryText?.value.trim() || "";
+    if (!text) {
+      addMessage("system error", "Error: Memory text is required.");
+      return;
+    }
+    vscode.postMessage({
+      type: editingMemoryId ? "updateMemory" : "addMemory",
+      id: editingMemoryId,
+      text,
+      scope: elements.memoryScope?.value || "workspace",
+      namespace: elements.memoryNamespace?.value.trim() || ""
+    });
+    editingMemoryId = "";
+    if (elements.addMemory) {
+      elements.addMemory.textContent = "Add Memory";
+    }
+    setValue(elements.memoryText, "");
+  });
+
+  on(elements.clearMemories, "click", () => {
+    editingMemoryId = "";
+    if (elements.addMemory) {
+      elements.addMemory.textContent = "Add Memory";
+    }
+    vscode.postMessage({ type: "clearMemories" });
+  });
+
   on(elements.compactContext, "mouseenter", () => {
     showContextTooltip();
   });
@@ -375,6 +439,8 @@
       elements.messages?.replaceChildren();
       elements.workersPanel?.replaceChildren();
       elements.workersPanel?.classList.add("hidden");
+      elements.inspectorPanel?.replaceChildren();
+      elements.inspectorPanel?.classList.add("hidden");
       elements.approvals?.replaceChildren();
       streamingMessage = undefined;
     } else if (message.type === "state") {
@@ -410,6 +476,9 @@
     } else if (message.type === "workers") {
       state = { ...(state || {}), workers: message.workers || [] };
       renderWorkers(message.workers || []);
+    } else if (message.type === "inspector") {
+      state = { ...(state || {}), inspector: message.inspector };
+      renderInspector(message.inspector);
     } else if (message.type === "openSettings") {
       openSettingsWindow();
       renderState();
@@ -460,6 +529,9 @@
     renderAgentModePicker();
     renderModelPicker();
     renderWorkers(state.workers || []);
+    renderActiveContext();
+    renderMemoryList();
+    renderInspector(state.inspector);
     renderContextUsage(state.contextUsage);
     if (isSlashCommandMenuOpen()) {
       renderSlashCommandMenu();
@@ -515,6 +587,165 @@
     renderSettingsTabs();
     renderMcpEditor();
     setValue(elements.allowlist, (state.settings?.allowlist || []).join("\n"));
+  }
+
+  function renderActiveContext() {
+    const active = state?.activeContext || {};
+    const pinned = Array.isArray(active.pinnedFiles) ? active.pinnedFiles : [];
+    if (elements.pinActiveFile) {
+      elements.pinActiveFile.textContent = active.activeFile ? "Pin file" : "No file";
+      elements.pinActiveFile.title = active.activeFile ? `Pin ${active.activeFile}` : "Open a saved workspace file to pin it";
+      elements.pinActiveFile.disabled = !active.activeFile;
+    }
+    if (elements.clearPinnedFiles) {
+      elements.clearPinnedFiles.textContent = pinned.length > 0 ? `Pins ${pinned.length}` : "Pins";
+      elements.clearPinnedFiles.title = pinned.length > 0 ? `Clear pinned files:\n${pinned.join("\n")}` : "No pinned files";
+      elements.clearPinnedFiles.disabled = pinned.length === 0;
+    }
+    const bits = ["Local OpenAI API"];
+    if (active.activeFile) {
+      bits.push(`Active: ${active.activeFile}`);
+    }
+    if (pinned.length > 0) {
+      bits.push(`${pinned.length} pinned`);
+    }
+    const tip = document.querySelector(".composer-tip");
+    if (tip) {
+      tip.replaceChildren();
+      const strong = document.createElement("strong");
+      strong.textContent = "CodeForge";
+      tip.append(strong, document.createTextNode(` ${bits.join(" - ")}`));
+    }
+  }
+
+  function renderMemoryList() {
+    if (!elements.memoryList) {
+      return;
+    }
+    const memories = Array.isArray(state?.memories) ? state.memories : [];
+    elements.memoryList.replaceChildren();
+    if (memories.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "memory-empty";
+      empty.textContent = "No local memories saved.";
+      elements.memoryList.append(empty);
+      return;
+    }
+    for (const memory of memories) {
+      const row = document.createElement("div");
+      row.className = "memory-row";
+      const meta = document.createElement("div");
+      meta.className = "memory-meta";
+      const title = document.createElement("div");
+      title.className = "memory-title";
+      title.textContent = `${memory.scope || "workspace"}${memory.namespace ? `:${memory.namespace}` : ""} - ${new Date(memory.createdAt || Date.now()).toLocaleString()}`;
+      const text = document.createElement("div");
+      text.className = "memory-text";
+      text.textContent = memory.text || "";
+      meta.append(title, text);
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "secondary";
+      remove.textContent = "Delete";
+      remove.addEventListener("click", () => vscode.postMessage({ type: "removeMemory", id: memory.id }));
+      const edit = document.createElement("button");
+      edit.type = "button";
+      edit.className = "secondary";
+      edit.textContent = "Edit";
+      edit.addEventListener("click", () => {
+        editingMemoryId = memory.id || "";
+        setValue(elements.memoryText, memory.text || "");
+        setValue(elements.memoryScope, memory.scope || "workspace");
+        setValue(elements.memoryNamespace, memory.namespace || "");
+        if (elements.addMemory) {
+          elements.addMemory.textContent = "Save Memory";
+        }
+        elements.memoryText?.focus();
+      });
+      const actions = document.createElement("div");
+      actions.className = "memory-row-actions";
+      actions.append(edit, remove);
+      row.append(meta, actions);
+      elements.memoryList.append(row);
+    }
+  }
+
+  function toggleInspectorPanel() {
+    if (!elements.inspectorPanel) {
+      return;
+    }
+    const shouldOpen = elements.inspectorPanel.classList.contains("hidden");
+    elements.inspectorPanel.classList.toggle("hidden", !shouldOpen);
+    if (shouldOpen) {
+      renderInspector(state?.inspector);
+      vscode.postMessage({ type: "refreshInspector" });
+    }
+  }
+
+  function renderInspector(inspector) {
+    renderInspectorInto(elements.inspectorPanel, inspector, true);
+    renderInspectorInto(elements.inspectorContent, inspector, false);
+  }
+
+  function renderInspectorInto(container, inspector, compact) {
+    if (!container) {
+      return;
+    }
+    const entries = Array.isArray(inspector?.entries) ? inspector.entries : [];
+    const audit = Array.isArray(inspector?.audit) ? inspector.audit : [];
+    container.replaceChildren();
+    if (entries.length === 0 && audit.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "inspector-empty";
+      empty.textContent = "No run events recorded yet.";
+      container.append(empty);
+      return;
+    }
+    const header = document.createElement("div");
+    header.className = "inspector-header";
+    const title = document.createElement("strong");
+    title.textContent = "Run inspector";
+    const count = document.createElement("span");
+    count.textContent = `${entries.length} events - ${audit.length} audit`;
+    header.append(title, count);
+    container.append(header);
+
+    for (const entry of entries.slice(0, compact ? 8 : 40)) {
+      container.append(renderInspectorEntry(entry));
+    }
+
+    if (!compact && audit.length > 0) {
+      const auditTitle = document.createElement("div");
+      auditTitle.className = "inspector-section-title";
+      auditTitle.textContent = "Permission audit";
+      container.append(auditTitle);
+      for (const item of audit.slice(0, 80)) {
+        container.append(renderAuditEntry(item));
+      }
+    }
+  }
+
+  function renderInspectorEntry(entry) {
+    const row = document.createElement("div");
+    row.className = "inspector-row";
+    row.dataset.level = entry.level || "info";
+    const title = document.createElement("div");
+    title.className = "inspector-title";
+    title.textContent = `${new Date(entry.createdAt || Date.now()).toLocaleTimeString()} ${entry.category || "event"} - ${entry.summary || ""}`;
+    row.append(title);
+    if (entry.detail) {
+      const detail = document.createElement("pre");
+      detail.textContent = String(entry.detail).split(/\r?\n/).slice(0, 6).join("\n");
+      row.append(detail);
+    }
+    return row;
+  }
+
+  function renderAuditEntry(entry) {
+    const row = document.createElement("div");
+    row.className = "audit-row";
+    row.textContent = `${new Date(entry.createdAt || Date.now()).toLocaleTimeString()} ${entry.action || "action"} ${entry.outcome || ""} (${entry.behavior || ""}/${entry.source || ""}) - ${entry.reason || ""}`;
+    return row;
   }
 
   function setSettingsTab(tab) {
@@ -915,6 +1146,10 @@
     }
     if (model.supportsReasoning) {
       details.push("thinking model");
+    }
+    const capability = (state?.capabilityCache || []).find((entry) => entry.model === (state?.selectedModel || model.id));
+    if (capability) {
+      details.push(capability.nativeToolCalls ? "native tools cached" : "JSON fallback cached");
     }
     elements.modelMeta.textContent = details.length > 0
       ? `Selected model: ${details.join(", ")}.`

@@ -1,9 +1,11 @@
 import { ContextItem, ContextLimits, WorkspacePort } from "./types";
 import { formatMemories, MemoryEntry } from "./memory";
+import { buildWorkspaceIndex } from "./workspaceIndex";
 
 export interface ContextBuilderSources {
   readonly memories?: readonly MemoryEntry[];
   readonly mcpResources?: readonly ContextItem[];
+  readonly pinnedFiles?: readonly string[];
 }
 
 export class ContextBuilder {
@@ -46,6 +48,22 @@ export class ContextBuilder {
       }
     }
 
+    for (const path of this.sources.pinnedFiles ?? []) {
+      if (items.length >= this.limits.maxFiles || budget <= 0) {
+        break;
+      }
+      try {
+        const content = await this.workspace.readTextFile(path, Math.min(32000, budget), signal);
+        const trimmed = trimToBudget(content, budget);
+        if (trimmed) {
+          items.push({ kind: "file", label: `Pinned: ${path}`, content: trimmed });
+          budget -= byteLength(trimmed);
+        }
+      } catch {
+        // Pinned files can disappear or be renamed; keep context collection resilient.
+      }
+    }
+
     const activeDocument = await this.workspace.getActiveTextDocument(Math.min(32000, budget));
     if (activeDocument && budget > 0) {
       const trimmed = trimToBudget(activeDocument.content, budget);
@@ -73,6 +91,21 @@ export class ContextBuilder {
       if (trimmed) {
         items.push({ ...item, content: trimmed });
         budget -= byteLength(trimmed);
+      }
+    }
+
+    if (budget > 0 && items.length < this.limits.maxFiles) {
+      const index = await buildWorkspaceIndex(this.workspace, {
+        maxFiles: Math.min(500, Math.max(this.limits.maxFiles * 10, 80)),
+        maxAnalyzedFiles: Math.min(48, Math.max(this.limits.maxFiles * 2, 12)),
+        maxBytesPerFile: 12000
+      }, signal);
+      if (index) {
+        const trimmed = trimToBudget(index.content, Math.min(32000, budget));
+        if (trimmed) {
+          items.push({ ...index, content: trimmed });
+          budget -= byteLength(trimmed);
+        }
       }
     }
 

@@ -17,6 +17,8 @@ This compiles the test project and runs:
 - permission matrix tests
 - settings and session migration tests
 - `/doctor` report tests
+- offline workspace index tests
+- pinned active-file context, run inspector, permission audit, edit verification, and memory-management integration tests
 - package contract checks for VS Code-only/offline-first release shape
 - MCP client tests
 - deterministic `AgentController` pipeline integration tests
@@ -76,6 +78,11 @@ After `npm run compile`, launch the extension in a development host and check:
 - chat input sends on Enter and expands while typing
 - markdown and code highlighting render in assistant messages
 - context indicator tooltip shows exact token usage and compaction affordance
+- active file can be pinned and cleared from the composer status row
+- `/index` reports an offline workspace map with important files, diagnostics, symbols, and imports
+- run inspector panel shows model/tool/verification events and permission audit history
+- memory settings can add, edit, delete, and clear local memories
+- model metadata shows cached capability status after `/doctor` or a model request
 - MCP settings can add, inspect, and delete servers
 - `/doctor` reports local endpoint, model, workspace, permission, MCP, persistence, and tooling status
 - Ask can inspect the repo

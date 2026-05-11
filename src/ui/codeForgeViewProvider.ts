@@ -100,6 +100,22 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
       }
     } else if (message.type === "compactContext") {
       await this.controller.compactContext();
+    } else if (message.type === "pinActiveFile") {
+      await this.controller.pinActiveFile();
+    } else if (message.type === "clearPinnedFiles") {
+      await this.controller.unpinFile("all");
+    } else if (message.type === "refreshInspector") {
+      await this.controller.publishState();
+    } else if (message.type === "addMemory" && typeof message.text === "string") {
+      const scope = parseMemoryScope(message.scope) ?? "workspace";
+      await this.controller.addMemory(message.text, scope, typeof message.namespace === "string" ? message.namespace : undefined);
+    } else if (message.type === "updateMemory" && typeof message.id === "string" && typeof message.text === "string") {
+      const scope = parseMemoryScope(message.scope) ?? "workspace";
+      await this.controller.updateMemory(message.id, message.text, scope, typeof message.namespace === "string" ? message.namespace : undefined);
+    } else if (message.type === "removeMemory" && typeof message.id === "string") {
+      await this.controller.removeMemory(message.id);
+    } else if (message.type === "clearMemories") {
+      await this.controller.clearMemories();
     } else if (message.type === "saveSettings") {
       await this.controller.updateSettings({
         activeProfileId: typeof message.activeProfileId === "string" ? message.activeProfileId : undefined,
@@ -168,6 +184,8 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
           <button id="settingsTabGeneral" class="settings-tab" type="button" role="tab" aria-selected="true" data-settings-tab="general">Endpoint</button>
           <button id="settingsTabMcp" class="settings-tab" type="button" role="tab" aria-selected="false" data-settings-tab="mcp">MCP</button>
           <button id="settingsTabPermissions" class="settings-tab" type="button" role="tab" aria-selected="false" data-settings-tab="permissions">Permissions</button>
+          <button id="settingsTabMemory" class="settings-tab" type="button" role="tab" aria-selected="false" data-settings-tab="memory">Memory</button>
+          <button id="settingsTabInspector" class="settings-tab" type="button" role="tab" aria-selected="false" data-settings-tab="inspector">Inspector</button>
         </div>
         <div class="settings-content">
           <div id="settingsPaneGeneral" class="settings-pane" data-settings-pane="general">
@@ -229,6 +247,24 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
               <label class="wide">Permission rules<textarea id="permissionRules" rows="8" placeholder='[{"kind":"command","pattern":"npm test","behavior":"allow","scope":"workspace"}]'></textarea></label>
             </div>
           </div>
+          <div id="settingsPaneMemory" class="settings-pane hidden" data-settings-pane="memory">
+            <div class="settings-grid">
+              <label class="wide">Memory text<textarea id="memoryText" rows="4" placeholder="Local preference, project fact, or recurring instruction"></textarea></label>
+              <label>Scope<select id="memoryScope"><option value="workspace">Workspace</option><option value="user">User</option><option value="agent">Agent</option></select></label>
+              <label>Agent name<input id="memoryNamespace" type="text" placeholder="optional for agent scope"></label>
+            </div>
+            <div class="memory-actions">
+              <button id="addMemory" type="button">Add Memory</button>
+              <button id="clearMemories" class="secondary" type="button">Clear All</button>
+            </div>
+            <div id="memoryList" class="memory-list" aria-live="polite"></div>
+          </div>
+          <div id="settingsPaneInspector" class="settings-pane hidden" data-settings-pane="inspector">
+            <div class="inspector-actions">
+              <button id="refreshInspector" class="secondary" type="button">Refresh</button>
+            </div>
+            <div id="inspectorContent" class="inspector-content" aria-live="polite"></div>
+          </div>
         </div>
         <div class="settings-actions">
           <button id="settingsCancel" class="secondary" type="button">Close</button>
@@ -237,6 +273,7 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
       </div>
     </section>
     <main id="messages" class="messages" aria-live="polite"></main>
+    <section id="inspectorPanel" class="inspector-panel hidden" aria-label="Run inspector"></section>
     <section id="workersPanel" class="workers-panel hidden" aria-label="CodeForge workers"></section>
     <section id="approvals" class="approvals" aria-label="Pending approvals"></section>
     <footer class="composer">
@@ -272,6 +309,9 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
           <button id="compactContext" class="context-ring" type="button" aria-label="Compact context" aria-describedby="contextTooltip">
             <span id="contextValue">0%</span>
           </button>
+          <button id="pinActiveFile" class="context-action" type="button" title="Pin active file" aria-label="Pin active file">Pin</button>
+          <button id="clearPinnedFiles" class="context-action" type="button" title="Clear pinned files" aria-label="Clear pinned files">Clear pins</button>
+          <button id="runInspector" class="context-action" type="button" title="Show run inspector" aria-label="Show run inspector">Run</button>
           <div id="contextTooltip" class="context-tooltip hidden" role="tooltip"></div>
         </div>
       </form>
@@ -299,6 +339,8 @@ interface WebviewMessage {
   readonly workerId?: string;
   readonly serverId?: string;
   readonly uri?: string;
+  readonly scope?: string;
+  readonly namespace?: string;
   readonly model?: string;
   readonly profileId?: string;
   readonly activeProfileId?: string;
@@ -315,6 +357,10 @@ interface WebviewMessage {
   readonly maxBytes?: number;
   readonly commandTimeoutSeconds?: number;
   readonly commandOutputLimitBytes?: number;
+}
+
+function parseMemoryScope(value: unknown): "workspace" | "user" | "agent" | undefined {
+  return value === "workspace" || value === "user" || value === "agent" ? value : undefined;
 }
 
 function parsePermissionMode(value: unknown): PermissionMode | undefined {

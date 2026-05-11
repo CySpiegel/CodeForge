@@ -6,6 +6,7 @@ import { ContextBuilder } from "../core/contextBuilder";
 import { compactOldToolResults } from "../core/contextCompaction";
 import { buildContextUsage, ContextUsage, formatBytes } from "../core/contextUsage";
 import { DoctorCheck, formatDoctorReport, worstDoctorStatus } from "../core/doctor";
+import { EndpointCapabilityStore, isFreshCapability } from "../core/endpointCapabilityCache";
 import {
   formatLocalCommandList,
   formatLocalAgentList,
@@ -59,9 +60,11 @@ import {
   ToolCall,
   ToolDefinition,
   UserQuestion,
+  WorkspaceDiagnostic,
   WorkspacePort
 } from "../core/types";
 import { codeForgeTools, isApprovalAction, isConcurrencySafeAction, isLocalReadOnlyAction, isReadOnlyAction, ToolInvocation, toolSummary, validateAction } from "../core/toolRegistry";
+import { buildWorkspaceIndex } from "../core/workspaceIndex";
 import { DiffService } from "../adapters/diffService";
 import { TerminalRunner } from "../adapters/terminalRunner";
 import { CodeForgeConfigService, CodeForgeSettingsUpdate } from "../adapters/vscodeConfig";
@@ -82,6 +85,7 @@ export type AgentUiEvent =
   | { readonly type: "mcpProbe"; readonly inspections: readonly AgentMcpInspectionSummary[] }
   | { readonly type: "contextUsage"; readonly usage: ContextUsage }
   | { readonly type: "workers"; readonly workers: readonly AgentWorkerSummary[] }
+  | { readonly type: "inspector"; readonly inspector: AgentInspectorSummary }
   | { readonly type: "openSettings" }
   | { readonly type: "approvalRequested"; readonly approval: ApprovalRequest }
   | { readonly type: "approvalResolved"; readonly id: string; readonly accepted: boolean; readonly text: string }
@@ -102,6 +106,10 @@ export interface AgentUiState {
   readonly mcpServers: readonly AgentMcpServerStatusSummary[];
   readonly mcpContext: readonly AgentMcpResourceContextSummary[];
   readonly workers: readonly AgentWorkerSummary[];
+  readonly activeContext: AgentActiveContextSummary;
+  readonly memories: readonly AgentMemorySummary[];
+  readonly capabilityCache: readonly AgentCapabilitySummary[];
+  readonly inspector: AgentInspectorSummary;
   readonly settings: AgentSettingsSummary;
 }
 
@@ -193,6 +201,57 @@ export interface AgentSessionSummary {
 
 export type AgentWorkerSummary = WorkerSummary;
 
+export interface AgentActiveContextSummary {
+  readonly activeFile?: string;
+  readonly pinnedFiles: readonly string[];
+}
+
+export interface AgentMemorySummary {
+  readonly id: string;
+  readonly text: string;
+  readonly createdAt: number;
+  readonly scope: string;
+  readonly namespace?: string;
+}
+
+export interface AgentCapabilitySummary {
+  readonly profileId: string;
+  readonly baseUrl: string;
+  readonly model: string;
+  readonly backendLabel?: string;
+  readonly nativeToolCalls: boolean;
+  readonly streaming: boolean;
+  readonly modelListing: boolean;
+  readonly contextLength?: number;
+  readonly supportsReasoning?: boolean;
+  readonly checkedAt: number;
+}
+
+export interface AgentInspectorSummary {
+  readonly entries: readonly AgentInspectorEntry[];
+  readonly audit: readonly AgentAuditEntry[];
+}
+
+export interface AgentInspectorEntry {
+  readonly id: string;
+  readonly createdAt: number;
+  readonly level: "info" | "warn" | "error";
+  readonly category: string;
+  readonly summary: string;
+  readonly detail?: string;
+}
+
+export interface AgentAuditEntry {
+  readonly id: string;
+  readonly createdAt: number;
+  readonly action: string;
+  readonly behavior: PermissionDecision["behavior"];
+  readonly source: PermissionDecision["source"];
+  readonly reason: string;
+  readonly outcome: "allowed" | "approval" | "denied" | "accepted" | "rejected" | "failed";
+  readonly summary: string;
+}
+
 const maxAgentToolTurns = 25;
 const maxReadOnlyToolTurns = 12;
 const codeForgeToolSchemaMarker = "CODEFORGE_TOOL_SCHEMA_LOADED:";
@@ -256,6 +315,7 @@ export class AgentController {
   private readonly codeIntel: CodeIntelPort;
   private readonly notebooks: NotebookPort;
   private readonly providerFactory: (() => LlmProvider | Promise<LlmProvider>) | undefined;
+  private readonly endpointCapabilityStore: EndpointCapabilityStore | undefined;
   private readonly workers: WorkerManager;
   private readonly events = new EventEmitter();
   private readonly approvals = new ApprovalQueue();
@@ -267,6 +327,9 @@ export class AgentController {
   private tasks = new Map<string, CodeForgeTask>();
   private lastContextItems: readonly ContextItem[] = [];
   private mcpContextItems: ContextItem[] = [];
+  private pinnedFiles = new Set<string>();
+  private inspectorEntries: AgentInspectorEntry[] = [];
+  private auditEntries: AgentAuditEntry[] = [];
   private lastTokenUsage: TokenUsage | undefined;
   private runningAbort: AbortController | undefined;
   private sessionId: string | undefined;
@@ -281,7 +344,8 @@ export class AgentController {
     memoryStore?: MemoryStore,
     codeIntel: CodeIntelPort = new UnavailableCodeIntelPort(),
     notebooks: NotebookPort = new UnavailableNotebookPort(),
-    providerFactory?: () => LlmProvider | Promise<LlmProvider>
+    providerFactory?: () => LlmProvider | Promise<LlmProvider>,
+    endpointCapabilityStore?: EndpointCapabilityStore
   ) {
     this.config = config;
     this.workspace = workspace;
@@ -292,6 +356,7 @@ export class AgentController {
     this.codeIntel = codeIntel;
     this.notebooks = notebooks;
     this.providerFactory = providerFactory;
+    this.endpointCapabilityStore = endpointCapabilityStore;
     this.workers = new WorkerManager({
       workspace: this.workspace,
       contextLimits: () => this.effectiveContextLimits(),
@@ -320,6 +385,9 @@ export class AgentController {
       this.tasks.clear();
       this.lastContextItems = [];
       this.mcpContextItems = [];
+      this.pinnedFiles.clear();
+      this.inspectorEntries = [];
+      this.auditEntries = [];
       this.lastTokenUsage = undefined;
       this.sessionId = undefined;
       this.sessionStartPromise = undefined;
@@ -327,6 +395,7 @@ export class AgentController {
       this.approvals.clear();
       this.workerApprovalWaiters.clear();
       this.emit({ type: "sessionReset" });
+      this.emitInspector();
       this.emitContextUsage();
       await this.publishState();
     } catch (error) {
@@ -650,6 +719,98 @@ export class AgentController {
     await this.publishState();
   }
 
+  async pinActiveFile(): Promise<void> {
+    const active = await this.workspace.getActiveTextDocument(1);
+    if (!active || active.label.startsWith("Unsaved active")) {
+      this.emit({ type: "error", text: "Open a saved workspace file before pinning active context." });
+      return;
+    }
+    await this.pinFile(active.label);
+  }
+
+  async pinFile(path: string): Promise<void> {
+    const normalized = path.trim().replace(/^Pinned:\s*/, "");
+    if (!normalized) {
+      this.emit({ type: "error", text: "Provide a workspace-relative file path to pin." });
+      return;
+    }
+    try {
+      await this.workspace.readTextFile(normalized, 1);
+      this.pinnedFiles.add(normalized);
+      this.emit({ type: "status", text: `Pinned ${normalized} for future context.` });
+      await this.publishState();
+    } catch (error) {
+      this.emit({ type: "error", text: `Could not pin ${normalized}: ${errorMessage(error)}` });
+    }
+  }
+
+  async unpinFile(path?: string): Promise<void> {
+    if (!path || path.trim().toLowerCase() === "all") {
+      this.pinnedFiles.clear();
+      this.emit({ type: "status", text: "Cleared pinned context files." });
+      await this.publishState();
+      return;
+    }
+    const normalized = path.trim().replace(/^Pinned:\s*/, "");
+    const removed = this.pinnedFiles.delete(normalized);
+    this.emit({ type: removed ? "status" : "error", text: removed ? `Unpinned ${normalized}.` : `${normalized} was not pinned.` });
+    await this.publishState();
+  }
+
+  async addMemory(text: string, scope: "workspace" | "user" | "agent" = "workspace", namespace?: string): Promise<void> {
+    if (!this.memoryStore) {
+      this.emit({ type: "error", text: "Local memory is not available in this environment." });
+      return;
+    }
+    try {
+      const memory = await this.memoryStore.add(text, { scope, namespace });
+      this.recordInspector("info", "memory", `Saved ${scope} memory ${memory.id}.`, memory.text);
+      this.emit({ type: "status", text: `Saved local memory ${memory.id}.` });
+      await this.publishState();
+    } catch (error) {
+      this.emit({ type: "error", text: errorMessage(error) });
+    }
+  }
+
+  async updateMemory(id: string, text: string, scope: "workspace" | "user" | "agent" = "workspace", namespace?: string): Promise<void> {
+    if (!this.memoryStore) {
+      this.emit({ type: "error", text: "Local memory is not available in this environment." });
+      return;
+    }
+    try {
+      const memory = await this.memoryStore.update(id, text, { scope, namespace });
+      if (!memory) {
+        this.emit({ type: "error", text: `No local memory found for ${id}.` });
+        return;
+      }
+      this.recordInspector("info", "memory", `Updated ${scope} memory ${memory.id}.`, memory.text);
+      this.emit({ type: "status", text: `Updated local memory ${memory.id}.` });
+      await this.publishState();
+    } catch (error) {
+      this.emit({ type: "error", text: errorMessage(error) });
+    }
+  }
+
+  async removeMemory(id: string): Promise<void> {
+    if (!this.memoryStore) {
+      this.emit({ type: "error", text: "Local memory is not available in this environment." });
+      return;
+    }
+    const removed = await this.memoryStore.remove(id);
+    this.emit({ type: removed ? "status" : "error", text: removed ? `Removed local memory ${id}.` : `No local memory found for ${id}.` });
+    await this.publishState();
+  }
+
+  async clearMemories(): Promise<void> {
+    if (!this.memoryStore) {
+      this.emit({ type: "error", text: "Local memory is not available in this environment." });
+      return;
+    }
+    await this.memoryStore.clear();
+    this.emit({ type: "status", text: "Cleared all local CodeForge memories." });
+    await this.publishState();
+  }
+
   async updateSettings(settings: Partial<CodeForgeSettingsUpdate>): Promise<void> {
     await this.config.updateSettings(settings);
     this.lastTokenUsage = undefined;
@@ -728,6 +889,9 @@ export class AgentController {
     this.tasks.clear();
     this.lastContextItems = [];
     this.mcpContextItems = [];
+    this.pinnedFiles.clear();
+    this.inspectorEntries = [];
+    this.auditEntries = [];
     this.lastTokenUsage = undefined;
     this.sessionId = undefined;
     this.sessionStartPromise = undefined;
@@ -735,6 +899,7 @@ export class AgentController {
     this.approvals.clear();
     this.workerApprovalWaiters.clear();
     this.emit({ type: "sessionReset" });
+    this.emitInspector();
     this.emitContextUsage();
     void this.publishState();
   }
@@ -803,16 +968,18 @@ export class AgentController {
     const abort = new AbortController();
     this.runningAbort = abort;
     this.lastTokenUsage = undefined;
+    this.recordInspector("info", "run", `Started ${agentModeLabel(this.config.getAgentMode())} request.`, visiblePrompt);
     this.emit({ type: "message", role: "user", text: visiblePrompt });
 
     try {
       const provider = await this.createProvider();
       const model = await this.resolveModel(provider, abort.signal);
       const memories = await this.memoryStore?.list() ?? [];
-      const context = new ContextBuilder(this.workspace, this.effectiveContextLimits(), { memories, mcpResources: this.mcpContextItems });
+      const context = new ContextBuilder(this.workspace, this.effectiveContextLimits(), { memories, mcpResources: this.mcpContextItems, pinnedFiles: [...this.pinnedFiles] });
       const contextItems = await context.build(abort.signal);
       const contextText = context.format(contextItems);
       this.lastContextItems = contextItems;
+      this.recordInspector("info", "context", `Attached ${contextItems.length} context item(s).`, contextItems.map((item) => `${contextItemKindLabel(item.kind)}: ${item.label}`).join("\n"));
       this.ensureSystemMessage();
       this.appendMessage({
         role: "user",
@@ -826,6 +993,7 @@ export class AgentController {
 
       await this.runModelLoop(provider, model, abort);
     } catch (error) {
+      this.recordInspector("error", "run", "Request failed.", errorMessage(error));
       this.emit({ type: "error", text: error instanceof Error ? error.message : String(error) });
     } finally {
       this.runningAbort = undefined;
@@ -873,6 +1041,8 @@ export class AgentController {
     }
 
     await this.recordApprovalResolved(id, true, "Accepted.");
+    this.recordAudit(approval.action, approvalPermissionDecision(approval), "accepted");
+    this.recordInspector("info", "approval", `Approved ${approval.action.type}.`, approval.summary);
     try {
       const transcriptResult = await this.executePermittedAction(approval.action, approval.toolCallId);
       if (workerWaiter) {
@@ -935,6 +1105,8 @@ export class AgentController {
       const text = `${approval.action.type}\n\nUser rejected this tool request.`;
       const workerWaiter = this.workerApprovalWaiters.get(id);
       await this.recordApprovalResolved(id, false, "Rejected.");
+      this.recordAudit(approval.action, approvalPermissionDecision(approval), "rejected");
+      this.recordInspector("warn", "approval", `Rejected ${approval.action.type}.`, approval.summary);
       if (approval.origin === "worker" && !workerWaiter) {
         this.emit({ type: "approvalResolved", id, accepted: false, text: "Rejected." });
         this.emit({ type: "toolResult", text });
@@ -1066,7 +1238,9 @@ export class AgentController {
         }
 
         if (!isReadOnlyAction(invocation.action) && agentMode !== "agent") {
-          this.appendDeniedOrInvalidToolResult(invocation, `${agentModeLabel(agentMode)} mode is read-only. Use read-only workspace context and switch to Agent mode before applying edits or running commands.`);
+          const reason = `${agentModeLabel(agentMode)} mode is read-only. Use read-only workspace context and switch to Agent mode before applying edits or running commands.`;
+          this.recordAudit(invocation.action, { behavior: "deny", source: "default", reason }, "denied");
+          this.appendDeniedOrInvalidToolResult(invocation, reason);
           continuedWithLocalContext = true;
           index++;
           continue;
@@ -1074,12 +1248,14 @@ export class AgentController {
 
         const decision = evaluateActionPermission(invocation.action, permissionPolicy);
         if (decision.behavior === "deny") {
+          this.recordAudit(invocation.action, decision, "denied");
           this.appendDeniedOrInvalidToolResult(invocation, decision.reason);
           continuedWithLocalContext = true;
           index++;
           continue;
         }
         if (decision.behavior === "ask") {
+          this.recordAudit(invocation.action, decision, "approval");
           if (concurrentBatch.length > 0) {
             break;
           }
@@ -1088,6 +1264,7 @@ export class AgentController {
           return false;
         }
 
+        this.recordAudit(invocation.action, decision, "allowed");
         concurrentBatch.push(invocation);
         index++;
       }
@@ -1112,7 +1289,9 @@ export class AgentController {
       }
 
       if (!isReadOnlyAction(invocation.action) && agentMode !== "agent") {
-        this.appendDeniedOrInvalidToolResult(invocation, `${agentModeLabel(agentMode)} mode is read-only. Use read-only workspace context and switch to Agent mode before applying edits or running commands.`);
+        const reason = `${agentModeLabel(agentMode)} mode is read-only. Use read-only workspace context and switch to Agent mode before applying edits or running commands.`;
+        this.recordAudit(invocation.action, { behavior: "deny", source: "default", reason }, "denied");
+        this.appendDeniedOrInvalidToolResult(invocation, reason);
         continuedWithLocalContext = true;
         index++;
         continue;
@@ -1120,6 +1299,7 @@ export class AgentController {
 
       const decision = evaluateActionPermission(invocation.action, permissionPolicy);
       if (decision.behavior === "deny") {
+        this.recordAudit(invocation.action, decision, "denied");
         this.appendDeniedOrInvalidToolResult(invocation, decision.reason);
         continuedWithLocalContext = true;
         index++;
@@ -1127,11 +1307,13 @@ export class AgentController {
       }
 
       if (decision.behavior === "ask") {
+        this.recordAudit(invocation.action, decision, "approval");
         await this.requestApproval(invocation.action, invocation.toolCallId, decision);
         this.emitToolUseForInvocation(invocation, "approval", false);
         return false;
       }
 
+      this.recordAudit(invocation.action, decision, "allowed");
       if (isApprovalAction(invocation.action) || invocation.action.type === "open_diff" || isInternalAutomationAction(invocation.action) || isInternalStateAction(invocation.action) || isInternalReadAction(invocation.action)) {
         await this.executePermittedInvocation(invocation);
       } else {
@@ -1188,10 +1370,14 @@ export class AgentController {
   }
 
   private async executeActionWithFailureHooks(action: AgentAction, toolCallId: string | undefined): Promise<string> {
+    this.recordInspector("info", "tool", `Running ${action.type}.`, toolSummary(action));
     try {
-      return await this.executePermittedAction(action, toolCallId);
+      const result = await this.executePermittedAction(action, toolCallId);
+      this.recordInspector(isToolErrorText(result) ? "warn" : "info", "tool", `Finished ${action.type}.`, firstLines(result, 8));
+      return result;
     } catch (error) {
       const content = toolError(errorMessage(error));
+      this.recordInspector("error", "tool", `${action.type} failed.`, errorMessage(error));
       try {
         await this.runLocalHooks("postToolFailure", action);
         return content;
@@ -1211,6 +1397,7 @@ export class AgentController {
       await this.diff.previewEditFile(action);
     }
     await this.recordApprovalRequested(approval);
+    this.recordInspector("warn", "approval", `Approval requested for ${action.type}.`, decision.reason);
     this.emit({ type: "approvalRequested", approval });
     return approval;
   }
@@ -1313,10 +1500,12 @@ export class AgentController {
 
     const decision = evaluateActionPermission(action, this.config.getPermissionPolicy());
     if (decision.behavior === "deny") {
+      this.recordAudit(action, decision, "denied");
       return toolError(`${action.type} was denied by the parent permission policy. ${decision.reason}`);
     }
 
     if (decision.behavior === "ask") {
+      this.recordAudit(action, decision, "approval");
       const approval = await this.requestApproval(action, toolCallId, decision, this.workerApprovalMetadata(worker, action, decision));
       this.emit({
         type: "toolUse",
@@ -1333,6 +1522,7 @@ export class AgentController {
       });
     }
 
+    this.recordAudit(action, decision, "allowed");
     return this.executePermittedAction(action, toolCallId);
   }
 
@@ -1690,7 +1880,7 @@ export class AgentController {
     if (action.type === "propose_patch") {
       await this.recordCheckpoint(action, "Before applying proposed patch.");
       const changed = await this.diff.applyPatch(action.patch);
-      transcriptResult = `propose_patch\n\nApplied changes to ${changed.join(", ")}.`;
+      transcriptResult = `propose_patch\n\nApplied changes to ${changed.join(", ")}.${await this.verifyChangedFiles(changed)}`;
       await this.runLocalHooks("postTool", action);
       return transcriptResult;
     }
@@ -1698,7 +1888,7 @@ export class AgentController {
     if (action.type === "write_file") {
       await this.recordCheckpoint(action, `Before writing ${action.path}.`);
       const changed = await this.diff.applyWriteFile(action);
-      transcriptResult = `write_file ${action.path}\n\nWrote ${changed.join(", ")}.`;
+      transcriptResult = `write_file ${action.path}\n\nWrote ${changed.join(", ")}.${await this.verifyChangedFiles(changed)}`;
       await this.runLocalHooks("postTool", action);
       return transcriptResult;
     }
@@ -1706,7 +1896,7 @@ export class AgentController {
     if (action.type === "edit_file") {
       await this.recordCheckpoint(action, `Before editing ${action.path}.`);
       const changed = await this.diff.applyEditFile(action);
-      transcriptResult = `edit_file ${action.path}\n\nEdited ${changed.join(", ")}.`;
+      transcriptResult = `edit_file ${action.path}\n\nEdited ${changed.join(", ")}.${await this.verifyChangedFiles(changed)}`;
       await this.runLocalHooks("postTool", action);
       return transcriptResult;
     }
@@ -1732,6 +1922,7 @@ export class AgentController {
     if (action.type === "notebook_edit_cell") {
       await this.recordCheckpoint(action, `Before editing notebook ${action.path} cell ${action.index}.`);
       transcriptResult = await this.notebooks.execute(action, this.runningAbort?.signal);
+      transcriptResult = `${transcriptResult}${await this.verifyChangedFiles([action.path])}`;
       await this.runLocalHooks("postTool", action);
       return transcriptResult;
     }
@@ -1748,6 +1939,38 @@ export class AgentController {
     transcriptResult = formatCommandResult(action, result);
     await this.runLocalHooks("postTool", action);
     return transcriptResult;
+  }
+
+  private async verifyChangedFiles(paths: readonly string[]): Promise<string> {
+    const uniquePaths = uniqueStrings(paths).filter((path) => path && path !== "/dev/null");
+    if (uniquePaths.length === 0) {
+      return "";
+    }
+
+    const diagnostics: WorkspaceDiagnostic[] = [];
+    for (const path of uniquePaths.slice(0, 12)) {
+      try {
+        diagnostics.push(...await this.workspace.getDiagnostics(path, 20, this.runningAbort?.signal));
+      } catch {
+        // Diagnostics are best-effort after edits; failed reads should not mask a successful write.
+      }
+    }
+
+    const relevant = diagnostics
+      .filter((diagnostic) => diagnostic.severity === "error" || diagnostic.severity === "warning")
+      .slice(0, 30);
+    const detail = relevant.length > 0
+      ? relevant.map((diagnostic) => `${diagnostic.severity} ${diagnostic.path}:${diagnostic.line}:${diagnostic.character} ${diagnostic.message}`).join("\n")
+      : `No VS Code errors or warnings reported for ${uniquePaths.join(", ")}.`;
+    this.recordInspector(relevant.length > 0 ? "warn" : "info", "verification", `Checked diagnostics for ${uniquePaths.length} changed file(s).`, detail);
+    return [
+      "",
+      "",
+      "Verification:",
+      relevant.length > 0
+        ? relevant.map((diagnostic) => `- ${diagnostic.severity} ${diagnostic.path}:${diagnostic.line}:${diagnostic.character} ${diagnostic.message}`).join("\n")
+        : `- No VS Code errors or warnings reported for ${uniquePaths.join(", ")}.`
+    ].join("\n");
   }
 
   private async runLocalHooks(event: LocalHook["event"], action: AgentAction): Promise<void> {
@@ -1884,8 +2107,26 @@ export class AgentController {
       return cached;
     }
 
+    const persisted = await this.endpointCapabilityStore?.get(provider.profile.id, provider.profile.baseUrl, model);
+    if (persisted && isFreshCapability(persisted)) {
+      this.capabilityCache.set(key, persisted.capabilities);
+      this.recordInspector("info", "endpoint", `Loaded cached capabilities for ${model}.`, `Native tools: ${persisted.capabilities.nativeToolCalls ? "yes" : "no"}\nStreaming: ${persisted.capabilities.streaming ? "yes" : "no"}`);
+      return persisted.capabilities;
+    }
+
     const capabilities = await provider.probeCapabilities(model, signal);
     this.capabilityCache.set(key, capabilities);
+    const inspection = this.endpointCache.get(provider.profile.id);
+    void this.endpointCapabilityStore?.upsert({
+      profileId: provider.profile.id,
+      baseUrl: provider.profile.baseUrl,
+      model,
+      backendLabel: inspection?.backendLabel,
+      modelInfo: inspection?.models.find((item) => item.id === model),
+      capabilities,
+      checkedAt: Date.now()
+    });
+    this.recordInspector("info", "endpoint", `Probed capabilities for ${model}.`, `Native tools: ${capabilities.nativeToolCalls ? "yes" : "no"}\nStreaming: ${capabilities.streaming ? "yes" : "no"}`);
     return capabilities;
   }
 
@@ -2108,6 +2349,9 @@ export class AgentController {
     this.restoreTasksFromSessionRecords(snapshot.records);
     this.lastContextItems = [];
     this.mcpContextItems = [];
+    this.pinnedFiles.clear();
+    this.inspectorEntries = [];
+    this.auditEntries = [];
     this.lastTokenUsage = undefined;
     this.approvals.restore(snapshot.pendingApprovals);
     this.workerApprovalWaiters.clear();
@@ -2125,6 +2369,45 @@ export class AgentController {
 
   private emit(event: AgentUiEvent): void {
     this.events.emit("event", event);
+  }
+
+  private recordInspector(level: AgentInspectorEntry["level"], category: string, summary: string, detail?: string): void {
+    const entry: AgentInspectorEntry = {
+      id: `inspect-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      createdAt: Date.now(),
+      level,
+      category,
+      summary,
+      detail
+    };
+    this.inspectorEntries = [entry, ...this.inspectorEntries].slice(0, 200);
+    this.emitInspector();
+  }
+
+  private recordAudit(action: AgentAction, decision: PermissionDecision, outcome: AgentAuditEntry["outcome"]): void {
+    const entry: AgentAuditEntry = {
+      id: `audit-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      createdAt: Date.now(),
+      action: action.type,
+      behavior: decision.behavior,
+      source: decision.source,
+      reason: decision.reason,
+      outcome,
+      summary: toolSummary(action)
+    };
+    this.auditEntries = [entry, ...this.auditEntries].slice(0, 200);
+    this.emitInspector();
+  }
+
+  private emitInspector(): void {
+    this.emit({ type: "inspector", inspector: this.inspectorSummary() });
+  }
+
+  private inspectorSummary(): AgentInspectorSummary {
+    return {
+      entries: this.inspectorEntries,
+      audit: this.auditEntries
+    };
   }
 
   private async handleSlashCommand(rawPrompt: string): Promise<void> {
@@ -2174,6 +2457,34 @@ export class AgentController {
       }
       case "/doctor":
         await this.runDoctor();
+        return;
+      case "/index":
+        await this.showWorkspaceIndex();
+        return;
+      case "/pin":
+        if (rest) {
+          await this.pinFile(rest);
+        } else {
+          await this.pinActiveFile();
+        }
+        return;
+      case "/unpin":
+        await this.unpinFile(rest || undefined);
+        return;
+      case "/pins":
+        this.emit({ type: "message", role: "system", text: this.formatPinnedFilesReport() });
+        return;
+      case "/inspect":
+      case "/inspector":
+        this.emitInspector();
+        this.emit({ type: "message", role: "system", text: this.formatInspectorReport() });
+        return;
+      case "/audit":
+        this.emitInspector();
+        this.emit({ type: "message", role: "system", text: this.formatAuditReport() });
+        return;
+      case "/capabilities":
+        this.emit({ type: "message", role: "system", text: await this.formatCapabilityReport() });
         return;
       case "/commands":
         await this.showLocalCommands();
@@ -2260,7 +2571,7 @@ export class AgentController {
         this.emit({
           type: "message",
           role: "system",
-          text: `Unknown command ${command}. Available commands: /new, /compact, /context, /doctor, /commands, /mcp, /workers, /worker, /agents, /agent-run, /explore, /review, /verify, /implement, /skills, /skill, /memory, /clear, /stop, /history, /resume, /fork, /diff, /export, /model, /models, /agent, /ask, /plan, /manual, /smart, /full-auto, /config.`
+          text: `Unknown command ${command}. Available commands: /new, /compact, /context, /doctor, /index, /pin, /unpin, /pins, /inspect, /audit, /capabilities, /commands, /mcp, /workers, /worker, /agents, /agent-run, /explore, /review, /verify, /implement, /skills, /skill, /memory, /clear, /stop, /history, /resume, /fork, /diff, /export, /model, /models, /agent, /ask, /plan, /manual, /smart, /full-auto, /config.`
         });
     }
   }
@@ -2734,6 +3045,70 @@ export class AgentController {
     return lines.join("\n");
   }
 
+  private async showWorkspaceIndex(): Promise<void> {
+    try {
+      const index = await buildWorkspaceIndex(this.workspace, {
+        maxFiles: 500,
+        maxAnalyzedFiles: 80,
+        maxBytesPerFile: 16000
+      }, this.runningAbort?.signal);
+      this.emit({
+        type: "message",
+        role: "system",
+        text: index ? `Workspace index:\n\n${index.content}` : "Workspace index:\n\nNo workspace files found."
+      });
+    } catch (error) {
+      this.emit({ type: "error", text: `Failed to build workspace index: ${errorMessage(error)}` });
+    }
+  }
+
+  private formatPinnedFilesReport(): string {
+    const pinned = [...this.pinnedFiles];
+    return pinned.length === 0
+      ? "Pinned context files: none. Use /pin with an open workspace file or /pin <path>."
+      : `Pinned context files:\n${pinned.map((path) => `- ${path}`).join("\n")}`;
+  }
+
+  private formatInspectorReport(): string {
+    if (this.inspectorEntries.length === 0) {
+      return "Run inspector:\n\nNo run events recorded yet.";
+    }
+    const lines = this.inspectorEntries.slice(0, 40).map((entry) => {
+      const when = new Date(entry.createdAt).toLocaleTimeString();
+      return `- ${when} [${entry.level}] ${entry.category}: ${entry.summary}${entry.detail ? `\n  ${firstLines(entry.detail, 4).replace(/\n/g, "\n  ")}` : ""}`;
+    });
+    return `Run inspector:\n${lines.join("\n")}`;
+  }
+
+  private formatAuditReport(): string {
+    if (this.auditEntries.length === 0) {
+      return "Permission audit:\n\nNo permission decisions recorded yet.";
+    }
+    const lines = this.auditEntries.slice(0, 60).map((entry) => {
+      const when = new Date(entry.createdAt).toLocaleTimeString();
+      return `- ${when} ${entry.action} ${entry.outcome} (${entry.behavior}/${entry.source}) - ${entry.reason}`;
+    });
+    return `Permission audit:\n${lines.join("\n")}`;
+  }
+
+  private async formatCapabilityReport(): Promise<string> {
+    const profileId = this.config.getActiveProfileId();
+    const entries = await this.capabilitySummaries(profileId);
+    if (entries.length === 0) {
+      return "Endpoint capability cache:\n\nNo cached model capabilities yet. Run /doctor or send a request to probe the selected model.";
+    }
+    const lines = entries.map((entry) => {
+      const details = [
+        entry.nativeToolCalls ? "native tools" : "json fallback",
+        entry.streaming ? "streaming" : "non-streaming",
+        entry.contextLength ? `${entry.contextLength.toLocaleString("en-US")} ctx` : undefined,
+        entry.supportsReasoning ? "thinking" : undefined
+      ].filter((item): item is string => Boolean(item)).join(", ");
+      return `- ${entry.model} | ${details} | checked ${new Date(entry.checkedAt).toLocaleString()}`;
+    });
+    return `Endpoint capability cache:\n${lines.join("\n")}`;
+  }
+
   private formatModelReport(): string {
     const activeProfileId = this.config.getActiveProfileId();
     const profile = this.config.getProfiles().find((item) => item.id === activeProfileId);
@@ -2850,6 +3225,10 @@ export class AgentController {
       mcpServers: configuredMcpServerStatuses(this.config.getMcpServers(), this.config.getNetworkPolicy()).map(toAgentMcpServerStatusSummary),
       mcpContext: this.mcpContextItems.map(toAgentMcpResourceContextSummary),
       workers: this.workers.list(),
+      activeContext: await this.activeContextSummary(),
+      memories: await this.memorySummaries(),
+      capabilityCache: await this.capabilitySummaries(activeProfile.id),
+      inspector: this.inspectorSummary(),
       settings: {
         agentMode,
         allowlist: networkPolicy.allowlist,
@@ -2876,6 +3255,44 @@ export class AgentController {
     } catch {
       return [];
     }
+  }
+
+  private async activeContextSummary(): Promise<AgentActiveContextSummary> {
+    const active = await this.workspace.getActiveTextDocument(1).catch(() => undefined);
+    return {
+      activeFile: active && !active.label.startsWith("Unsaved active") ? active.label : undefined,
+      pinnedFiles: [...this.pinnedFiles]
+    };
+  }
+
+  private async memorySummaries(): Promise<readonly AgentMemorySummary[]> {
+    if (!this.memoryStore) {
+      return [];
+    }
+    const memories = await this.memoryStore.list().catch(() => []);
+    return memories.map((memory) => ({
+      id: memory.id,
+      text: memory.text,
+      createdAt: memory.createdAt,
+      scope: memory.scope ?? "workspace",
+      namespace: memory.namespace
+    }));
+  }
+
+  private async capabilitySummaries(profileId: string): Promise<readonly AgentCapabilitySummary[]> {
+    const entries = await this.endpointCapabilityStore?.list(profileId).catch(() => []) ?? [];
+    return entries.slice(0, 20).map((entry) => ({
+      profileId: entry.profileId,
+      baseUrl: entry.baseUrl,
+      model: entry.model,
+      backendLabel: entry.backendLabel,
+      nativeToolCalls: entry.capabilities.nativeToolCalls,
+      streaming: entry.capabilities.streaming,
+      modelListing: entry.capabilities.modelListing,
+      contextLength: entry.modelInfo?.contextLength,
+      supportsReasoning: entry.modelInfo?.supportsReasoning,
+      checkedAt: entry.checkedAt
+    }));
   }
 
   private emitContextUsage(): void {
@@ -3066,6 +3483,18 @@ function formatWorkerList(workers: readonly WorkerSummary[]): string {
 function formatQuestionAnswers(questions: readonly UserQuestion[], answers: Readonly<Record<string, string>>): string {
   const lines = questions.map((question) => `- ${question.question} -> ${answers[question.question]}`);
   return `ask_user_question\n\nUser answered CodeForge's question(s):\n${lines.join("\n")}\n\nContinue with these answers in mind.`;
+}
+
+function approvalPermissionDecision(approval: ApprovalRequest): PermissionDecision {
+  return {
+    behavior: "ask",
+    source: approval.permissionSource ?? "mode",
+    reason: approval.permissionReason ?? "Approval was requested by the current permission policy."
+  };
+}
+
+function firstLines(value: string, limit: number): string {
+  return value.split(/\r?\n/).slice(0, limit).join("\n");
 }
 
 function uniqueStrings(values: readonly string[] | undefined): readonly string[] {
@@ -3273,6 +3702,8 @@ function contextItemKindLabel(kind: ContextItem["kind"]): string {
       return "Workspace file list";
     case "file":
       return "Workspace file";
+    case "workspaceIndex":
+      return "Workspace index";
   }
 }
 

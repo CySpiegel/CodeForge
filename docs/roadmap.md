@@ -322,6 +322,20 @@ Exit criteria:
 - Session and settings migrations are tested.
 - Packaging does not add telemetry or cloud presets.
 
+## Phase 11: Daily-Use Hardening
+
+Purpose: make the completed extension baseline more dependable during real coding sessions.
+
+Status: implemented as a post-roadmap hardening slice. CodeForge now builds an offline workspace index for whole-repo understanding, supports pinned active/workspace files as recurring context, exposes a run inspector with permission audit history, returns diagnostics after edits so Agent mode can iterate from real VS Code feedback, provides an in-app memory management screen with add/edit/delete/clear controls, persists endpoint/model capability probes in VS Code global storage, and surfaces cached capability status in the UI and `/capabilities`.
+
+Scope:
+- Offline workspace index with important files, directories, language mix, diagnostics, imports, and symbols.
+- Active-file pinning and pinned context controls in the composer.
+- Run inspector and audit visibility for tool execution, approvals, denials, and verification.
+- Post-edit diagnostics checks for changed files.
+- In-app memory management.
+- Persisted model capability cache for native tools, streaming, context length, and reasoning metadata.
+
 ## Implementation Rules For Every Phase
 
 - Keep core logic typed and unit-tested before adding UI affordances.

@@ -104,7 +104,66 @@ test("Agent mode executes write_file in full auto through the diff pipeline", as
   assertToolCompleted(harness.events, "write_file");
   assert.equal(harness.diff.writes.length, 1);
   assert.equal(harness.workspace.files.get("SMOKE_AGENT.md"), "Agent mode wrote this file.");
+  assert.ok(harness.events.some((event) => event.type === "toolResult" && /Verification:\n- No VS Code errors or warnings/.test(event.text)));
   assertAssistantMessage(harness.events, /Created SMOKE_AGENT\.md/);
+});
+
+test("pinned active files are attached to future prompt context", async () => {
+  const harness = createControllerHarness({
+    mode: "ask",
+    files: {
+      "src/pinned.ts": "export const pinned = true;\n",
+      "src/other.ts": "export const other = true;\n"
+    },
+    responses: [{ content: "Pinned context checked." }]
+  });
+  harness.workspace.activeDocument = { kind: "activeFile", label: "src/pinned.ts", content: "export const pinned = true;\n" };
+
+  await harness.controller.sendPrompt("/pin");
+  await harness.controller.sendPrompt("What file is pinned?");
+
+  const contextMessage = harness.provider.requests[0].messages.find((message) => message.content.startsWith("CodeForge workspace context:"));
+  assert.match(contextMessage?.content ?? "", /### file: Pinned: src\/pinned\.ts/);
+  assert.ok(harness.events.some((event) => event.type === "state" && event.state.activeContext.pinnedFiles.includes("src/pinned.ts")));
+});
+
+test("inspector and audit track denied side-effect tools", async () => {
+  const harness = createControllerHarness({
+    mode: "ask",
+    files: { "README.md": "# CodeForge\n" },
+    responses: [
+      { toolCalls: [toolCall("write_file", { path: "NEW.md", content: "nope" })] },
+      { content: "Denied as expected." }
+    ]
+  });
+
+  await harness.controller.sendPrompt("Try to write.");
+
+  const inspector = [...harness.events].reverse().find((event) => event.type === "inspector");
+  assert.ok(inspector && inspector.type === "inspector");
+  assert.ok(inspector.inspector.audit.some((entry) => entry.action === "write_file" && entry.outcome === "denied"));
+  await harness.controller.sendPrompt("/audit");
+  assert.ok(harness.events.some((event) => event.type === "message" && event.role === "system" && /Permission audit:/.test(event.text)));
+});
+
+test("controller memory APIs support add, edit, and remove", async () => {
+  const harness = createControllerHarness({
+    mode: "ask",
+    files: { "README.md": "# CodeForge\n" },
+    responses: []
+  });
+
+  await harness.controller.addMemory("Prefer focused tests.", "workspace");
+  const [memory] = await harness.memory.list();
+  assert.equal(memory.text, "Prefer focused tests.");
+
+  await harness.controller.updateMemory(memory.id, "Prefer narrow tests.", "user");
+  const [updated] = await harness.memory.list();
+  assert.equal(updated.text, "Prefer narrow tests.");
+  assert.equal(updated.scope, "user");
+
+  await harness.controller.removeMemory(updated.id);
+  assert.equal((await harness.memory.list()).length, 0);
 });
 
 test("Manual approval pauses side effects, then approve resumes the model loop", async () => {

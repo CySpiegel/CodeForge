@@ -21,6 +21,7 @@ export interface MemoryListFilter {
 
 export interface MemoryStore {
   add(text: string, options?: MemoryWriteOptions): Promise<MemoryEntry>;
+  update(id: string, text: string, options?: MemoryWriteOptions): Promise<MemoryEntry | undefined>;
   list(filter?: MemoryListFilter): Promise<readonly MemoryEntry[]>;
   remove(id: string): Promise<boolean>;
   clear(filter?: MemoryListFilter): Promise<void>;

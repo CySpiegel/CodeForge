@@ -540,6 +540,94 @@ textarea {
   background: var(--vscode-editorWidget-background, var(--vscode-sideBar-background));
 }
 
+.memory-actions,
+.inspector-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+
+.memory-list,
+.inspector-content {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.memory-row,
+.inspector-row,
+.audit-row {
+  min-width: 0;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 5px;
+  padding: 6px;
+  background: var(--vscode-input-background);
+}
+
+.memory-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: start;
+}
+
+.memory-row-actions {
+  display: flex;
+  gap: 5px;
+}
+
+.memory-row-actions button {
+  min-height: 24px;
+  padding: 2px 7px;
+  font-size: 11px;
+}
+
+.memory-meta {
+  min-width: 0;
+}
+
+.memory-title,
+.inspector-title,
+.inspector-section-title {
+  overflow: hidden;
+  color: var(--vscode-foreground);
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.memory-text,
+.memory-empty,
+.inspector-empty,
+.audit-row {
+  color: var(--vscode-descriptionForeground);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.memory-text {
+  margin-top: 3px;
+  white-space: pre-wrap;
+}
+
+.inspector-row[data-level="warn"] {
+  border-color: var(--vscode-inputValidation-warningBorder, var(--vscode-panel-border));
+}
+
+.inspector-row[data-level="error"] {
+  border-color: var(--vscode-errorForeground);
+}
+
+.inspector-row pre {
+  max-height: 96px;
+  overflow: auto;
+  margin: 5px 0 0;
+  color: var(--vscode-descriptionForeground);
+  white-space: pre-wrap;
+}
+
 @media (max-width: 520px) {
   .settings-grid {
     grid-template-columns: 1fr;
@@ -566,6 +654,34 @@ textarea {
   padding: 8px;
   border-top: 1px solid var(--vscode-sideBarSectionHeader-border);
   background: var(--vscode-sideBar-background);
+}
+
+.inspector-panel {
+  flex: 0 0 auto;
+  display: grid;
+  gap: 6px;
+  max-height: 34vh;
+  overflow-y: auto;
+  padding: 8px;
+  border-top: 1px solid var(--vscode-sideBarSectionHeader-border);
+  background: var(--vscode-sideBar-background);
+}
+
+.inspector-panel.hidden {
+  display: none;
+}
+
+.inspector-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 11px;
+}
+
+.inspector-header strong {
+  color: var(--vscode-foreground);
+  font-size: 12px;
 }
 
 .workers-panel.hidden {
@@ -1235,7 +1351,8 @@ textarea {
 }
 
 .endpoint-picker-button,
-.permission-mode-button {
+.permission-mode-button,
+.context-action {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -1249,6 +1366,11 @@ textarea {
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.context-action {
+  max-width: none;
+  padding: 0 4px;
 }
 
 .permission-mode-button::after {

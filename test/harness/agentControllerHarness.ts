@@ -293,6 +293,21 @@ export class FakeMemoryStore implements MemoryStore {
     return this.memories.filter((memory) => !filter.scope || memory.scope === filter.scope);
   }
 
+  async update(id: string, text: string, options: MemoryWriteOptions = {}): Promise<MemoryEntry | undefined> {
+    const index = this.memories.findIndex((memory) => memory.id === id);
+    if (index === -1) {
+      return undefined;
+    }
+    const updated: MemoryEntry = {
+      ...this.memories[index],
+      text,
+      scope: options.scope,
+      namespace: options.namespace
+    };
+    this.memories[index] = updated;
+    return updated;
+  }
+
   async remove(id: string): Promise<boolean> {
     const index = this.memories.findIndex((memory) => memory.id === id);
     if (index === -1) {
