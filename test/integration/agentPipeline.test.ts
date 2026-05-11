@@ -338,6 +338,55 @@ test("Smart approval asks before applying file edits in Agent mode", async () =>
   assert.equal(harness.workspace.files.get("README.md"), "# CodeForge\nnew\n");
 });
 
+test("Approved edits continue into the next planned tool request", async () => {
+  const harness = createControllerHarness({
+    mode: "agent",
+    permissionMode: "manual",
+    files: {
+      "src/a.ts": "export const a = 1;\n",
+      "src/b.ts": "export const b = 1;\n"
+    },
+    responses: [
+      { toolCalls: [toolCall("edit_file", { path: "src/a.ts", oldText: "1", newText: "2" }, "call-edit-a")] },
+      { toolCalls: [toolCall("edit_file", { path: "src/b.ts", oldText: "1", newText: "2" }, "call-edit-b")] },
+      { content: "Both planned edits are complete." }
+    ]
+  });
+
+  const firstApprovalSeen = new Promise<Extract<AgentUiEvent, { readonly type: "approvalRequested" }>>((resolve) => {
+    const dispose = harness.controller.onEvent((event) => {
+      if (event.type === "approvalRequested") {
+        dispose();
+        resolve(event);
+      }
+    });
+  });
+  const promptRun = harness.controller.sendPrompt("Update both files.");
+  const firstApproval = await firstApprovalSeen;
+  assert.equal(firstApproval.approval.action.type, "edit_file");
+  assert.equal(firstApproval.approval.action.path, "src/a.ts");
+
+  await harness.controller.approve(firstApproval.approval.id);
+  await promptRun;
+  await waitForEvent(harness.events, (event) =>
+    event.type === "approvalRequested"
+    && event.approval.id !== firstApproval.approval.id
+  );
+  const secondApproval = harness.events
+    .filter((event): event is Extract<AgentUiEvent, { readonly type: "approvalRequested" }> => event.type === "approvalRequested")
+    .find((event) => event.approval.id !== firstApproval.approval.id);
+  assert.ok(secondApproval);
+  assert.equal(secondApproval.approval.action.type, "edit_file");
+  assert.equal(secondApproval.approval.action.path, "src/b.ts");
+  assert.ok(harness.provider.requests[1]?.messages.some((message) => /CodeForge continuation: The user approved/.test(message.content)));
+
+  await harness.controller.approve(secondApproval.approval.id);
+  await waitForEvent(harness.events, (event) => event.type === "message" && event.role === "assistant" && /Both planned edits/.test(event.text));
+
+  assert.equal(harness.workspace.files.get("src/a.ts"), "export const a = 2;\n");
+  assert.equal(harness.workspace.files.get("src/b.ts"), "export const b = 2;\n");
+});
+
 test("Preview failures still surface an approval instead of failing the request", async () => {
   const harness = createControllerHarness({
     mode: "agent",

@@ -86,6 +86,7 @@
   let mcpDraftDirty = false;
   let editingMemoryId = "";
   let contextTooltipText = "Context used: 0 / 0 tokens (0%)\nClick to compact context.";
+  let currentRunStatus = "Ready";
   const builtInSlashCommands = [
     { name: "compact", description: "Compact the current session context", argumentHint: "[focus]" },
     { name: "context", description: "Show context usage and attached local context" },
@@ -489,6 +490,7 @@
       }
       addMessage(message.role, message.text);
     } else if (message.type === "assistantDelta") {
+      setRunStatus("Streaming response");
       if (!streamingMessage) {
         streamingMessage = addMessage("assistant", "");
       }
@@ -500,19 +502,24 @@
       }
       scrollMessages();
     } else if (message.type === "status") {
+      setRunStatus(message.text);
       addStatus(message.text);
     } else if (message.type === "toolResult") {
       addToolResult(message.text);
     } else if (message.type === "toolUse") {
+      updateRunStatusFromToolUse(message.toolUse);
       upsertToolUse(message.toolUse);
     } else if (message.type === "sessions") {
       addSessionList(message.sessions || []);
     } else if (message.type === "approvalRequested") {
+      setRunStatus("Waiting for approval");
       addApproval(message.approval);
     } else if (message.type === "approvalResolved") {
       removeApproval(message.id);
+      setRunStatus(message.accepted ? "Continuing after approval" : "Continuing after rejection");
       addStatus(message.text);
     } else if (message.type === "error") {
+      setRunStatus(`Error: ${message.text || "request failed"}`);
       addMessage("system error", `Error: ${message.text}`);
     }
   });
@@ -619,8 +626,34 @@
       tip.replaceChildren();
       const strong = document.createElement("strong");
       strong.textContent = "CodeForge";
-      tip.append(strong, document.createTextNode(` ${bits.join(" - ")}`));
+      const status = document.createElement("span");
+      status.className = "composer-run-status";
+      status.textContent = currentRunStatus && currentRunStatus !== "Idle" ? currentRunStatus : "Ready";
+      tip.append(strong, document.createTextNode(" "), status, document.createTextNode(` ${bits.join(" - ")}`));
     }
+  }
+
+  function setRunStatus(text) {
+    const normalized = String(text || "").trim();
+    currentRunStatus = !normalized || normalized === "Idle" ? "Ready" : truncateStatus(normalized);
+    renderActiveContext();
+  }
+
+  function updateRunStatusFromToolUse(toolUse) {
+    if (!toolUse) {
+      return;
+    }
+    if (toolUse.status === "running") {
+      setRunStatus(`Running ${toolUse.name}`);
+    } else if (toolUse.status === "approval") {
+      setRunStatus("Waiting for approval");
+    } else if (toolUse.status === "failed") {
+      setRunStatus(`${toolUse.name} failed`);
+    }
+  }
+
+  function truncateStatus(value) {
+    return value.length > 64 ? `${value.slice(0, 61)}...` : value;
   }
 
   function renderMemoryList() {

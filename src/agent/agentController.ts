@@ -276,6 +276,11 @@ interface QueuedCompact {
   readonly focus: string;
 }
 
+interface PendingContinuation {
+  readonly prompt?: string;
+  readonly statusText: string;
+}
+
 type QueuedWork = QueuedPrompt | QueuedCompact;
 
 const coreAgentToolNames = new Set([
@@ -354,6 +359,7 @@ export class AgentController {
   private lastTokenUsage: TokenUsage | undefined;
   private runningAbort: AbortController | undefined;
   private continueAfterCurrentRun = false;
+  private pendingContinuation: PendingContinuation | undefined;
   private queuedWork: QueuedWork[] = [];
   private sessionId: string | undefined;
   private sessionStartPromise: Promise<string | undefined> | undefined;
@@ -423,6 +429,7 @@ export class AgentController {
         this.workerApprovalWaiters.clear();
       }
       this.continueAfterCurrentRun = false;
+      this.pendingContinuation = undefined;
       this.emit({ type: "sessionReset" });
       this.emitInspector();
       this.emitContextUsage();
@@ -1035,6 +1042,7 @@ export class AgentController {
     this.approvals.clear();
     this.workerApprovalWaiters.clear();
     this.continueAfterCurrentRun = false;
+    this.pendingContinuation = undefined;
     this.queuedWork = [];
     this.emit({ type: "sessionReset" });
     this.emitInspector();
@@ -1215,7 +1223,7 @@ export class AgentController {
       this.emit({ type: "toolResult", text: transcriptResult });
       this.emitContextUsage();
       await this.publishState();
-      void this.continueAfterToolResult();
+      void this.continueAfterToolResult(approvalContinuationPrompt(approval.action, "accepted"), "Continuing after approval.");
     } catch (error) {
       const message = errorMessage(error);
       const text = toolError(message);
@@ -1235,7 +1243,7 @@ export class AgentController {
       this.emit({ type: "toolResult", text });
       this.emitContextUsage();
       await this.publishState();
-      void this.continueAfterToolResult();
+      void this.continueAfterToolResult(approvalContinuationPrompt(approval.action, "failed"), "Continuing after failed action.");
     }
   }
 
@@ -1292,11 +1300,11 @@ export class AgentController {
       this.emit({ type: "toolResult", text });
       this.emitContextUsage();
       void this.publishState();
-      void this.continueAfterToolResult();
+      void this.continueAfterToolResult(approvalContinuationPrompt(approval.action, "rejected"), "Continuing after rejection.");
     }
   }
 
-  private async runModelLoop(provider: LlmProvider, model: string, abort: AbortController): Promise<void> {
+  private async runModelLoop(provider: LlmProvider, model: string, abort: AbortController, continuationPrompt?: string): Promise<void> {
     const maxToolTurns = this.config.getAgentMode() === "agent" ? maxAgentToolTurns : maxReadOnlyToolTurns;
     for (let iteration = 0; iteration < maxToolTurns; iteration++) {
       this.compactOldToolResultsIfNeeded();
@@ -1314,9 +1322,12 @@ export class AgentController {
 
       this.lastTokenUsage = undefined;
       this.emitContextUsage();
+      const messagesForRequest = iteration === 0 && continuationPrompt
+        ? [...this.messages, { role: "user" as const, content: continuationPrompt }]
+        : this.messages;
       for await (const event of this.streamChatWithIdleTimeout(provider, {
         model,
-        messages: this.messages,
+        messages: messagesForRequest,
         tools: requestTools,
         signal: abort.signal
       }, abort, "Model request")) {
@@ -2193,19 +2204,24 @@ export class AgentController {
     }
   }
 
-  private async continueAfterToolResult(): Promise<void> {
+  private async continueAfterToolResult(continuationPrompt?: string, statusText = "Continuing after tool result."): Promise<void> {
     if (this.runningAbort) {
+      this.pendingContinuation = { prompt: continuationPrompt, statusText };
       this.continueAfterCurrentRun = true;
       return;
     }
 
     this.continueAfterCurrentRun = false;
+    this.pendingContinuation = undefined;
     const abort = new AbortController();
     this.runningAbort = abort;
     try {
       const provider = await this.createProvider();
       const model = await this.resolveModel(provider, abort.signal);
-      await this.runModelLoop(provider, model, abort);
+      if (continuationPrompt) {
+        this.emit({ type: "status", text: statusText });
+      }
+      await this.runModelLoop(provider, model, abort, continuationPrompt);
     } catch (error) {
       this.emit({ type: "error", text: error instanceof Error ? error.message : String(error) });
     } finally {
@@ -2242,7 +2258,10 @@ export class AgentController {
       return;
     }
     if (this.continueAfterCurrentRun) {
-      void this.continueAfterToolResult();
+      const continuation = this.pendingContinuation;
+      this.continueAfterCurrentRun = false;
+      this.pendingContinuation = undefined;
+      void this.continueAfterToolResult(continuation?.prompt, continuation?.statusText);
       return;
     }
     const nextWork = this.queuedWork.shift();
@@ -4294,6 +4313,17 @@ function approvalAcceptedText(action: AgentAction, transcriptResult: string): st
     case "mcp_call_tool":
       return `Called MCP ${action.serverId}/${action.toolName}.`;
   }
+}
+
+function approvalContinuationPrompt(action: AgentAction, outcome: "accepted" | "failed" | "rejected"): string {
+  const summary = toolSummary(action);
+  if (outcome === "accepted") {
+    return `CodeForge continuation: The user approved ${summary}, and its tool result is now available above. Continue the original task from the existing plan. If more edits, commands, or tool calls are still needed, request the next one now. Do not stop until the user's task is complete.`;
+  }
+  if (outcome === "rejected") {
+    return `CodeForge continuation: The user rejected ${summary}, and the rejection is now available above. Continue the original task by choosing an alternative allowed approach. Do not retry the same rejected action unchanged.`;
+  }
+  return `CodeForge continuation: ${summary} was approved but failed, and the failure is now available above. Continue the original task by inspecting the current state and trying a corrected approach. Do not repeat the same failed action unchanged.`;
 }
 
 function modelStreamIdleTimeoutMs(): number {
