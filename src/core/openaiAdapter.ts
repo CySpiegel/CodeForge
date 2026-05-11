@@ -153,52 +153,57 @@ export class OpenAiCompatibleProvider implements LlmProvider {
   }
 
   private async probeToolCalls(url: string, model: string, signal?: AbortSignal): Promise<boolean> {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: this.headers(),
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: "user", content: "Call the echo_probe tool with value ok. Return no prose." }
-        ],
-        tools: [
-          {
-            type: "function",
-            function: {
-              name: "echo_probe",
-              description: "Probe whether the endpoint supports OpenAI tool calls.",
-              parameters: {
-                type: "object",
-                properties: {
-                  value: { type: "string" }
-                },
-                required: ["value"],
-                additionalProperties: false
-              }
+    const request = {
+      model,
+      messages: [
+        { role: "user", content: "Respond with ok." }
+      ],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "echo_probe",
+            description: "Probe whether the endpoint accepts OpenAI tool schemas.",
+            parameters: {
+              type: "object",
+              properties: {
+                value: { type: "string" }
+              },
+              required: ["value"],
+              additionalProperties: false
             }
           }
-        ],
-        tool_choice: "auto",
-        max_tokens: 64,
-        temperature: 0
-      }),
+        }
+      ],
+      tool_choice: "none",
+      max_tokens: 1,
+      temperature: 0
+    };
+
+    let response = await fetch(url, {
+      method: "POST",
+      headers: this.headers(),
+      body: JSON.stringify(request),
       signal
     });
+
+    if (!response.ok && response.status >= 400 && response.status < 500) {
+      const retryRequest: Record<string, unknown> = { ...request };
+      delete retryRequest.tool_choice;
+      response = await fetch(url, {
+        method: "POST",
+        headers: this.headers(),
+        body: JSON.stringify(retryRequest),
+        signal
+      });
+    }
 
     if (!response.ok) {
       return false;
     }
 
-    const body = (await response.json()) as {
-      readonly choices?: ReadonlyArray<{
-        readonly message?: {
-          readonly tool_calls?: readonly unknown[];
-        };
-        readonly finish_reason?: string;
-      }>;
-    };
-    const first = body.choices?.[0];
-    return first?.finish_reason === "tool_calls" || Boolean(first?.message?.tool_calls?.length);
+    await response.arrayBuffer().catch(() => undefined);
+    return true;
   }
 
   private *parseStreamEvent(data: string, toolCalls: Map<number, OpenAiToolCallState>): Iterable<LlmStreamEvent> {

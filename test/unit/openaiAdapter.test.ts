@@ -141,3 +141,84 @@ test("merges LM Studio metadata into OpenAI API model discovery", async () => {
     globalThis.fetch = originalFetch;
   }
 });
+
+test("treats accepted OpenAI tool schemas as native tool support", async () => {
+  const originalFetch = globalThis.fetch;
+  const postedBodies: unknown[] = [];
+  globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {
+    const url = input instanceof Request ? input.url : String(input);
+    if (url.endsWith("/v1/models")) {
+      return new Response(JSON.stringify({ data: [{ id: "local-model" }] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+    if (url.endsWith("/api/v0/models")) {
+      return new Response("not found", { status: 404 });
+    }
+
+    postedBodies.push(JSON.parse(String(init?.body ?? "{}")));
+    return new Response(JSON.stringify({
+      choices: [
+        {
+          message: { role: "assistant", content: "ok", tool_calls: [] },
+          finish_reason: "stop"
+        }
+      ]
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+
+  try {
+    const provider = new OpenAiCompatibleProvider(
+      { id: "test", label: "Test", baseUrl: "http://127.0.0.1:4000/v1" },
+      { allowlist: [] }
+    );
+    const capabilities = await provider.probeCapabilities("local-model");
+    assert.equal(capabilities.nativeToolCalls, true);
+    assert.equal(capabilities.modelListing, true);
+    assert.equal((postedBodies[0] as { readonly tool_choice?: string }).tool_choice, "none");
+    assert.ok(Array.isArray((postedBodies[0] as { readonly tools?: unknown[] }).tools));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("retries tool support probe without tool_choice when an endpoint rejects it", async () => {
+  const originalFetch = globalThis.fetch;
+  const postedBodies: unknown[] = [];
+  globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {
+    const url = input instanceof Request ? input.url : String(input);
+    if (url.endsWith("/v1/models")) {
+      return new Response(JSON.stringify({ data: [{ id: "local-model" }] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+    if (url.endsWith("/api/v0/models")) {
+      return new Response("not found", { status: 404 });
+    }
+
+    const body = JSON.parse(String(init?.body ?? "{}"));
+    postedBodies.push(body);
+    if (body.tool_choice) {
+      return new Response("unsupported tool_choice", { status: 400 });
+    }
+    return new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: "o" } }] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" }
+    });
+  };
+
+  try {
+    const provider = new OpenAiCompatibleProvider(
+      { id: "test", label: "Test", baseUrl: "http://127.0.0.1:4000/v1" },
+      { allowlist: [] }
+    );
+    const capabilities = await provider.probeCapabilities("local-model");
+    assert.equal(capabilities.nativeToolCalls, true);
+    assert.equal(postedBodies.length, 2);
+    assert.equal((postedBodies[1] as { readonly tool_choice?: string }).tool_choice, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

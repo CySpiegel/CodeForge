@@ -354,7 +354,7 @@
     "compile": "tsc -p ./tsconfig.json",
     "watch": "tsc -watch -p ./",
     "compile:tests": "tsc -p ./tsconfig.test.json",
-    "test": "npm run compile:tests && node --test out-test/test/unit/*.test.js",
+    "test": "npm run compile:tests && node --test out-test/test/unit/*.test.js out-test/test/integration/*.test.js",
     "vscode:test": "npm run compile && npm run compile:tests && node ./out-test/test/runTest.js",
     "package": "npm run compile && vsce package --allow-missing-repository --no-dependencies"
   },

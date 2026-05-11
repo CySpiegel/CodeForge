@@ -1,0 +1,5 @@
+{
+    "codeforge.model": "google/gemma-4-e4b",
+    "codeforge.agent.mode": "ask",
+    "codeforge.permissions.mode": "manual"
+}

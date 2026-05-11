@@ -253,6 +253,7 @@ export class AgentController {
   private readonly memoryStore: MemoryStore | undefined;
   private readonly codeIntel: CodeIntelPort;
   private readonly notebooks: NotebookPort;
+  private readonly providerFactory: (() => LlmProvider | Promise<LlmProvider>) | undefined;
   private readonly workers: WorkerManager;
   private readonly events = new EventEmitter();
   private readonly approvals = new ApprovalQueue();
@@ -277,7 +278,8 @@ export class AgentController {
     sessionStore?: SessionStore,
     memoryStore?: MemoryStore,
     codeIntel: CodeIntelPort = new UnavailableCodeIntelPort(),
-    notebooks: NotebookPort = new UnavailableNotebookPort()
+    notebooks: NotebookPort = new UnavailableNotebookPort(),
+    providerFactory?: () => LlmProvider | Promise<LlmProvider>
   ) {
     this.config = config;
     this.workspace = workspace;
@@ -287,6 +289,7 @@ export class AgentController {
     this.memoryStore = memoryStore;
     this.codeIntel = codeIntel;
     this.notebooks = notebooks;
+    this.providerFactory = providerFactory;
     this.workers = new WorkerManager({
       workspace: this.workspace,
       contextLimits: () => this.effectiveContextLimits(),
@@ -1610,6 +1613,9 @@ export class AgentController {
   }
 
   private async createProvider(): Promise<LlmProvider> {
+    if (this.providerFactory) {
+      return this.providerFactory();
+    }
     const profile = await this.config.getActiveProfile();
     return new OpenAiCompatibleProvider(profile, this.config.getNetworkPolicy());
   }
@@ -3114,7 +3120,7 @@ function searchCodeForgeTools(query: string, allowedToolNames: ReadonlySet<strin
     .filter((tool) => allowedToolNames.has(tool.name))
     .map((tool): ToolSchemaSearchResult => ({
       name: tool.name,
-      score: scoreToolSearch(query, selected, tool.name, tool.description, [tool.risk, tool.requiresApproval ? "approval" : "auto"]),
+      score: scoreToolSearch(query, selected, tool.name, tool.description, [tool.searchHint ?? "", tool.risk, tool.requiresApproval ? "approval" : "auto"]),
       content: formatCodeForgeToolSchemaSearchResult(tool)
     }))
     .filter((result) => result.score > 0)
@@ -3166,6 +3172,7 @@ function formatCodeForgeToolSchemaSearchResult(tool: (typeof codeForgeTools)[num
     `Risk: ${tool.risk}`,
     `Approval: ${tool.requiresApproval ? "required when policy asks" : "not required"}`,
     `Concurrency: ${tool.concurrencySafe ? "safe" : "serial"}`,
+    tool.searchHint ? `Search hint: ${tool.searchHint}` : undefined,
     `Description: ${tool.description}`,
     "Schema:",
     JSON.stringify({
@@ -3173,7 +3180,7 @@ function formatCodeForgeToolSchemaSearchResult(tool: (typeof codeForgeTools)[num
       description: tool.description,
       parameters: tool.parameters
     }, null, 2)
-  ].join("\n");
+  ].filter((line): line is string => line !== undefined).join("\n");
 }
 
 function formatMcpToolSchemaSearchResult(functionName: string, serverId: string, tool: McpToolSummary): string {
@@ -3207,9 +3214,10 @@ function agentModeInstructions(mode: AgentMode): string {
   if (mode === "ask") {
     return [
       "Agent mode: Ask.",
-      "Act like a traditional chatbot inside VS Code for quick answers, explanations, debugging help, and code snippets.",
-      "Use the active file and read-only workspace context when it helps answer the question.",
-      "Do not edit files, create files, run terminal commands, or execute autonomous multi-step workflows in Ask mode.",
+      "Act like a codebase-aware assistant inside VS Code for quick answers, explanations, debugging help, reviews, and code snippets.",
+      "Use read-only workspace tools when codebase evidence is needed and the relevant file content is not already attached.",
+      "Read-only multi-step inspection is allowed in Ask mode.",
+      "Do not edit files, create files, run terminal commands, or execute side-effecting autonomous implementation workflows in Ask mode.",
       "If the user asks you to implement changes, explain the approach and tell them to switch to Agent mode before applying edits."
     ].join("\n");
   }

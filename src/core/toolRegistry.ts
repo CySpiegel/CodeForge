@@ -36,6 +36,7 @@ export interface ToolValidationResult {
 export interface CodeForgeTool {
   readonly name: AgentAction["type"];
   readonly description: string;
+  readonly searchHint?: string;
   readonly parameters: Record<string, unknown>;
   readonly risk: ToolRisk;
   readonly concurrencySafe: boolean;
@@ -55,7 +56,8 @@ export interface ToolInvocation {
 export const codeForgeTools: readonly CodeForgeTool[] = [
   {
     name: "list_files",
-    description: "List bounded workspace files using VS Code workspace APIs.",
+    description: "List files in the current VS Code workspace. Use this before repo-wide reviews, architecture questions, or unfamiliar-code tasks to discover relevant workspace-relative paths.",
+    searchHint: "discover workspace files",
     risk: "read",
     concurrencySafe: true,
     requiresApproval: false,
@@ -91,7 +93,8 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
   },
   {
     name: "glob_files",
-    description: "Find workspace files matching a glob pattern using VS Code workspace APIs.",
+    description: "Fast file pattern matching in the current VS Code workspace. Use this when you need files by name or extension, such as **/*.ts or src/**/*.tsx.",
+    searchHint: "find files by glob pattern",
     risk: "search",
     concurrencySafe: true,
     requiresApproval: false,
@@ -128,7 +131,8 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
   },
   {
     name: "read_file",
-    description: "Read a bounded text file from the current workspace.",
+    description: "Read exact text contents from one workspace file. Use this before explaining, reviewing, editing, or reasoning about a specific file path returned by list_files, glob_files, grep_text, or active file context.",
+    searchHint: "read file contents",
     risk: "read",
     concurrencySafe: true,
     requiresApproval: false,
@@ -157,7 +161,8 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
   },
   {
     name: "search_text",
-    description: "Search text in the current workspace. Prefer grep_text when you need an include glob.",
+    description: "Search plain text across the current workspace. Prefer grep_text when you need an include glob, a bounded result count, or code-review evidence from matching files.",
+    searchHint: "search workspace text",
     risk: "search",
     concurrencySafe: true,
     requiresApproval: false,
@@ -192,7 +197,8 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
   },
   {
     name: "grep_text",
-    description: "Search workspace file contents with an optional include glob using VS Code workspace APIs.",
+    description: "Search workspace file contents with a query and optional include glob. Use this for codebase reviews, symbol hunting, API usage checks, TODO/error searches, and narrowing files before read_file.",
+    searchHint: "search file contents",
     risk: "search",
     concurrencySafe: true,
     requiresApproval: false,
@@ -240,7 +246,8 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
   },
   {
     name: "list_diagnostics",
-    description: "List current VS Code diagnostics for the workspace or one workspace file.",
+    description: "List current VS Code diagnostics for the workspace or one workspace file. Use this to inspect TypeScript, lint, language-server, and problem-panel evidence before suggesting fixes.",
+    searchHint: "list vscode diagnostics",
     risk: "read",
     concurrencySafe: true,
     requiresApproval: false,
@@ -278,6 +285,7 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
   {
     name: "spawn_agent",
     description: "Launch a CodeForge built-in or workspace-local agent to investigate, review, verify, or implement a task.",
+    searchHint: "delegate local agent work",
     risk: "automation",
     concurrencySafe: true,
     requiresApproval: false,
@@ -327,6 +335,7 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
   {
     name: "worker_output",
     description: "Read the current status and transcript of a CodeForge worker or local agent.",
+    searchHint: "read worker transcript",
     risk: "automation",
     concurrencySafe: true,
     requiresApproval: false,
@@ -359,6 +368,7 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
   {
     name: "ask_user_question",
     description: "Pause the local model loop and ask the user one or more structured multiple-choice questions inside the VS Code extension.",
+    searchHint: "ask user choice",
     risk: "question",
     concurrencySafe: true,
     requiresApproval: true,
@@ -453,6 +463,7 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
   {
     name: "tool_search",
     description: "Search CodeForge's deferred tool catalog and load matching tool schemas for the next model turn.",
+    searchHint: "load deferred tool schema",
     risk: "read",
     concurrencySafe: true,
     requiresApproval: false,
@@ -496,6 +507,7 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
   {
     name: "tool_list",
     description: "List CodeForge model-facing tools, risks, approval requirements, and concurrency metadata.",
+    searchHint: "list available tools",
     risk: "read",
     concurrencySafe: true,
     requiresApproval: false,
@@ -519,6 +531,7 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
   {
     name: "task_create",
     description: "Create a durable local task for multi-step agent work in the current VS Code chat session.",
+    searchHint: "create planning task",
     risk: "state",
     concurrencySafe: false,
     requiresApproval: false,
@@ -565,6 +578,7 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
   {
     name: "task_update",
     description: "Update a durable local task status, owner, description, dependencies, or metadata.",
+    searchHint: "update planning task",
     risk: "state",
     concurrencySafe: false,
     requiresApproval: false,
@@ -625,6 +639,7 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
   {
     name: "task_list",
     description: "List durable local tasks for the current chat session.",
+    searchHint: "list planning tasks",
     risk: "read",
     concurrencySafe: true,
     requiresApproval: false,
@@ -655,6 +670,7 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
   {
     name: "task_get",
     description: "Read one durable local task for the current chat session.",
+    searchHint: "read planning task",
     risk: "read",
     concurrencySafe: true,
     requiresApproval: false,
@@ -680,6 +696,7 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
   {
     name: "code_hover",
     description: "Use VS Code language services to read hover information at a workspace file position.",
+    searchHint: "language server hover",
     risk: "read",
     concurrencySafe: true,
     requiresApproval: false,
@@ -697,6 +714,7 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
   {
     name: "code_definition",
     description: "Use VS Code language services to find definitions at a workspace file position.",
+    searchHint: "language server definition",
     risk: "read",
     concurrencySafe: true,
     requiresApproval: false,
@@ -714,6 +732,7 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
   {
     name: "code_references",
     description: "Use VS Code language services to find references at a workspace file position.",
+    searchHint: "language server references",
     risk: "search",
     concurrencySafe: true,
     requiresApproval: false,
@@ -745,6 +764,7 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
   {
     name: "code_symbols",
     description: "Use VS Code language services to list document symbols for one file or workspace symbols matching a query.",
+    searchHint: "language server symbols",
     risk: "search",
     concurrencySafe: true,
     requiresApproval: false,
@@ -781,6 +801,7 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
   {
     name: "mcp_list_resources",
     description: "List resources from explicitly configured local/on-prem MCP servers.",
+    searchHint: "list mcp resources",
     risk: "service",
     concurrencySafe: true,
     requiresApproval: false,
@@ -810,6 +831,7 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
   {
     name: "mcp_read_resource",
     description: "Read a resource from an explicitly configured local/on-prem MCP server.",
+    searchHint: "read mcp resource",
     risk: "service",
     concurrencySafe: true,
     requiresApproval: false,
@@ -847,6 +869,7 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
   {
     name: "notebook_read",
     description: "Read cells from a VS Code notebook in the current workspace.",
+    searchHint: "read jupyter notebook",
     risk: "read",
     concurrencySafe: true,
     requiresApproval: false,
@@ -872,6 +895,7 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
   {
     name: "notebook_edit_cell",
     description: "Replace one cell in a VS Code notebook after approval.",
+    searchHint: "edit jupyter notebook",
     risk: "edit",
     concurrencySafe: false,
     requiresApproval: true,
@@ -924,6 +948,7 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
   {
     name: "memory_write",
     description: "Persist a durable local memory after user approval. Use for stable user preferences or repository facts that should affect future sessions.",
+    searchHint: "save persistent memory",
     risk: "memory",
     concurrencySafe: false,
     requiresApproval: true,
@@ -971,6 +996,7 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
   {
     name: "propose_patch",
     description: "Propose a unified diff patch for user review.",
+    searchHint: "preview unified diff",
     risk: "edit",
     concurrencySafe: false,
     requiresApproval: true,
@@ -1023,6 +1049,7 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
   {
     name: "write_file",
     description: "Write a full text file after permission approval and VS Code diff preview.",
+    searchHint: "write full file",
     risk: "edit",
     concurrencySafe: false,
     requiresApproval: true,
@@ -1061,6 +1088,7 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
   {
     name: "edit_file",
     description: "Replace exact text in a workspace file after permission approval and VS Code diff preview.",
+    searchHint: "replace exact text",
     risk: "edit",
     concurrencySafe: false,
     requiresApproval: true,
@@ -1111,6 +1139,7 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
   {
     name: "open_diff",
     description: "Open a VS Code diff preview for a unified diff without applying it.",
+    searchHint: "open diff preview",
     risk: "edit",
     concurrencySafe: false,
     requiresApproval: false,
@@ -1139,6 +1168,7 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
   {
     name: "run_command",
     description: "Request approval to run a shell command in the current workspace.",
+    searchHint: "run shell command",
     risk: "command",
     concurrencySafe: false,
     requiresApproval: true,
@@ -1189,6 +1219,7 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
   {
     name: "mcp_call_tool",
     description: "Call a tool on an explicitly configured local/on-prem MCP server after permission approval.",
+    searchHint: "call mcp tool",
     risk: "command",
     concurrencySafe: false,
     requiresApproval: true,
