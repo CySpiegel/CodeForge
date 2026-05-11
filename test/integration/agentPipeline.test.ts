@@ -273,6 +273,28 @@ test("Manual rejection resumes the model loop so the assistant can choose anothe
   assert.ok(harness.events.some((event) => event.type === "toolResult" && /look for an alternative way/.test(event.text)));
 });
 
+test("Approved action execution failures are returned to the model and continue", async () => {
+  const harness = createControllerHarness({
+    mode: "agent",
+    permissionMode: "manual",
+    files: { "README.md": "# CodeForge\n" },
+    responses: [
+      { toolCalls: [toolCall("edit_file", { path: "README.md", oldText: "missing text", newText: "replacement" })] },
+      { content: "I recovered from the failed approved edit." }
+    ]
+  });
+
+  await harness.controller.sendPrompt("Edit README.");
+  const approval = harness.events.find((event) => event.type === "approvalRequested");
+  assert.ok(approval && approval.type === "approvalRequested");
+
+  await harness.controller.approve(approval.approval.id);
+  await waitForEvent(harness.events, (event) => event.type === "message" && event.role === "assistant" && /recovered from the failed approved edit/.test(event.text));
+
+  assert.equal(harness.workspace.files.get("README.md"), "# CodeForge\n");
+  assert.ok(harness.events.some((event) => event.type === "toolResult" && /oldText was not found/.test(event.text)));
+});
+
 test("Invalid native tool calls return tool errors and allow a retry", async () => {
   const harness = createControllerHarness({
     mode: "ask",

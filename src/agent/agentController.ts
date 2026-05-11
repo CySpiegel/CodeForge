@@ -1177,7 +1177,25 @@ export class AgentController {
       await this.publishState();
       void this.continueAfterToolResult();
     } catch (error) {
-      this.emit({ type: "error", text: error instanceof Error ? error.message : String(error) });
+      const message = errorMessage(error);
+      const text = toolError(message);
+      this.recordAudit(approval.action, approvalPermissionDecision(approval), "failed");
+      this.recordInspector("error", "approval", `Approved ${approval.action.type} failed.`, message);
+      if (workerWaiter) {
+        this.workerApprovalWaiters.delete(id);
+        workerWaiter.resolve(text);
+        this.emit({ type: "approvalResolved", id, accepted: true, text: `Approved action failed: ${message}` });
+        this.emit({ type: "toolResult", text });
+        this.emitContextUsage();
+        await this.publishState();
+        return;
+      }
+      this.appendToolResult(approval.toolCallId, approval.toolName ?? approval.action.type, text);
+      this.emit({ type: "approvalResolved", id, accepted: true, text: `Approved action failed: ${message}` });
+      this.emit({ type: "toolResult", text });
+      this.emitContextUsage();
+      await this.publishState();
+      void this.continueAfterToolResult();
     }
   }
 

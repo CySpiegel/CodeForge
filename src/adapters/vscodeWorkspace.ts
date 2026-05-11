@@ -227,6 +227,11 @@ function urisForCandidate(path: string, workspaceFolders: readonly vscode.Worksp
   }
 
   const cleanPath = path.replace(/^\/+/, "");
+  const prefixedFolder = workspaceFolders.find((folder) => pathHasWorkspaceFolderPrefix(cleanPath, folder.name));
+  if (prefixedFolder) {
+    const relativePath = cleanPath === prefixedFolder.name ? "" : cleanPath.slice(prefixedFolder.name.length + 1);
+    return [vscode.Uri.joinPath(prefixedFolder.uri, relativePath)];
+  }
   return workspaceFolders.map((folder) => vscode.Uri.joinPath(folder.uri, cleanPath));
 }
 
@@ -248,6 +253,11 @@ function isAbsoluteWorkspacePath(path: string): boolean {
 
 function isFileUri(path: string): boolean {
   return /^file:\/\//i.test(path);
+}
+
+function pathHasWorkspaceFolderPrefix(path: string, folderName: string): boolean {
+  const normalizedFolderName = folderName.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  return path === normalizedFolderName || path.toLowerCase().startsWith(`${normalizedFolderName.toLowerCase()}/`);
 }
 
 function absoluteUriForFolder(path: string, folder: vscode.Uri): vscode.Uri {
