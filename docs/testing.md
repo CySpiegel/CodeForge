@@ -15,6 +15,9 @@ This compiles the test project and runs:
 - core unit tests
 - tool registry validation tests
 - permission matrix tests
+- settings and session migration tests
+- `/doctor` report tests
+- package contract checks for VS Code-only/offline-first release shape
 - MCP client tests
 - deterministic `AgentController` pipeline integration tests
 
@@ -42,7 +45,7 @@ Run this before phase handoffs or packaging checks:
 npm run vscode:test
 ```
 
-This launches the VS Code extension host and catches activation, command registration, packaging, and VS Code API integration failures that unit tests cannot catch.
+This launches the VS Code extension host and catches activation, contributed command registration, default configuration, packaging, and VS Code API integration failures that unit tests cannot catch.
 
 ## Optional Live Local Endpoint Smoke
 
@@ -74,6 +77,7 @@ After `npm run compile`, launch the extension in a development host and check:
 - markdown and code highlighting render in assistant messages
 - context indicator tooltip shows exact token usage and compaction affordance
 - MCP settings can add, inspect, and delete servers
+- `/doctor` reports local endpoint, model, workspace, permission, MCP, persistence, and tooling status
 - Ask can inspect the repo
 - Plan can inspect the repo and stays read-only
 - Agent can write a test file through the configured approval mode

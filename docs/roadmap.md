@@ -301,6 +301,8 @@ Remaining reliability work moves to Phase 10.
 
 Purpose: make CodeForge dependable for daily use.
 
+Status: implemented for the extension baseline. CodeForge now includes a `/doctor` diagnostic path that checks local/offline endpoint policy, OpenAI-compatible endpoint inspection, model discovery, context metadata, native tool-call support, workspace file discovery, approval behavior, MCP configuration, persistence availability, and internal tool registration. Settings permission-mode migration and session JSONL record migration are covered in core tests, package contract tests guard against CLI/cloud/web-tool release drift, and the extension-host suite verifies activation, contributed command registration, default configuration, and safe command execution.
+
 Phase 10 entry baseline:
 - `npm test` covers the deterministic unit and integration harness, including the internal AgentController tool pipeline, permissions, tool registry metadata, and MCP controller paths.
 - `npm run vscode:test` passes against the VS Code extension host.

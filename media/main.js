@@ -76,6 +76,7 @@
   const builtInSlashCommands = [
     { name: "compact", description: "Compact the current session context", argumentHint: "[focus]" },
     { name: "context", description: "Show context usage and attached local context" },
+    { name: "doctor", description: "Check endpoint, model, workspace, permissions, and MCP status" },
     { name: "commands", description: "List workspace-local slash commands" },
     { name: "mcp", description: "List configured local MCP servers" },
     { name: "workers", description: "List local background workers" },

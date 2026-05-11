@@ -3,6 +3,28 @@ import assert from "node:assert/strict";
 import { AgentUiEvent } from "../../src/agent/agentController";
 import { createControllerHarness, toolCall, waitForEvent } from "../harness/agentControllerHarness";
 
+test("/doctor runs diagnostics without consuming a chat completion", async () => {
+  const harness = createControllerHarness({
+    mode: "agent",
+    files: {
+      "README.md": "# CodeForge\n",
+      "src/index.ts": "export const value = 1;\n"
+    },
+    responses: []
+  });
+
+  await harness.controller.sendPrompt("/doctor");
+
+  const report = harness.events.find((event) => event.type === "message" && event.role === "system" && event.text.startsWith("CodeForge Doctor:"));
+  assert.ok(report && report.type === "message");
+  assert.match(report.text, /Endpoint\n\[pass\] Network policy:/);
+  assert.match(report.text, /\[pass\] Model discovery: 1 model\(s\) returned by \/v1\/models\./);
+  assert.match(report.text, /Workspace\n\[pass\] File discovery:/);
+  assert.match(report.text, /Permissions\n\[pass\] Approval mode:/);
+  assert.match(report.text, /Tooling\n\[pass\] Internal tools:/);
+  assert.equal(harness.provider.requests.length, 0);
+});
+
 test("Ask mode executes read-only workspace tools and continues with tool results", async () => {
   const harness = createControllerHarness({
     mode: "ask",

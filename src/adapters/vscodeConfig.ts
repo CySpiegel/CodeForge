@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { assertUrlAllowed } from "../core/networkPolicy";
 import { normalizePermissionPolicy, parsePermissionRules } from "../core/permissions";
+import { normalizeSettingsPermissionMode } from "../core/settingsMigration";
 import { AgentMode, ContextLimits, McpServerConfig, NetworkPolicy, PermissionMode, PermissionPolicy, PermissionRule, ProviderProfile } from "../core/types";
 
 const sectionName = "codeforge";
@@ -38,7 +39,7 @@ export class CodeForgeConfigService {
   }
 
   getPermissionPolicy(): PermissionPolicy {
-    const mode = normalizeConfigPermissionMode(this.config().get<PermissionMode | LegacyPermissionMode>("permissions.mode", "smart"));
+    const mode = normalizeSettingsPermissionMode(this.config().get<unknown>("permissions.mode", "smart"));
     const rules = parsePermissionRules(this.config().get<readonly unknown[]>("permissions.rules", []), "workspace");
     return normalizePermissionPolicy({ mode, rules });
   }
@@ -289,25 +290,6 @@ function toMcpServerConfig(value: unknown): McpServerConfig | undefined {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-type LegacyPermissionMode = "default" | "review" | "acceptEdits" | "readOnly" | "workspaceTrusted";
-
-function normalizeConfigPermissionMode(value: unknown): PermissionMode {
-  switch (value) {
-    case "manual":
-    case "review":
-    case "readOnly":
-      return "manual";
-    case "fullAuto":
-    case "workspaceTrusted":
-      return "fullAuto";
-    case "smart":
-    case "default":
-    case "acceptEdits":
-    default:
-      return "smart";
-  }
 }
 
 function secretKey(name: string): string {
