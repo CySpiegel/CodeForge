@@ -48,7 +48,9 @@ import {
   CommandResult,
   ContextItem,
   ContextLimits,
+  LlmRequest,
   LlmProvider,
+  LlmStreamEvent,
   ModelInfo,
   OpenAiEndpointInspection,
   PermissionDecision,
@@ -258,8 +260,23 @@ const maxReadOnlyToolTurns = 12;
 const contextAutoCompactPercent = 80;
 const contextAttachmentRatio = 0.55;
 const contextToolResultTargetRatio = 0.6;
+const defaultModelStreamIdleTimeoutMs = 120_000;
+const queuedWorkLimit = 20;
 const codeForgeToolSchemaMarker = "CODEFORGE_TOOL_SCHEMA_LOADED:";
 const mcpToolSchemaMarker = "CODEFORGE_MCP_TOOL_SCHEMA_LOADED:";
+
+interface QueuedPrompt {
+  readonly type: "prompt";
+  readonly visiblePrompt: string;
+  readonly modelPrompt: string;
+}
+
+interface QueuedCompact {
+  readonly type: "compact";
+  readonly focus: string;
+}
+
+type QueuedWork = QueuedPrompt | QueuedCompact;
 
 const coreAgentToolNames = new Set([
   "list_files",
@@ -337,6 +354,7 @@ export class AgentController {
   private lastTokenUsage: TokenUsage | undefined;
   private runningAbort: AbortController | undefined;
   private continueAfterCurrentRun = false;
+  private queuedWork: QueuedWork[] = [];
   private sessionId: string | undefined;
   private sessionStartPromise: Promise<string | undefined> | undefined;
 
@@ -465,7 +483,7 @@ export class AgentController {
 
   async runDoctor(): Promise<void> {
     if (this.runningAbort) {
-      this.emit({ type: "error", text: "Wait for the current request to finish before running CodeForge Doctor." });
+      this.emit({ type: "status", text: "CodeForge is busy. Run /stop to cancel the active operation before starting Doctor." });
       return;
     }
 
@@ -512,7 +530,8 @@ export class AgentController {
         detail: errorMessage(error)
       });
     } finally {
-      this.runningAbort = undefined;
+      this.clearRunningAbort(abort);
+      this.drainQueuedWork();
     }
 
     const result = worstDoctorStatus(checks);
@@ -842,7 +861,7 @@ export class AgentController {
 
   async compactContext(focus = ""): Promise<void> {
     if (this.runningAbort) {
-      this.emit({ type: "error", text: "Wait for the current request to finish before compacting context." });
+      this.queueCompact(focus);
       return;
     }
     if (this.messages.filter((message) => message.role !== "system").length === 0) {
@@ -865,8 +884,8 @@ export class AgentController {
     } catch (error) {
       this.emit({ type: "error", text: error instanceof Error ? error.message : String(error) });
     } finally {
-      this.runningAbort = undefined;
-      void this.runQueuedContinuation();
+      this.clearRunningAbort(abort);
+      this.drainQueuedWork();
     }
   }
 
@@ -901,7 +920,7 @@ export class AgentController {
     ];
 
     let summary = "";
-    for await (const event of provider.streamChat({ model, messages: compactMessages, temperature: 0, signal: abort.signal })) {
+    for await (const event of this.streamChatWithIdleTimeout(provider, { model, messages: compactMessages, temperature: 0, signal: abort.signal }, abort, "Context compaction")) {
       if (event.type === "content") {
         summary += event.text;
       }
@@ -914,6 +933,49 @@ export class AgentController {
         content: `Compacted session context:\n\n${summary.trim()}`
       }
     ], "compact");
+  }
+
+  private async *streamChatWithIdleTimeout(
+    provider: LlmProvider,
+    request: LlmRequest,
+    abort: AbortController,
+    purpose: string
+  ): AsyncIterable<LlmStreamEvent> {
+    const iterator = provider.streamChat(request)[Symbol.asyncIterator]();
+    const idleTimeoutMs = modelStreamIdleTimeoutMs();
+
+    try {
+      while (true) {
+        if (abort.signal.aborted) {
+          throw new Error(`${purpose} was stopped.`);
+        }
+
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => {
+            abort.abort();
+            reject(new Error(`${purpose} timed out because the model stream was idle for ${formatDuration(idleTimeoutMs)}.`));
+          }, idleTimeoutMs);
+        });
+
+        let result: IteratorResult<LlmStreamEvent>;
+        try {
+          result = await Promise.race([iterator.next(), timeoutPromise]);
+        } finally {
+          if (timeout) {
+            clearTimeout(timeout);
+          }
+        }
+
+        if (result.done) {
+          return;
+        }
+        yield result.value;
+      }
+    } catch (error) {
+      void iterator.return?.().catch(() => undefined);
+      throw error;
+    }
   }
 
   reset(): void {
@@ -933,6 +995,7 @@ export class AgentController {
     this.approvals.clear();
     this.workerApprovalWaiters.clear();
     this.continueAfterCurrentRun = false;
+    this.queuedWork = [];
     this.emit({ type: "sessionReset" });
     this.emitInspector();
     this.emitContextUsage();
@@ -994,9 +1057,14 @@ export class AgentController {
     await this.runPrompt(prompt, prompt);
   }
 
-  private async runPrompt(visiblePrompt: string, modelPrompt: string): Promise<void> {
+  private async runPrompt(visiblePrompt: string, modelPrompt: string, queueIfBusy = true): Promise<void> {
     if (this.runningAbort) {
-      this.emit({ type: "error", text: "A CodeForge request is already running." });
+      if (queueIfBusy) {
+        this.queuePrompt(visiblePrompt, modelPrompt);
+      } else {
+        this.queuedWork.unshift({ type: "prompt", visiblePrompt, modelPrompt });
+        this.emit({ type: "status", text: "Queued prompt until the current CodeForge operation finishes." });
+      }
       return;
     }
 
@@ -1033,8 +1101,8 @@ export class AgentController {
       this.recordInspector("error", "run", "Request failed.", errorMessage(error));
       this.emit({ type: "error", text: error instanceof Error ? error.message : String(error) });
     } finally {
-      this.runningAbort = undefined;
-      void this.runQueuedContinuation();
+      this.clearRunningAbort(abort);
+      this.drainQueuedWork();
     }
   }
 
@@ -1188,12 +1256,12 @@ export class AgentController {
 
       this.lastTokenUsage = undefined;
       this.emitContextUsage();
-      for await (const event of provider.streamChat({
+      for await (const event of this.streamChatWithIdleTimeout(provider, {
         model,
         messages: this.messages,
         tools: requestTools,
         signal: abort.signal
-      })) {
+      }, abort, "Model request")) {
         if (event.type === "content") {
           assistantText += event.text;
           this.emit({ type: "assistantDelta", text: event.text });
@@ -2073,16 +2141,51 @@ export class AgentController {
     } catch (error) {
       this.emit({ type: "error", text: error instanceof Error ? error.message : String(error) });
     } finally {
-      this.runningAbort = undefined;
-      void this.runQueuedContinuation();
+      this.clearRunningAbort(abort);
+      this.drainQueuedWork();
     }
   }
 
-  private async runQueuedContinuation(): Promise<void> {
-    if (!this.continueAfterCurrentRun || this.runningAbort) {
+  private clearRunningAbort(abort: AbortController): void {
+    if (this.runningAbort === abort) {
+      this.runningAbort = undefined;
+    }
+  }
+
+  private queueCompact(focus: string): void {
+    this.queueWork({ type: "compact", focus });
+    this.emit({ type: "status", text: "Queued context compaction until the current CodeForge operation finishes." });
+  }
+
+  private queuePrompt(visiblePrompt: string, modelPrompt: string): void {
+    this.queueWork({ type: "prompt", visiblePrompt, modelPrompt });
+    this.emit({ type: "status", text: "Queued prompt until the current CodeForge operation finishes." });
+  }
+
+  private queueWork(work: QueuedWork): void {
+    if (this.queuedWork.length >= queuedWorkLimit) {
+      this.queuedWork.shift();
+    }
+    this.queuedWork.push(work);
+  }
+
+  private drainQueuedWork(): void {
+    if (this.runningAbort) {
       return;
     }
-    await this.continueAfterToolResult();
+    if (this.continueAfterCurrentRun) {
+      void this.continueAfterToolResult();
+      return;
+    }
+    const nextWork = this.queuedWork.shift();
+    if (!nextWork) {
+      return;
+    }
+    if (nextWork.type === "compact") {
+      void this.compactContext(nextWork.focus);
+    } else {
+      void this.runPrompt(nextWork.visiblePrompt, nextWork.modelPrompt, false);
+    }
   }
 
   private appendToolResult(toolCallId: string | undefined, toolName: string, content: string): void {
@@ -4123,6 +4226,26 @@ function approvalAcceptedText(action: AgentAction, transcriptResult: string): st
     case "mcp_call_tool":
       return `Called MCP ${action.serverId}/${action.toolName}.`;
   }
+}
+
+function modelStreamIdleTimeoutMs(): number {
+  const configured = Number(process.env.CODEFORGE_MODEL_STREAM_IDLE_TIMEOUT_MS);
+  if (Number.isFinite(configured) && configured > 0) {
+    return Math.max(10, Math.floor(configured));
+  }
+  return defaultModelStreamIdleTimeoutMs;
+}
+
+function formatDuration(milliseconds: number): string {
+  if (milliseconds < 1000) {
+    return `${milliseconds}ms`;
+  }
+  const seconds = milliseconds / 1000;
+  if (seconds < 60) {
+    return `${Number.isInteger(seconds) ? seconds : seconds.toFixed(1)}s`;
+  }
+  const minutes = seconds / 60;
+  return `${Number.isInteger(minutes) ? minutes : minutes.toFixed(1)}m`;
 }
 
 function summaryForInvocation(invocation: ToolInvocation): string {

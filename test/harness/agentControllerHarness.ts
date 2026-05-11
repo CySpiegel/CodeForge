@@ -35,6 +35,7 @@ export interface ScriptedLlmResponse {
   readonly content?: string;
   readonly toolCalls?: readonly ToolCall[];
   readonly usage?: TokenUsage;
+  readonly waitBeforeDone?: Promise<void>;
 }
 
 export class ScriptedLlmProvider implements LlmProvider {
@@ -61,6 +62,9 @@ export class ScriptedLlmProvider implements LlmProvider {
     }
     if (response.toolCalls && response.toolCalls.length > 0) {
       yield { type: "toolCalls", toolCalls: response.toolCalls };
+    }
+    if (response.waitBeforeDone) {
+      await response.waitBeforeDone;
     }
     yield { type: "done" };
   }

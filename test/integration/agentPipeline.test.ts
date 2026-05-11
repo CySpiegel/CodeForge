@@ -127,6 +127,66 @@ test("pinned active files are attached to future prompt context", async () => {
   assert.ok(harness.events.some((event) => event.type === "state" && event.state.activeContext.pinnedFiles.includes("src/pinned.ts")));
 });
 
+test("manual context compaction queues prompts instead of leaving the chat blocked", async () => {
+  let releaseCompact: () => void = () => undefined;
+  const compactGate = new Promise<void>((resolve) => {
+    releaseCompact = resolve;
+  });
+  const harness = createControllerHarness({
+    mode: "ask",
+    files: { "README.md": "# CodeForge\n" },
+    responses: [
+      { content: "Seed response." },
+      { content: "Compacted summary.", waitBeforeDone: compactGate },
+      { content: "Queued prompt completed." }
+    ]
+  });
+
+  await harness.controller.sendPrompt("Seed the session.");
+  const compactPromise = harness.controller.compactContext();
+  await waitForEvent(harness.events, (event) => event.type === "status" && /Compacting context/.test(event.text));
+
+  await harness.controller.sendPrompt("Run after compact.");
+  assert.ok(harness.events.some((event) => event.type === "status" && /Queued prompt/.test(event.text)));
+  assert.equal(harness.provider.requests.length, 2);
+  assert.equal(harness.events.some((event) => event.type === "error" && /already running|Wait for the current request/.test(event.text)), false);
+
+  releaseCompact();
+  await compactPromise;
+  await waitForEvent(harness.events, (event) => event.type === "message" && event.role === "assistant" && /Queued prompt completed/.test(event.text));
+
+  assert.equal(harness.provider.requests.length, 3);
+});
+
+test("manual context compaction idle timeout releases the running slot", async () => {
+  const previousTimeout = process.env.CODEFORGE_MODEL_STREAM_IDLE_TIMEOUT_MS;
+  process.env.CODEFORGE_MODEL_STREAM_IDLE_TIMEOUT_MS = "25";
+  try {
+    const harness = createControllerHarness({
+      mode: "ask",
+      files: { "README.md": "# CodeForge\n" },
+      responses: [
+        { content: "Seed response." },
+        { content: "Partial compact.", waitBeforeDone: new Promise<void>(() => undefined) },
+        { content: "Recovered after timeout." }
+      ]
+    });
+
+    await harness.controller.sendPrompt("Seed the session.");
+    await harness.controller.compactContext();
+    assert.ok(harness.events.some((event) => event.type === "error" && /Context compaction timed out/.test(event.text)));
+
+    await harness.controller.sendPrompt("Can you still answer?");
+    await waitForEvent(harness.events, (event) => event.type === "message" && event.role === "assistant" && /Recovered after timeout/.test(event.text));
+  } finally {
+    if (previousTimeout === undefined) {
+      delete process.env.CODEFORGE_MODEL_STREAM_IDLE_TIMEOUT_MS;
+    } else {
+      process.env.CODEFORGE_MODEL_STREAM_IDLE_TIMEOUT_MS = previousTimeout;
+    }
+  }
+});
+
 test("inspector and audit track denied side-effect tools", async () => {
   const harness = createControllerHarness({
     mode: "ask",
