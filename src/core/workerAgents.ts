@@ -3,7 +3,7 @@ import { WorkerDefinition, WorkerKind } from "./workerTypes";
 const readOnlyTools = ["list_files", "glob_files", "read_file", "search_text", "grep_text", "list_diagnostics"] as const;
 const codeIntelTools = ["code_hover", "code_definition", "code_references", "code_symbols"] as const;
 const notebookReadTools = ["notebook_read"] as const;
-const taskTools = ["tool_list", "task_create", "task_update", "task_list", "task_get"] as const;
+const taskTools = ["tool_search", "tool_list", "task_create", "task_update", "task_list", "task_get"] as const;
 const questionTools = ["ask_user_question"] as const;
 const editTools = [...readOnlyTools, ...notebookReadTools, "open_diff", "propose_patch", "write_file", "edit_file", "notebook_edit_cell"] as const;
 const verifyTools = [...readOnlyTools, ...codeIntelTools, ...notebookReadTools, "run_command", "tool_list", "task_list", "task_get", "task_update"] as const;
@@ -28,7 +28,7 @@ export const workerDefinitions: readonly WorkerDefinition[] = [
     slashCommand: "/explore",
     description: "Fast read-only codebase exploration.",
     maxTurns: 5,
-    allowedToolNames: [...readOnlyTools, ...codeIntelTools, ...notebookReadTools, "tool_list"],
+    allowedToolNames: [...readOnlyTools, ...codeIntelTools, ...notebookReadTools, "tool_search", "tool_list"],
     systemPrompt: [
       readOnlyGuard,
       "",
@@ -44,7 +44,7 @@ export const workerDefinitions: readonly WorkerDefinition[] = [
     slashCommand: "/worker plan",
     description: "Read-only implementation planning.",
     maxTurns: 6,
-    allowedToolNames: [...readOnlyTools, ...codeIntelTools, ...notebookReadTools, "tool_list", "task_list", "task_get"],
+    allowedToolNames: [...readOnlyTools, ...codeIntelTools, ...notebookReadTools, "tool_search", "tool_list", "task_list", "task_get"],
     systemPrompt: [
       readOnlyGuard,
       "",
@@ -60,7 +60,7 @@ export const workerDefinitions: readonly WorkerDefinition[] = [
     slashCommand: "/review",
     description: "Read-only bug, risk, and regression review.",
     maxTurns: 6,
-    allowedToolNames: [...readOnlyTools, ...codeIntelTools, ...notebookReadTools, "tool_list"],
+    allowedToolNames: [...readOnlyTools, ...codeIntelTools, ...notebookReadTools, "tool_search", "tool_list"],
     systemPrompt: [
       readOnlyGuard,
       "",

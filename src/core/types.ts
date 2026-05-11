@@ -176,6 +176,7 @@ export type AgentAction =
   | SpawnAgentAction
   | WorkerOutputAction
   | AskUserQuestionAction
+  | ToolSearchAction
   | ToolListAction
   | TaskCreateAction
   | TaskUpdateAction
@@ -282,6 +283,13 @@ export interface AskUserQuestionAction {
 
 export interface ToolListAction {
   readonly type: "tool_list";
+  readonly reason?: string;
+}
+
+export interface ToolSearchAction {
+  readonly type: "tool_search";
+  readonly query: string;
+  readonly limit?: number;
   readonly reason?: string;
 }
 

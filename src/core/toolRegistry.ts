@@ -451,6 +451,49 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
     }
   },
   {
+    name: "tool_search",
+    description: "Search CodeForge's deferred tool catalog and load matching tool schemas for the next model turn.",
+    risk: "read",
+    concurrencySafe: true,
+    requiresApproval: false,
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Tool capability query, or select:tool_name to load an exact tool schema." },
+        limit: { type: "number" },
+        reason: { type: "string" }
+      },
+      required: ["query"],
+      additionalProperties: false
+    },
+    parse(input) {
+      return typeof input.query === "string"
+        ? {
+          type: "tool_search",
+          query: input.query,
+          limit: optionalPositiveInteger(input.limit),
+          reason: optionalString(input.reason)
+        }
+        : undefined;
+    },
+    validate(action) {
+      if (action.type !== "tool_search") {
+        return invalidToolType(action, "tool_search");
+      }
+      const query = action.query.trim();
+      if (!query) {
+        return { ok: false, message: "tool_search query must not be empty." };
+      }
+      if (query.length > 200) {
+        return { ok: false, message: "tool_search query must be 200 characters or fewer." };
+      }
+      return validateLimit(action.limit);
+    },
+    summarize(action) {
+      return action.type === "tool_search" ? `Search tools for ${action.query}` : "Search tools";
+    }
+  },
+  {
     name: "tool_list",
     description: "List CodeForge model-facing tools, risks, approval requirements, and concurrency metadata.",
     risk: "read",
@@ -1220,6 +1263,7 @@ export function isLocalReadOnlyAction(action: AgentAction): action is ListFilesA
 export function isReadOnlyAction(action: AgentAction): boolean {
   return isLocalReadOnlyAction(action)
     || action.type === "ask_user_question"
+    || action.type === "tool_search"
     || action.type === "tool_list"
     || action.type === "task_list"
     || action.type === "task_get"

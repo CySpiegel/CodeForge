@@ -5,7 +5,7 @@ import { findWorkerDefinition, isWorkerKind, workerDefinitions } from "../../src
 const readOnlyTools = new Set(["list_files", "glob_files", "read_file", "search_text", "grep_text", "list_diagnostics"]);
 const codeIntelTools = new Set(["code_hover", "code_definition", "code_references", "code_symbols"]);
 const notebookReadTools = new Set(["notebook_read"]);
-const baseReadTools = new Set([...readOnlyTools, ...codeIntelTools, ...notebookReadTools, "tool_list"]);
+const baseReadTools = new Set([...readOnlyTools, ...codeIntelTools, ...notebookReadTools, "tool_search", "tool_list"]);
 const planTools = new Set([...baseReadTools, "task_list", "task_get"]);
 const editWorkerTools = new Set([...baseReadTools, "open_diff", "propose_patch", "write_file", "edit_file", "notebook_edit_cell", "task_create", "task_update", "task_list", "task_get", "ask_user_question"]);
 const verifyWorkerTools = new Set([...baseReadTools, "run_command", "task_list", "task_get", "task_update"]);

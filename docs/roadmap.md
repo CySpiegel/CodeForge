@@ -284,7 +284,7 @@ Exit criteria:
 
 Purpose: make the internal model/tool loop resilient enough for real repository work, not just simple one-shot actions.
 
-Status: implemented for the critical orchestration gaps found in review. CodeForge now preserves invalid native tool calls in the transcript and returns explicit tool-result errors so local models can self-correct. The top-level agent loop has an agent-grade turn budget, concurrency-safe tools are batched by tool metadata rather than only by the small local read-tool subset, runtime tool failures return tool errors instead of breaking the loop, and configured MCP tools can be exposed as concrete native model tools while still routing through the existing `mcp_call_tool` permission path.
+Status: implemented for the critical orchestration gaps found in review. CodeForge now preserves invalid native tool calls in the transcript and returns explicit tool-result errors so local models can self-correct. The top-level agent loop has an agent-grade turn budget, concurrency-safe tools are batched by tool metadata rather than only by the small local read-tool subset, runtime tool failures return tool errors instead of breaking the loop, and configured MCP tools can be exposed as concrete native model tools while still routing through the existing `mcp_call_tool` permission path. CodeForge also has Harnes-style deferred tool schema loading: local models start with a smaller core tool surface and use `tool_search` to load specialized task, code-intel, notebook, memory, and MCP schemas on demand.
 
 Scope:
 - Raise the top-level model/tool loop from a short fixed cap to separate Agent and Ask/Plan turn budgets.
@@ -293,6 +293,7 @@ Scope:
 - Batch all concurrency-safe tools by registry metadata.
 - Add `postToolFailure` local hook support for runtime tool failures.
 - Surface configured local/on-prem MCP tools as concrete native function tools in Agent mode, with execution still mediated by CodeForge permissions and approvals.
+- Add `tool_search` and deferred schema loading for the main agent and worker agents to reduce prompt/tool overhead for local models.
 
 Remaining reliability work moves to Phase 10.
 

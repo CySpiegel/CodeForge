@@ -85,6 +85,7 @@ function approvalKind(action: AgentAction): ApprovalKind {
       return "question";
     case "memory_write":
       return "memory";
+    case "tool_search":
     case "tool_list":
     case "task_list":
     case "task_get":
@@ -133,6 +134,8 @@ function titleForAction(action: AgentAction): string {
       return "Answer question";
     case "memory_write":
       return "Save memory";
+    case "tool_search":
+      return "Search tools";
     case "tool_list":
       return "List tools";
     case "task_create":
@@ -190,6 +193,7 @@ function riskForAction(action: AgentAction): string {
       return "requires user answer";
     case "memory_write":
       return "persistent local memory";
+    case "tool_search":
     case "tool_list":
     case "task_list":
     case "task_get":

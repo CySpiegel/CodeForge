@@ -34,6 +34,10 @@ test("parses and validates registered tools", () => {
   assert.deepEqual(agent, { type: "spawn_agent", agent: "review", prompt: "review src/core/types.ts", description: undefined, background: false, reason: undefined });
   assert.equal(agent ? validateAction(agent).ok : false, true);
 
+  const toolSearch = parseAction("tool_search", { query: "notebook edit", limit: 5, reason: "load deferred schema" });
+  assert.deepEqual(toolSearch, { type: "tool_search", query: "notebook edit", limit: 5, reason: "load deferred schema" });
+  assert.equal(toolSearch ? validateAction(toolSearch).ok : false, true);
+
   const memory = parseAction("memory_write", { text: "Prefer local endpoints.", scope: "workspace" });
   assert.deepEqual(memory, { type: "memory_write", text: "Prefer local endpoints.", scope: "workspace", agent: undefined, reason: undefined });
   assert.equal(memory ? validateAction(memory).ok : false, true);
@@ -112,6 +116,12 @@ test("rejects invalid structured user questions", () => {
       }
     ]
   });
+  assert.ok(action);
+  assert.equal(validateAction(action).ok, false);
+});
+
+test("rejects invalid tool search queries", () => {
+  const action = parseAction("tool_search", { query: "" });
   assert.ok(action);
   assert.equal(validateAction(action).ok, false);
 });

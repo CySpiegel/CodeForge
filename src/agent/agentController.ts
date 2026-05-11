@@ -193,6 +193,40 @@ export type AgentWorkerSummary = WorkerSummary;
 
 const maxAgentToolTurns = 25;
 const maxReadOnlyToolTurns = 12;
+const codeForgeToolSchemaMarker = "CODEFORGE_TOOL_SCHEMA_LOADED:";
+const mcpToolSchemaMarker = "CODEFORGE_MCP_TOOL_SCHEMA_LOADED:";
+
+const coreAgentToolNames = new Set([
+  "list_files",
+  "glob_files",
+  "read_file",
+  "search_text",
+  "grep_text",
+  "list_diagnostics",
+  "tool_search",
+  "tool_list",
+  "ask_user_question",
+  "spawn_agent",
+  "worker_output",
+  "open_diff",
+  "propose_patch",
+  "write_file",
+  "edit_file",
+  "run_command"
+]);
+
+const coreReadOnlyToolNames = new Set([
+  "list_files",
+  "glob_files",
+  "read_file",
+  "search_text",
+  "grep_text",
+  "list_diagnostics",
+  "tool_search",
+  "tool_list",
+  "ask_user_question",
+  "worker_output"
+]);
 
 interface InvalidNativeToolCall {
   readonly toolCall: ToolCall;
@@ -202,6 +236,12 @@ interface InvalidNativeToolCall {
 interface McpToolBinding {
   readonly serverId: string;
   readonly toolName: string;
+}
+
+interface ToolSchemaSearchResult {
+  readonly name: string;
+  readonly score: number;
+  readonly content: string;
 }
 
 export class AgentController {
@@ -1123,11 +1163,83 @@ export class AgentController {
 
   private formatToolList(): string {
     const lines = codeForgeTools.map((tool) => {
+      const loading = (this.config.getAgentMode() === "agent" ? coreAgentToolNames : coreReadOnlyToolNames).has(tool.name)
+        ? "core"
+        : "deferred";
       const approval = tool.requiresApproval ? "approval" : "auto";
       const concurrent = tool.concurrencySafe ? "concurrent" : "serial";
-      return `- ${tool.name} | risk=${tool.risk} | ${approval} | ${concurrent} | ${tool.description}`;
+      return `- ${tool.name} | ${loading} | risk=${tool.risk} | ${approval} | ${concurrent} | ${tool.description}`;
     });
-    return `tool_list\n\n${lines.join("\n")}`;
+    return `tool_list\n\n${lines.join("\n")}\n\nUse tool_search with a capability query or select:tool_name to load deferred schemas.`;
+  }
+
+  private async searchToolSchemas(action: Extract<AgentAction, { readonly type: "tool_search" }>): Promise<string> {
+    const mode = this.config.getAgentMode();
+    const allowedToolNames = new Set(toolDefinitionsForAgentMode(mode).map((tool) => tool.name));
+    const limit = Math.max(1, Math.min(action.limit ?? 8, 20));
+    const codeForgeMatches = searchCodeForgeTools(action.query, allowedToolNames);
+    const mcpMatches = mode === "agent"
+      ? await this.searchMcpToolSchemas(action.query, limit)
+      : [];
+    const combined = [...codeForgeMatches, ...mcpMatches]
+      .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))
+      .slice(0, limit);
+
+    if (combined.length === 0) {
+      return [
+        `tool_search ${action.query}`,
+        "",
+        "No matching tools found.",
+        "Try broader terms such as code symbols, task tracking, notebook, memory, mcp, command, edit, or select:tool_name."
+      ].join("\n");
+    }
+
+    return [
+      `tool_search ${action.query}`,
+      "",
+      "The following schemas are now loaded for the next model turn:",
+      "",
+      ...combined.map((match) => match.content)
+    ].join("\n");
+  }
+
+  private async searchMcpToolSchemas(query: string, limit: number): Promise<readonly ToolSchemaSearchResult[]> {
+    if (this.config.getMcpServers().length === 0) {
+      return [];
+    }
+
+    try {
+      const inspections = await inspectConfiguredMcpServers(
+        this.config.getMcpServers(),
+        this.config.getNetworkPolicy(),
+        undefined,
+        this.runningAbort?.signal
+      );
+      const selected = selectedToolNames(query);
+      const usedNames = new Set(toolDefinitions.map((tool) => tool.name));
+      const results: ToolSchemaSearchResult[] = [];
+      for (const inspection of inspections) {
+        if (inspection.error || !inspection.status.valid || !inspection.status.enabled) {
+          continue;
+        }
+        for (const tool of inspection.tools) {
+          const functionName = mcpFunctionName(inspection.status.id, tool.name, usedNames);
+          usedNames.add(functionName);
+          const score = scoreToolSearch(query, selected, functionName, tool.description, ["mcp", inspection.status.id, tool.name]);
+          if (score <= 0) {
+            continue;
+          }
+          results.push({
+            name: functionName,
+            score,
+            content: formatMcpToolSchemaSearchResult(functionName, inspection.status.id, tool)
+          });
+        }
+      }
+      return results.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name)).slice(0, Math.max(limit, 8));
+    } catch {
+      return [];
+    }
   }
 
   private async createTask(action: Extract<AgentAction, { readonly type: "task_create" }>): Promise<string> {
@@ -1252,6 +1364,12 @@ export class AgentController {
 
     if (action.type === "tool_list") {
       transcriptResult = this.formatToolList();
+      await this.runLocalHooks("postTool", action);
+      return transcriptResult;
+    }
+
+    if (action.type === "tool_search") {
+      transcriptResult = await this.searchToolSchemas(action);
       await this.runLocalHooks("postTool", action);
       return transcriptResult;
     }
@@ -1524,8 +1642,18 @@ export class AgentController {
   }
 
   private async toolDefinitionsForRequest(mode: AgentMode, mcpToolBindings: Map<string, McpToolBinding>, signal: AbortSignal): Promise<readonly ToolDefinition[]> {
-    const baseTools = [...toolDefinitionsForAgentMode(mode)];
+    const allowedTools = [...toolDefinitionsForAgentMode(mode)];
+    const loadedToolNames = new Set(mode === "agent" ? coreAgentToolNames : coreReadOnlyToolNames);
+    for (const toolName of discoveredCodeForgeToolNames(this.messages)) {
+      loadedToolNames.add(toolName);
+    }
+    const baseTools = allowedTools.filter((tool) => loadedToolNames.has(tool.name));
     if (mode !== "agent" || this.config.getMcpServers().length === 0) {
+      return baseTools;
+    }
+
+    const loadedMcpToolNames = discoveredMcpToolNames(this.messages);
+    if (loadedMcpToolNames.size === 0) {
       return baseTools;
     }
 
@@ -1545,6 +1673,9 @@ export class AgentController {
         for (const tool of inspection.tools) {
           const name = mcpFunctionName(inspection.status.id, tool.name, usedNames);
           usedNames.add(name);
+          if (!loadedMcpToolNames.has(name)) {
+            continue;
+          }
           mcpToolBindings.set(name, { serverId: inspection.status.id, toolName: tool.name });
           mcpTools.push({
             name,
@@ -2705,11 +2836,11 @@ function formatTask(task: CodeForgeTask): string {
   ].filter((line): line is string => Boolean(line)).join("\n");
 }
 
-const localAgentReadTools = ["list_files", "glob_files", "read_file", "search_text", "grep_text", "list_diagnostics"] as const;
+const localAgentReadTools = ["list_files", "glob_files", "read_file", "search_text", "grep_text", "list_diagnostics", "tool_search", "tool_list"] as const;
 const localAgentCodeIntelTools = ["code_hover", "code_definition", "code_references", "code_symbols"] as const;
 const localAgentNotebookReadTools = ["notebook_read"] as const;
 const localAgentNotebookEditTools = ["notebook_edit_cell"] as const;
-const localAgentStateTools = ["tool_list", "task_create", "task_update", "task_list", "task_get"] as const;
+const localAgentStateTools = ["tool_search", "tool_list", "task_create", "task_update", "task_list", "task_get"] as const;
 const localAgentQuestionTools = ["ask_user_question"] as const;
 const localAgentEditTools = ["open_diff", "propose_patch", "write_file", "edit_file"] as const;
 const localAgentCommandTools = ["run_command"] as const;
@@ -2957,6 +3088,114 @@ function mcpToolParameters(inputSchema: unknown): Record<string, unknown> {
   };
 }
 
+function discoveredCodeForgeToolNames(messages: readonly ChatMessage[]): ReadonlySet<string> {
+  const names = new Set<string>();
+  for (const message of messages) {
+    for (const match of message.content.matchAll(new RegExp(`${escapeRegExp(codeForgeToolSchemaMarker)}\\s*([a-zA-Z0-9_]+)`, "g"))) {
+      names.add(match[1]);
+    }
+  }
+  return names;
+}
+
+function discoveredMcpToolNames(messages: readonly ChatMessage[]): ReadonlySet<string> {
+  const names = new Set<string>();
+  for (const message of messages) {
+    for (const match of message.content.matchAll(new RegExp(`${escapeRegExp(mcpToolSchemaMarker)}\\s*([a-zA-Z0-9_]+)`, "g"))) {
+      names.add(match[1]);
+    }
+  }
+  return names;
+}
+
+function searchCodeForgeTools(query: string, allowedToolNames: ReadonlySet<string>): readonly ToolSchemaSearchResult[] {
+  const selected = selectedToolNames(query);
+  return codeForgeTools
+    .filter((tool) => allowedToolNames.has(tool.name))
+    .map((tool): ToolSchemaSearchResult => ({
+      name: tool.name,
+      score: scoreToolSearch(query, selected, tool.name, tool.description, [tool.risk, tool.requiresApproval ? "approval" : "auto"]),
+      content: formatCodeForgeToolSchemaSearchResult(tool)
+    }))
+    .filter((result) => result.score > 0)
+    .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
+}
+
+function selectedToolNames(query: string): ReadonlySet<string> {
+  const selected = new Set<string>();
+  for (const match of query.matchAll(/select:([a-zA-Z0-9_,\-\s]+)/g)) {
+    for (const name of match[1].split(/[,\s]+/)) {
+      const normalized = name.trim();
+      if (normalized) {
+        selected.add(normalized);
+      }
+    }
+  }
+  return selected;
+}
+
+function scoreToolSearch(query: string, selected: ReadonlySet<string>, name: string, description: string | undefined, tags: readonly string[]): number {
+  if (selected.size > 0) {
+    return selected.has(name) ? 1000 : 0;
+  }
+
+  const normalizedQuery = query.toLowerCase().replace(/select:[^\s]+/g, " ");
+  const terms = normalizedQuery.split(/[^a-z0-9_/-]+/).map((term) => term.trim()).filter((term) => term.length >= 2);
+  if (terms.length === 0) {
+    return 0;
+  }
+
+  const haystack = [name, description ?? "", ...tags].join(" ").toLowerCase();
+  let score = 0;
+  for (const term of terms) {
+    if (name.toLowerCase() === term) {
+      score += 80;
+    } else if (name.toLowerCase().includes(term)) {
+      score += 45;
+    } else if (haystack.includes(term)) {
+      score += 15;
+    }
+  }
+  return score;
+}
+
+function formatCodeForgeToolSchemaSearchResult(tool: (typeof codeForgeTools)[number]): string {
+  return [
+    `${codeForgeToolSchemaMarker} ${tool.name}`,
+    `Name: ${tool.name}`,
+    `Risk: ${tool.risk}`,
+    `Approval: ${tool.requiresApproval ? "required when policy asks" : "not required"}`,
+    `Concurrency: ${tool.concurrencySafe ? "safe" : "serial"}`,
+    `Description: ${tool.description}`,
+    "Schema:",
+    JSON.stringify({
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.parameters
+    }, null, 2)
+  ].join("\n");
+}
+
+function formatMcpToolSchemaSearchResult(functionName: string, serverId: string, tool: McpToolSummary): string {
+  return [
+    `${mcpToolSchemaMarker} ${functionName}`,
+    `Name: ${functionName}`,
+    `Server: ${serverId}`,
+    `MCP tool: ${tool.name}`,
+    tool.description ? `Description: ${tool.description}` : undefined,
+    "Schema:",
+    JSON.stringify({
+      name: functionName,
+      description: `Call MCP tool ${tool.name} on configured local/on-prem server ${serverId}. ${tool.description ?? ""}`.trim(),
+      parameters: mcpToolParameters(tool.inputSchema)
+    }, null, 2)
+  ].filter((line): line is string => line !== undefined).join("\n");
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function agentModeInstructions(mode: AgentMode): string {
   if (mode === "agent") {
     return [
@@ -2990,6 +3229,7 @@ const readOnlyToolNames = new Set([
   "search_text",
   "grep_text",
   "list_diagnostics",
+  "tool_search",
   "ask_user_question",
   "tool_list",
   "task_list",
@@ -3013,6 +3253,7 @@ function isInternalStateAction(action: AgentAction): boolean {
 
 function isInternalReadAction(action: AgentAction): boolean {
   return action.type === "tool_list"
+    || action.type === "tool_search"
     || action.type === "task_list"
     || action.type === "task_get"
     || action.type === "code_hover"
@@ -3078,6 +3319,8 @@ function approvalAcceptedText(action: AgentAction, transcriptResult: string): st
       return "Answered question.";
     case "tool_list":
       return "Listed tools.";
+    case "tool_search":
+      return `Loaded tool schemas for ${action.query}.`;
     case "task_create":
       return "Created task.";
     case "task_update":

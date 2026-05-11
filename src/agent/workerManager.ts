@@ -63,6 +63,24 @@ interface WorkerInvocationParseResult {
   readonly hadInvalidNativeToolCalls: boolean;
 }
 
+const codeForgeToolSchemaMarker = "CODEFORGE_TOOL_SCHEMA_LOADED:";
+const workerCoreToolNames = new Set([
+  "list_files",
+  "glob_files",
+  "read_file",
+  "search_text",
+  "grep_text",
+  "list_diagnostics",
+  "tool_search",
+  "tool_list",
+  "ask_user_question",
+  "open_diff",
+  "propose_patch",
+  "write_file",
+  "edit_file",
+  "run_command"
+]);
+
 const maxTranscriptEntries = 120;
 const maxTranscriptTextBytes = 80_000;
 const summaryEmitIntervalMs = 250;
@@ -97,6 +115,7 @@ const workerStateToolInstruction = `This worker may also use local task-state to
 
 {
   "actions": [
+    { "type": "tool_search", "query": "task tracking", "reason": "load task tool schemas" },
     { "type": "tool_list", "reason": "inspect available tools" },
     { "type": "task_create", "subject": "short task", "description": "details", "reason": "why" },
     { "type": "task_update", "taskId": "task-1234567890-abc", "status": "in_progress", "reason": "why" },
@@ -362,7 +381,6 @@ export class WorkerManager {
       });
       const contextItems = await context.build(abort.signal);
       const contextText = context.format(contextItems);
-      const allowedTools = toolsForWorker(task.definition);
       task.messages = [
         { role: "system", content: this.systemPrompt(task.definition) },
         { role: "user", content: `${task.definition.label} worker task:\n\n${task.prompt}\n\nCodeForge workspace context:\n\n${contextText}` }
@@ -376,6 +394,7 @@ export class WorkerManager {
 
         let assistantText = "";
         const nativeToolCalls: ToolCall[] = [];
+        const allowedTools = toolsForWorker(task.definition, task.messages);
         for await (const event of provider.streamChat({
           model,
           messages: task.messages,
@@ -638,8 +657,12 @@ export class WorkerManager {
   }
 }
 
-function toolsForWorker(definition: WorkerDefinition): readonly ToolDefinition[] {
-  return toolDefinitions.filter((tool) => definition.allowedToolNames.includes(tool.name));
+function toolsForWorker(definition: WorkerDefinition, messages: readonly ChatMessage[]): readonly ToolDefinition[] {
+  const loadedToolNames = new Set(workerCoreToolNames);
+  for (const toolName of discoveredWorkerToolNames(messages)) {
+    loadedToolNames.add(toolName);
+  }
+  return toolDefinitions.filter((tool) => definition.allowedToolNames.includes(tool.name) && loadedToolNames.has(tool.name));
 }
 
 function workerToolInstruction(definition: WorkerDefinition): string {
@@ -648,7 +671,7 @@ function workerToolInstruction(definition: WorkerDefinition): string {
   const canAutomate = definition.allowedToolNames.some((tool) => tool === "spawn_agent" || tool === "worker_output");
   const canRemember = definition.allowedToolNames.some((tool) => tool === "memory_write");
   const canCodeIntel = definition.allowedToolNames.some((tool) => tool === "code_hover" || tool === "code_definition" || tool === "code_references" || tool === "code_symbols");
-  const canState = definition.allowedToolNames.some((tool) => tool === "tool_list" || tool === "task_create" || tool === "task_update" || tool === "task_list" || tool === "task_get");
+  const canState = definition.allowedToolNames.some((tool) => tool === "tool_search" || tool === "tool_list" || tool === "task_create" || tool === "task_update" || tool === "task_list" || tool === "task_get");
   const canQuestion = definition.allowedToolNames.some((tool) => tool === "ask_user_question");
   const canMcpResource = definition.allowedToolNames.some((tool) => tool === "mcp_list_resources" || tool === "mcp_read_resource");
   const canNotebook = definition.allowedToolNames.some((tool) => tool === "notebook_read" || tool === "notebook_edit_cell");
@@ -668,6 +691,20 @@ function workerToolInstruction(definition: WorkerDefinition): string {
 
 function toolAllowedForWorker(definition: WorkerDefinition, toolName: AgentAction["type"]): boolean {
   return definition.allowedToolNames.includes(toolName);
+}
+
+function discoveredWorkerToolNames(messages: readonly ChatMessage[]): ReadonlySet<string> {
+  const names = new Set<string>();
+  for (const message of messages) {
+    for (const match of message.content.matchAll(new RegExp(`${escapeRegExp(codeForgeToolSchemaMarker)}\\s*([a-zA-Z0-9_]+)`, "g"))) {
+      names.add(match[1]);
+    }
+  }
+  return names;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function restoredWorkerDefinition(worker: WorkerSummary): WorkerDefinition | undefined {
