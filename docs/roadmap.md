@@ -301,6 +301,12 @@ Remaining reliability work moves to Phase 10.
 
 Purpose: make CodeForge dependable for daily use.
 
+Phase 10 entry baseline:
+- `npm test` covers the deterministic unit and integration harness, including the internal AgentController tool pipeline, permissions, tool registry metadata, and MCP controller paths.
+- `npm run vscode:test` passes against the VS Code extension host.
+- The live local endpoint smoke against `http://127.0.0.1:1234` with `google/gemma-4-e4b` verifies native tool support plus Ask, Plan, and Agent controller flows.
+- Manual UI validation is tracked in `docs/testing.md`.
+
 Scope:
 - Add extension-host integration tests for core flows.
 - Add endpoint diagnostics for LiteLLM and vLLM-compatible on-prem servers.
