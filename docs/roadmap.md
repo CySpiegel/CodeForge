@@ -225,22 +225,19 @@ Scope:
 - Enforce worker capabilities in code, not just prompts. Explore, Plan, and Review are read-only. Verify can request terminal commands only through the parent approval bridge. Implement and write-capable local agents can request edits only through the parent diff/checkpoint path.
 - Present worker output as summarized session artifacts in the VS Code extension view, not separate terminals, tmux panes, remote sessions, or website views.
 - Persist worker start/progress/completion/failure records in local session storage.
-- Add slash commands and UI affordances:
+- Add user-facing worker inspection commands and UI affordances:
   - `/workers`
-  - `/worker plan <task>`
   - `/worker output <id>`
+  - `/worker attach <id>`
   - `/worker stop <id>`
-  - `/explore <task>`
-  - `/review <scope>`
-  - `/verify <task>`
-  - `/implement <task>`
   - `/agents`
-  - `/agent-run <name> <task>`
+- Keep agent launch model-facing through `spawn_agent`, matching the Harnes split between the user `/agents` management surface and the internal Agent tool.
+- Each worker/subagent owns an isolated transcript and context window. Workers may return output to the main chat through `worker_output` or explicit `/worker attach <id>`, but they do not share the main chat context window while running.
 - Use a parent permission bridge before allowing any worker to run terminal commands, call MCP tools, or write files.
 - No worker or local agent may make hidden background edits.
 
 Exit criteria:
-- Users can run review, exploration, implementation, or workspace-local custom agents from the VS Code extension view.
+- The main agent can launch review, exploration, verification, implementation, or workspace-local custom agents through model-facing delegation while users manage the resulting workers from the VS Code extension view.
 - Worker permissions cannot exceed the parent session.
 - Worker summaries include files inspected, claims, and confidence.
 - No hidden background edits.

@@ -9,7 +9,7 @@ export interface WorkerDefinition {
   readonly label: string;
   readonly name?: string;
   readonly description: string;
-  readonly slashCommand: string;
+  readonly invocationName: string;
   readonly maxTurns: number;
   readonly allowedToolNames: readonly ToolDefinition["name"][];
   readonly systemPrompt: string;

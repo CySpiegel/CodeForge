@@ -25,7 +25,7 @@ export const workerDefinitions: readonly WorkerDefinition[] = [
   {
     kind: "explore",
     label: "Explore",
-    slashCommand: "/explore",
+    invocationName: "explore",
     description: "Fast read-only codebase exploration.",
     maxTurns: 5,
     allowedToolNames: [...readOnlyTools, ...codeIntelTools, ...notebookReadTools, "tool_search", "tool_list"],
@@ -41,7 +41,7 @@ export const workerDefinitions: readonly WorkerDefinition[] = [
   {
     kind: "plan",
     label: "Plan",
-    slashCommand: "/worker plan",
+    invocationName: "plan",
     description: "Read-only implementation planning.",
     maxTurns: 6,
     allowedToolNames: [...readOnlyTools, ...codeIntelTools, ...notebookReadTools, "tool_search", "tool_list", "task_list", "task_get"],
@@ -57,7 +57,7 @@ export const workerDefinitions: readonly WorkerDefinition[] = [
   {
     kind: "review",
     label: "Review",
-    slashCommand: "/review",
+    invocationName: "review",
     description: "Read-only bug, risk, and regression review.",
     maxTurns: 6,
     allowedToolNames: [...readOnlyTools, ...codeIntelTools, ...notebookReadTools, "tool_search", "tool_list"],
@@ -73,7 +73,7 @@ export const workerDefinitions: readonly WorkerDefinition[] = [
   {
     kind: "verify",
     label: "Verify",
-    slashCommand: "/verify",
+    invocationName: "verify",
     description: "Verification worker with approval-gated commands.",
     maxTurns: 5,
     allowedToolNames: verifyTools,
@@ -97,7 +97,7 @@ export const workerDefinitions: readonly WorkerDefinition[] = [
   {
     kind: "implement",
     label: "Implement",
-    slashCommand: "/implement",
+    invocationName: "implement",
     description: "Codebase-aware implementation worker with approval-gated edits.",
     maxTurns: 8,
     allowedToolNames: implementTools,
@@ -127,17 +127,12 @@ export function isWorkerKind(value: string): value is WorkerKind {
 export function workerCommandList(): string {
   return [
     "Worker commands:",
-    "- /workers - list local worker tasks",
-    "- /explore <task> - run a read-only exploration worker",
-    "- /review <scope> - run a read-only review worker",
-    "- /verify <task> - run a read-only verification worker",
-    "- /implement <task> - run an approval-gated implementation worker",
-    "- /worker plan <task> - run a read-only planning worker",
-    "- /worker implement <task> - run an approval-gated implementation worker",
+    "- /workers - list worker tasks",
     "- /agents - list workspace-local agent definitions",
-    "- /agent-run <name> <task> - run a workspace-local agent",
     "- /worker output <id> - show a worker transcript",
     "- /worker attach <id> - attach worker output to the main chat context",
-    "- /worker stop <id> - stop a running worker"
+    "- /worker stop <id> - stop a running worker",
+    "",
+    "Workers are launched by CodeForge through model-facing agent delegation, not direct user slash commands."
   ].join("\n");
 }

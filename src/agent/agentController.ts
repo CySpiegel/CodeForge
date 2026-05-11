@@ -72,7 +72,7 @@ import { TerminalRunner } from "../adapters/terminalRunner";
 import { CodeForgeConfigService, CodeForgeSettingsUpdate } from "../adapters/vscodeConfig";
 import { WorkerManager } from "./workerManager";
 import { findWorkerDefinition, isWorkerKind, workerCommandList } from "../core/workerAgents";
-import { WorkerDefinition, WorkerKind, WorkerSummary } from "../core/workerTypes";
+import { WorkerDefinition, WorkerSummary } from "../core/workerTypes";
 
 export type AgentUiEvent =
   | { readonly type: "sessionReset" }
@@ -2755,25 +2755,8 @@ export class AgentController {
       case "/agents":
         await this.showLocalAgents();
         return;
-      case "/agent-run":
-      case "/run-agent":
-        await this.handleLocalAgentCommand(rest);
-        return;
-      case "/explore":
-        this.startWorker("explore", rest);
-        return;
       case "/review":
-        this.startWorker("review", rest);
-        return;
-      case "/verify":
-        this.startWorker("verify", rest);
-        return;
-      case "/implement":
-        this.startWorker("implement", rest);
-        return;
-      case "/plan-worker":
-      case "/planworker":
-        this.startWorker("plan", rest);
+        await this.runReviewCommand(rest);
         return;
       case "/skills":
         await this.showLocalSkills();
@@ -2825,7 +2808,7 @@ export class AgentController {
         this.emit({
           type: "message",
           role: "system",
-          text: `Unknown command ${command}. Available commands: /new, /compact, /context, /doctor, /index, /pin, /unpin, /pins, /inspect, /audit, /capabilities, /commands, /mcp, /workers, /worker, /agents, /agent-run, /explore, /review, /verify, /implement, /skills, /skill, /memory, /clear, /stop, /history, /resume, /fork, /diff, /export, /model, /models, /agent, /ask, /plan, /manual, /smart, /full-auto, /config.`
+          text: `Unknown command ${command}. Available commands: /new, /compact, /context, /doctor, /index, /pin, /unpin, /pins, /inspect, /audit, /capabilities, /commands, /mcp, /workers, /worker, /agents, /review, /skills, /skill, /memory, /clear, /stop, /history, /resume, /fork, /diff, /export, /model, /models, /agent, /ask, /plan, /manual, /smart, /full-auto, /config.`
         });
     }
   }
@@ -2840,26 +2823,9 @@ export class AgentController {
     this.emit({ type: "message", role: "system", text: formatLocalCommandList(commands) });
   }
 
-  private startWorker(kind: WorkerKind, prompt: string): void {
-    if (kind === "custom") {
-      this.emit({ type: "error", text: "Use /agent-run <name> <task> to start a workspace-local agent." });
-      return;
-    }
-    try {
-      const worker = this.workers.spawn(kind, prompt);
-      this.emitWorkerStarted(worker);
-    } catch (error) {
-      this.emit({ type: "error", text: errorMessage(error) });
-    }
-  }
-
-  private startWorkerDefinition(definition: WorkerDefinition, prompt: string): void {
-    try {
-      const worker = this.workers.spawnDefinition(definition, prompt);
-      this.emitWorkerStarted(worker);
-    } catch (error) {
-      this.emit({ type: "error", text: errorMessage(error) });
-    }
+  private async runReviewCommand(scope: string): Promise<void> {
+    const target = scope.trim() || "the current branch, workspace changes, or relevant repo context";
+    await this.runPrompt(`/review ${scope}`.trim(), reviewCommandPrompt(target));
   }
 
   private emitWorkerStarted(worker: WorkerSummary): void {
@@ -2879,22 +2845,11 @@ export class AgentController {
   private async handleWorkerCommand(rest: string): Promise<void> {
     const [subcommandRaw, ...tail] = rest.trim().split(/\s+/);
     const subcommand = subcommandRaw?.toLowerCase() || "list";
-    if (isWorkerKind(subcommand)) {
-      this.startWorker(subcommand, tail.join(" "));
-      return;
-    }
-
     switch (subcommand) {
       case "list":
       case "status":
         this.showWorkers();
         return;
-      case "agent":
-      case "local": {
-        const [agentName, ...taskParts] = tail;
-        await this.startLocalAgent(agentName, taskParts.join(" "));
-        return;
-      }
       case "output":
       case "show":
       case "open": {
@@ -3057,36 +3012,6 @@ export class AgentController {
   private async showLocalAgents(): Promise<void> {
     const agents = await loadLocalAgents(this.workspace);
     this.emit({ type: "message", role: "system", text: formatLocalAgentList(agents) });
-  }
-
-  private async handleLocalAgentCommand(rest: string): Promise<void> {
-    const [firstRaw, ...tail] = rest.trim().split(/\s+/);
-    const first = firstRaw?.toLowerCase() || "";
-    if (!first || first === "list") {
-      await this.showLocalAgents();
-      return;
-    }
-
-    const name = first === "run" ? tail.shift()?.toLowerCase() : first;
-    const task = (first === "run" ? tail : rest.trim().split(/\s+/).slice(1)).join(" ").trim();
-    await this.startLocalAgent(name, task);
-  }
-
-  private async startLocalAgent(name: string | undefined, task: string): Promise<void> {
-    const normalizedName = name?.trim().toLowerCase();
-    if (!normalizedName) {
-      this.emit({ type: "message", role: "system", text: "Usage: /agent-run <agent-name> <task> or /agents." });
-      return;
-    }
-
-    const agents = await loadLocalAgents(this.workspace);
-    const agent = agents.find((item) => item.name.toLowerCase() === normalizedName);
-    if (!agent) {
-      this.emit({ type: "message", role: "system", text: `No local CodeForge agent named ${normalizedName}.\n\n${formatLocalAgentList(agents)}` });
-      return;
-    }
-
-    this.startWorkerDefinition(localAgentWorkerDefinition(agent), task || `Run ${agent.name} against the current repo context.`);
   }
 
   private async executeSpawnAgentAction(action: Extract<AgentAction, { readonly type: "spawn_agent" }>): Promise<string> {
@@ -3803,7 +3728,7 @@ function localAgentWorkerDefinition(agent: LocalAgent): WorkerDefinition {
     kind: "custom",
     name: agent.name,
     label,
-    slashCommand: `/agent-run ${agent.name}`,
+    invocationName: agent.name,
     description: agent.description ?? `Workspace-local CodeForge agent ${agent.name}.`,
     maxTurns: Math.max(1, Math.min(12, agent.maxTurns ?? 6)),
     allowedToolNames: localAgentAllowedToolNames(agent),
@@ -3968,10 +3893,21 @@ function contextItemKindLabel(kind: ContextItem["kind"]): string {
   }
 }
 
+function reviewCommandPrompt(scope: string): string {
+  return [
+    "You are an expert code reviewer working inside VS Code.",
+    `Review: ${scope}`,
+    "",
+    "Use repo read/search/diagnostic tools when evidence is not already available.",
+    "Do not edit files, create files, run terminal commands, or launch workers unless the user explicitly asks for implementation or verification.",
+    "Prioritize correctness bugs, regressions, unsafe assumptions, missing tests, and behavior that conflicts with the user request.",
+    "Lead with findings. Include concrete file paths and line references when available. If there are no concrete findings, say that clearly and list any remaining test gaps."
+  ].join("\n");
+}
+
 function permissionModeFromSlashCommand(command: string): PermissionMode | undefined {
   switch (command) {
     case "/manual":
-    case "/review":
     case "/read-only":
     case "/readonly":
       return "manual";

@@ -113,6 +113,9 @@ Useful built-in slash commands:
 /memory      Manage explicit local memories
 /mcp         Inspect configured MCP servers
 /workers     Show background workers
+/worker      Show, attach, or stop worker output
+/agents      List workspace-local agent definitions
+/review      Run a read-only code review prompt
 /commands    List workspace-local slash commands
 /skills      List workspace-local skills
 /settings    Open CodeForge settings

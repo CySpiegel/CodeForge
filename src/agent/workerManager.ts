@@ -241,7 +241,7 @@ export class WorkerManager {
   spawnDefinition(definition: WorkerDefinition, prompt: string): WorkerSummary {
     const trimmedPrompt = prompt.trim();
     if (!trimmedPrompt) {
-      throw new Error(`Usage: ${definition.slashCommand} <task>`);
+      throw new Error(`Worker task is required for ${definition.invocationName}.`);
     }
 
     const now = Date.now();
@@ -715,7 +715,7 @@ function restoredWorkerDefinition(worker: WorkerSummary): WorkerDefinition | und
     kind: "custom",
     label: worker.label,
     description: "Restored workspace-local CodeForge agent.",
-    slashCommand: "/agent-run",
+    invocationName: worker.label,
     maxTurns: 1,
     allowedToolNames: [],
     systemPrompt: "Restored workspace-local CodeForge agent."

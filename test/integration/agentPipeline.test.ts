@@ -387,6 +387,63 @@ test("Approved edits continue into the next planned tool request", async () => {
   assert.equal(harness.workspace.files.get("src/b.ts"), "export const b = 2;\n");
 });
 
+test("Review slash command runs a review prompt instead of spawning a worker", async () => {
+  const harness = createControllerHarness({
+    mode: "agent",
+    responses: [{ content: "No concrete findings." }]
+  });
+
+  await harness.controller.sendPrompt("/review src/agent/agentController.ts");
+
+  assert.equal(harness.provider.requests.length, 1);
+  assert.equal(harness.provider.requests[0]?.messages.some((message) => /expert code reviewer/.test(message.content)), true);
+  assert.equal(harness.provider.requests[0]?.messages.some((message) => /src\/agent\/agentController\.ts/.test(message.content)), true);
+  assert.equal(harness.events.some((event) => event.type === "workers" && event.workers.length > 0), false);
+});
+
+test("Direct worker launch slash commands are not public commands", async () => {
+  const harness = createControllerHarness({
+    mode: "agent",
+    responses: []
+  });
+
+  await harness.controller.sendPrompt("/implement fix labels");
+  await harness.controller.sendPrompt("/worker plan add a session picker");
+
+  assert.equal(harness.provider.requests.length, 0);
+  assert.equal(harness.events.some((event) => event.type === "workers" && event.workers.length > 0), false);
+  assert.equal(harness.events.some((event) =>
+    event.type === "message"
+    && event.role === "system"
+    && /Unknown command \/implement/.test(event.text)
+  ), true);
+  assert.equal(harness.events.some((event) =>
+    event.type === "message"
+    && event.role === "system"
+    && /Worker commands:/.test(event.text)
+  ), true);
+});
+
+test("Model-facing spawn_agent still launches isolated workers", async () => {
+  const harness = createControllerHarness({
+    mode: "agent",
+    responses: [
+      { toolCalls: [toolCall("spawn_agent", { agent: "explore", prompt: "inspect src/a.ts", background: true }, "call-spawn")] },
+      { content: "Delegated exploration." },
+      { content: "Scope: src/a.ts\nResult: inspected\nKey files: src/a.ts\nFiles changed: none\nIssues: none\nConfidence: high" }
+    ]
+  });
+
+  await harness.controller.sendPrompt("Use an explorer for src/a.ts.");
+  await waitForEvent(harness.events, (event) => event.type === "workers" && event.workers.length > 0);
+  await waitForEvent(harness.events, (event) => event.type === "message" && event.role === "assistant" && /Delegated/.test(event.text));
+
+  const workersEvents = harness.events.filter((event): event is Extract<AgentUiEvent, { readonly type: "workers" }> => event.type === "workers");
+  const workersEvent = workersEvents[workersEvents.length - 1];
+  assert.equal(workersEvent?.workers.length, 1);
+  assert.equal(workersEvent?.workers[0]?.label, "Explore");
+});
+
 test("Preview failures still surface an approval instead of failing the request", async () => {
   const harness = createControllerHarness({
     mode: "agent",
