@@ -92,7 +92,7 @@ async function executeLocalReadOnlyTool(invocation: ToolInvocation, options: Loc
     options.onProgress?.(progressFor(invocation, "completed"));
     return { invocation, content: result, isError: false };
   } catch (error) {
-    const content = formatToolError(error instanceof Error ? error.message : String(error));
+    const content = formatToolError(errorMessageForAction(invocation, error));
     options.onProgress?.(progressFor(invocation, "failed"));
     return { invocation, content, isError: true };
   }
@@ -136,4 +136,20 @@ function limitFor(actionLimit: number | undefined, fallback: number): number {
 
 function formatToolError(message: string): string {
   return `<tool_use_error>Error: ${message}</tool_use_error>`;
+}
+
+function errorMessageForAction(invocation: ToolInvocation, error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (invocation.action.type === "read_file" && isMissingFileError(message)) {
+    return [
+      `read_file failed for ${invocation.action.path}: ${message}`,
+      "Path discovery required: call list_files, glob_files, grep_text, or search_text to find the exact workspace-relative path before retrying read_file.",
+      "Do not retry the same guessed path unless a discovery result returns it."
+    ].join("\n");
+  }
+  return message;
+}
+
+function isMissingFileError(message: string): boolean {
+  return /(?:no such file|not found|does not exist|enoent)/i.test(message);
 }

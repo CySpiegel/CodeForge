@@ -131,7 +131,7 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
   },
   {
     name: "read_file",
-    description: "Read exact text contents from one workspace file. Use this before explaining, reviewing, editing, or reasoning about a specific file path returned by list_files, glob_files, grep_text, or active file context.",
+    description: "Read exact text contents from one workspace file. Use this only for a specific workspace-relative path from active/open-file context, user text, or prior list_files/glob_files/grep_text/search_text output. Do not guess paths.",
     searchHint: "read file contents",
     risk: "read",
     concurrencySafe: true,

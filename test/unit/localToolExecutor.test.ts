@@ -24,6 +24,22 @@ test("executes list, glob, read, and grep tools through the workspace port", asy
   assert.match(results[4].content, /src\/index.ts:1:14: error/);
 });
 
+test("read_file missing path error instructs model to discover paths before retry", async () => {
+  const workspace = new MissingFileWorkspace();
+  const [result] = await executeLocalReadOnlyTools(
+    [
+      { id: "missing", source: "native", action: { type: "read_file", path: "src/missing.ts" }, toolCallId: "missing" }
+    ],
+    { workspace, readFileMaxBytes: 1000, searchLimit: 20 }
+  );
+
+  assert.equal(result.isError, true);
+  assert.match(result.content, /read_file failed for src\/missing\.ts/);
+  assert.match(result.content, /Path discovery required/);
+  assert.match(result.content, /list_files, glob_files, grep_text, or search_text/);
+  assert.match(result.content, /Do not retry the same guessed path/);
+});
+
 class FakeWorkspace implements WorkspacePort {
   async listTextFiles(): Promise<readonly string[]> {
     return ["src/index.ts"];
@@ -37,7 +53,7 @@ class FakeWorkspace implements WorkspacePort {
     return ["src/index.ts"];
   }
 
-  async readTextFile(): Promise<string> {
+  async readTextFile(_path: string, _maxBytes: number): Promise<string> {
     return "export const hello = 1;\n";
   }
 
@@ -63,5 +79,11 @@ class FakeWorkspace implements WorkspacePort {
 
   async getDiagnostics(): Promise<readonly WorkspaceDiagnostic[]> {
     return [{ path: "src/index.ts", line: 1, character: 14, severity: "error", message: "Example diagnostic", source: "ts" }];
+  }
+}
+
+class MissingFileWorkspace extends FakeWorkspace {
+  override async readTextFile(path: string, _maxBytes: number): Promise<string> {
+    throw new Error(`No such file: ${path}`);
   }
 }
