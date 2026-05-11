@@ -127,6 +127,7 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
         allowlist: Array.isArray(message.allowlist) ? message.allowlist.filter((item): item is string => typeof item === "string") : undefined,
         mcpServers: Array.isArray(message.mcpServers) ? message.mcpServers : undefined,
         maxFiles: typeof message.maxFiles === "number" ? message.maxFiles : undefined,
+        maxTokens: typeof message.maxTokens === "number" ? message.maxTokens : undefined,
         maxBytes: typeof message.maxBytes === "number" ? message.maxBytes : undefined,
         commandTimeoutSeconds: typeof message.commandTimeoutSeconds === "number" ? message.commandTimeoutSeconds : undefined,
         commandOutputLimitBytes: typeof message.commandOutputLimitBytes === "number" ? message.commandOutputLimitBytes : undefined,
@@ -206,10 +207,9 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
               <label class="wide">API key<input id="apiKey" type="password" autocomplete="off" placeholder="Optional API key"></label>
               <label>Model<input id="modelInput" type="text" placeholder="Model ID"></label>
               <div id="modelMeta" class="settings-meta wide"></div>
-              <label>Context files<input id="maxFiles" type="number" min="1" max="200"></label>
-              <label>Context bytes<input id="maxBytes" type="number" min="8000" max="2000000"></label>
-              <label>Command timeout<input id="commandTimeout" type="number" min="5" max="1800"></label>
-              <label>Command output<input id="commandOutputLimit" type="number" min="16000" max="2000000"></label>
+              <label class="wide">Context window tokens<input id="maxTokens" type="number" min="0" max="10000000" placeholder="Auto"></label>
+              <label>Terminal timeout seconds<input id="commandTimeout" type="number" min="5" max="1800"></label>
+              <label>Terminal output tokens<input id="commandOutputLimit" type="number" min="4000" max="500000"></label>
               <label class="wide">Network allowlist<textarea id="allowlist" rows="3" placeholder="one host, origin, or CIDR per line"></textarea></label>
             </div>
           </div>
@@ -354,6 +354,7 @@ interface WebviewMessage {
   readonly permissionMode?: string;
   readonly permissionRules?: readonly unknown[];
   readonly maxFiles?: number;
+  readonly maxTokens?: number;
   readonly maxBytes?: number;
   readonly commandTimeoutSeconds?: number;
   readonly commandOutputLimitBytes?: number;

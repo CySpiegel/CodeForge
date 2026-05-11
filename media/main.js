@@ -46,8 +46,7 @@
     apiKey: document.getElementById("apiKey"),
     modelInput: document.getElementById("modelInput"),
     modelMeta: document.getElementById("modelMeta"),
-    maxFiles: document.getElementById("maxFiles"),
-    maxBytes: document.getElementById("maxBytes"),
+    maxTokens: document.getElementById("maxTokens"),
     commandTimeout: document.getElementById("commandTimeout"),
     commandOutputLimit: document.getElementById("commandOutputLimit"),
     permissionModeButton: document.getElementById("permissionModeButton"),
@@ -422,10 +421,9 @@
       model: elements.modelInput?.value.trim() || "",
       allowlist: splitLines(elements.allowlist?.value || ""),
       mcpServers,
-      maxFiles: Number(elements.maxFiles?.value),
-      maxBytes: Number(elements.maxBytes?.value),
+      maxTokens: Number(elements.maxTokens?.value || 0),
       commandTimeoutSeconds: Number(elements.commandTimeout?.value),
-      commandOutputLimitBytes: Number(elements.commandOutputLimit?.value),
+      commandOutputLimitBytes: tokensToBytes(elements.commandOutputLimit?.value),
       permissionRules
     });
   });
@@ -579,10 +577,13 @@
       return;
     }
     renderEndpointFields();
-    setValue(elements.maxFiles, String(state.settings?.maxFiles ?? 24));
-    setValue(elements.maxBytes, String(state.settings?.maxBytes ?? 120000));
+    if (elements.maxTokens) {
+      const discoveredTokens = state.selectedModelInfo?.contextLength || findModelInfo(state.selectedModel || "")?.contextLength;
+      elements.maxTokens.placeholder = discoveredTokens ? `Auto (${formatNumber(discoveredTokens)})` : "Auto";
+    }
+    setValue(elements.maxTokens, state.settings?.maxTokens ? String(state.settings.maxTokens) : "");
     setValue(elements.commandTimeout, String(state.settings?.commandTimeoutSeconds ?? 120));
-    setValue(elements.commandOutputLimit, String(state.settings?.commandOutputLimitBytes ?? 200000));
+    setValue(elements.commandOutputLimit, String(estimatedTokens(state.settings?.commandOutputLimitBytes ?? 200000)));
     renderPermissionModePicker();
     setValue(elements.permissionRules, JSON.stringify(state.settings?.permissionRules || [], null, 2));
     if (!mcpDraftDirty) {
@@ -1170,12 +1171,18 @@
       return;
     }
     const model = state?.selectedModelInfo || findModelInfo(state?.selectedModel || "");
+    const contextOverride = state?.settings?.maxTokens;
     if (!model) {
-      elements.modelMeta.textContent = "Model metadata will update after model discovery.";
+      elements.modelMeta.textContent = contextOverride
+        ? `Context override: ${formatNumber(contextOverride)} tokens.`
+        : "Model metadata will update after model discovery.";
       return;
     }
 
     const details = [];
+    if (contextOverride) {
+      details.push(`context override ${formatNumber(contextOverride)} tokens`);
+    }
     if (model.contextLength) {
       details.push(`context ${formatNumber(model.contextLength)} tokens`);
     }
@@ -1297,6 +1304,10 @@
 
   function estimatedTokens(bytes) {
     return Math.max(0, Math.ceil((Number(bytes) || 0) / 4));
+  }
+
+  function tokensToBytes(tokens) {
+    return Math.max(0, Math.round((Number(tokens) || 0) * 4));
   }
 
   function replaceOptions(select, options, selectedValue) {

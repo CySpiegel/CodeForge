@@ -295,14 +295,23 @@
           "default": 24,
           "minimum": 1,
           "maximum": 200,
-          "description": "Maximum number of repo context files CodeForge may include."
+          "description": "Internal safety cap for automatic repo context items.",
+          "deprecationMessage": "CodeForge no longer exposes this in its settings UI. Use tool-based search/glob/read and the context window token limit."
+        },
+        "codeforge.context.maxTokens": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 10000000,
+          "description": "Manual context window override in tokens. Set to 0 to use the selected model context length returned by /v1/models."
         },
         "codeforge.context.maxBytes": {
           "type": "number",
           "default": 120000,
           "minimum": 8000,
           "maximum": 2000000,
-          "description": "Maximum bytes of local context included in one model request."
+          "description": "Legacy fallback context byte budget used when no token context length is configured or discovered.",
+          "deprecationMessage": "Use codeforge.context.maxTokens instead."
         },
         "codeforge.commands.timeoutSeconds": {
           "type": "number",

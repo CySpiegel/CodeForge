@@ -28,9 +28,11 @@ export class CodeForgeConfigService {
   }
 
   getContextLimits(): ContextLimits {
+    const maxTokens = clampNumber(this.config().get<number>("context.maxTokens", 0), 0, 10_000_000, 0);
     return {
       maxFiles: clampNumber(this.config().get<number>("context.maxFiles", 24), 1, 200, 24),
-      maxBytes: clampNumber(this.config().get<number>("context.maxBytes", 120000), 8000, 2_000_000, 120000)
+      maxBytes: clampNumber(this.config().get<number>("context.maxBytes", 120000), 8000, 2_000_000, 120000),
+      maxTokens: maxTokens > 0 ? maxTokens : undefined
     };
   }
 
@@ -149,6 +151,9 @@ export class CodeForgeConfigService {
     if (settings.maxFiles !== undefined) {
       await config.update("context.maxFiles", clampNumber(settings.maxFiles, 1, 200, 24), vscode.ConfigurationTarget.Global);
     }
+    if (settings.maxTokens !== undefined) {
+      await config.update("context.maxTokens", clampNumber(settings.maxTokens, 0, 10_000_000, 0), vscode.ConfigurationTarget.Global);
+    }
     if (settings.maxBytes !== undefined) {
       await config.update("context.maxBytes", clampNumber(settings.maxBytes, 8000, 2_000_000, 120000), vscode.ConfigurationTarget.Global);
     }
@@ -170,17 +175,28 @@ export class CodeForgeConfigService {
   }
 
   private config(): vscode.WorkspaceConfiguration {
-    return vscode.workspace.getConfiguration(sectionName, this.primaryRepoFolderUri());
+    return vscode.workspace.getConfiguration(sectionName, this.primaryRepoFolder());
   }
 
   private async updateRepoSetting(key: string, value: unknown): Promise<void> {
-    const folder = this.primaryRepoFolderUri();
+    const folder = this.primaryRepoFolder();
     const config = vscode.workspace.getConfiguration(sectionName, folder);
-    await config.update(key, value, folder ? vscode.ConfigurationTarget.WorkspaceFolder : vscode.ConfigurationTarget.Global);
+    if (!folder) {
+      await config.update(key, value, vscode.ConfigurationTarget.Global);
+      return;
+    }
+    try {
+      await config.update(key, value, vscode.ConfigurationTarget.Workspace);
+    } catch (error) {
+      if (!isConfigurationTargetWriteError(error)) {
+        throw error;
+      }
+      await vscode.workspace.getConfiguration(sectionName).update(key, value, vscode.ConfigurationTarget.Global);
+    }
   }
 
-  private primaryRepoFolderUri(): vscode.Uri | undefined {
-    return vscode.workspace.workspaceFolders?.[0]?.uri;
+  private primaryRepoFolder(): vscode.WorkspaceFolder | undefined {
+    return vscode.workspace.workspaceFolders?.[0];
   }
 
   private async createOpenAiProfile(profile: {
@@ -253,6 +269,7 @@ export interface CodeForgeSettingsUpdate {
   readonly model: string;
   readonly allowlist: readonly string[];
   readonly maxFiles: number;
+  readonly maxTokens: number;
   readonly maxBytes: number;
   readonly commandTimeoutSeconds: number;
   readonly commandOutputLimitBytes: number;
@@ -295,6 +312,11 @@ function sameStringArray(left: readonly string[], right: readonly string[]): boo
 
 function isAgentMode(value: unknown): value is AgentMode {
   return value === "agent" || value === "ask" || value === "plan";
+}
+
+function isConfigurationTargetWriteError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /Unable to write to (Workspace|Folder) Settings|folder resource scope|workspace folder/i.test(message);
 }
 
 export function normalizeMcpServerConfigs(value: readonly unknown[] | undefined): readonly McpServerConfig[] {

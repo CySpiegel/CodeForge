@@ -3,6 +3,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
 import { DiffPreviewProvider, DiffService } from "../../src/adapters/diffService";
+import { CodeForgeConfigService } from "../../src/adapters/vscodeConfig";
 
 export async function run(): Promise<void> {
   const extension = vscode.extensions.getExtension("codeforge.codeforge");
@@ -25,6 +26,7 @@ export async function run(): Promise<void> {
   await vscode.commands.executeCommand("codeforge.cancel");
 
   await assertVsCodeEditPipelineAppliesChanges();
+  await assertCodeForgeConfigWritesRepoSettings();
 }
 
 interface PackageJson {
@@ -67,4 +69,43 @@ async function readWorkspaceText(relativePath: string): Promise<string> {
   const folder = vscode.workspace.workspaceFolders?.[0]?.uri;
   assert.ok(folder, "Expected a VS Code workspace folder.");
   return Buffer.from(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(folder, relativePath))).toString("utf8");
+}
+
+async function assertCodeForgeConfigWritesRepoSettings(): Promise<void> {
+  const config = new CodeForgeConfigService(fakeSecretStorage());
+  const model = `codeforge-suite-model-${Date.now()}`;
+  try {
+    await config.setModel(model);
+    await config.setAgentMode("ask");
+    await config.updateSettings({ permissionMode: "fullAuto", maxTokens: 131072 });
+
+    assert.equal(config.getConfiguredModel(), model);
+    assert.equal(config.getAgentMode(), "ask");
+    assert.equal(config.getPermissionPolicy().mode, "fullAuto");
+    assert.equal(config.getContextLimits().maxTokens, 131072);
+  } finally {
+    await resetConfigValue("model");
+    await resetConfigValue("agent.mode");
+    await resetConfigValue("permissions.mode");
+    await resetConfigValue("context.maxTokens");
+  }
+}
+
+function fakeSecretStorage(): vscode.SecretStorage {
+  const emitter = new vscode.EventEmitter<vscode.SecretStorageChangeEvent>();
+  return {
+    get: async () => undefined,
+    store: async () => undefined,
+    delete: async () => undefined,
+    keys: async () => [],
+    onDidChange: emitter.event
+  } as vscode.SecretStorage;
+}
+
+async function resetConfigValue(key: string): Promise<void> {
+  const folder = vscode.workspace.workspaceFolders?.[0];
+  await Promise.allSettled([
+    vscode.workspace.getConfiguration("codeforge", folder).update(key, undefined, vscode.ConfigurationTarget.Workspace),
+    vscode.workspace.getConfiguration("codeforge").update(key, undefined, vscode.ConfigurationTarget.Global)
+  ]);
 }

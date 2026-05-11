@@ -127,6 +127,7 @@ export interface PermissionDecision {
 export interface ContextLimits {
   readonly maxFiles: number;
   readonly maxBytes: number;
+  readonly maxTokens?: number;
 }
 
 export interface ContextItem {

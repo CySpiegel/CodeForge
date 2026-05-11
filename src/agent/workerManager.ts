@@ -572,14 +572,14 @@ export class WorkerManager {
 
   private effectiveContextLimits(): ContextLimits {
     const configured = this.options.contextLimits();
-    const selectedModel = this.options.selectedModelInfo();
-    if (!selectedModel?.contextLength) {
+    const maxTokens = configured.maxTokens ?? this.options.selectedModelInfo()?.contextLength;
+    if (!maxTokens) {
       return configured;
     }
-    const usableTokens = Math.max(1024, Math.floor(selectedModel.contextLength * 0.65));
+    const usableTokens = Math.max(1024, Math.floor(maxTokens * 0.65));
     return {
       ...configured,
-      maxBytes: Math.min(configured.maxBytes, Math.max(8000, usableTokens * 4))
+      maxBytes: Math.max(8000, usableTokens * 4)
     };
   }
 

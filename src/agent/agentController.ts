@@ -176,6 +176,7 @@ export interface AgentSettingsSummary {
   readonly agentMode: string;
   readonly allowlist: readonly string[];
   readonly maxFiles: number;
+  readonly maxTokens?: number;
   readonly maxBytes: number;
   readonly commandTimeoutSeconds: number;
   readonly commandOutputLimitBytes: number;
@@ -3486,6 +3487,7 @@ export class AgentController {
         agentMode,
         allowlist: networkPolicy.allowlist,
         maxFiles: contextLimits.maxFiles,
+        maxTokens: contextLimits.maxTokens,
         maxBytes: contextLimits.maxBytes,
         commandTimeoutSeconds: this.config.getCommandTimeoutSeconds(),
         commandOutputLimitBytes: this.config.getCommandOutputLimitBytes(),
@@ -3563,12 +3565,12 @@ export class AgentController {
 
   private effectiveContextLimits(): ContextLimits {
     const configured = this.config.getContextLimits();
-    const selectedModel = this.selectedModelInfo();
-    if (!selectedModel?.contextLength) {
+    const maxTokens = this.contextWindowMaxTokens();
+    if (!maxTokens) {
       return configured;
     }
 
-    const usableTokens = Math.max(1024, Math.floor(selectedModel.contextLength * contextAttachmentRatio));
+    const usableTokens = Math.max(1024, Math.floor(maxTokens * contextAttachmentRatio));
     return {
       ...configured,
       maxBytes: Math.max(8000, usableTokens * 4)
@@ -3576,7 +3578,7 @@ export class AgentController {
   }
 
   private contextWindowMaxTokens(): number | undefined {
-    return this.selectedModelInfo()?.contextLength;
+    return this.config.getContextLimits().maxTokens ?? this.selectedModelInfo()?.contextLength;
   }
 
   private contextWindowMaxBytes(): number {
