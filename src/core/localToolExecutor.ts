@@ -144,6 +144,7 @@ function errorMessageForAction(invocation: ToolInvocation, error: unknown): stri
     return [
       `read_file failed for ${invocation.action.path}: ${message}`,
       "Path discovery required: call list_files, glob_files, grep_text, or search_text to find the exact repo-relative path before retrying read_file.",
+      "If the path came from grep_text, search_text, or diagnostics output, pass only the repo-relative file path without :line or :column.",
       "Do not retry the same guessed path unless a discovery result returns it."
     ].join("\n");
   }

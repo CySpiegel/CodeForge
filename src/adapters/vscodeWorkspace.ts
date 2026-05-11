@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { ContextItem, DiagnosticSeverity, SearchResult, WorkspaceDiagnostic, WorkspacePort } from "../core/types";
 import { validateWorkspaceGlob, validateWorkspacePath } from "../core/toolRegistry";
+import { workspacePathCandidates } from "../core/workspacePaths";
 
 const excludePattern = "{**/.git/**,**/node_modules/**,**/out/**,**/dist/**,**/build/**,**/.vscode-test/**,**/*.png,**/*.jpg,**/*.jpeg,**/*.gif,**/*.webp,**/*.pdf,**/*.zip,**/*.wasm}";
 
@@ -30,9 +31,17 @@ export class VsCodeWorkspacePort implements WorkspacePort {
     if (signal?.aborted) {
       throw new Error("File read was cancelled.");
     }
-    const uri = resolveWorkspaceUri(path);
-    const bytes = await vscode.workspace.fs.readFile(uri);
-    return Buffer.from(bytes).subarray(0, maxBytes).toString("utf8");
+    const candidates = resolveWorkspaceUriCandidates(path);
+    const failures: string[] = [];
+    for (const uri of candidates) {
+      try {
+        const bytes = await vscode.workspace.fs.readFile(uri);
+        return Buffer.from(bytes).subarray(0, maxBytes).toString("utf8");
+      } catch (error) {
+        failures.push(`${toWorkspacePath(uri) ?? uri.fsPath}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    throw new Error(`Could not read ${path} from the open repo folder. Tried ${failures.join("; ") || "no valid workspace path candidates"}.`);
   }
 
   async getActiveTextDocument(maxBytes: number): Promise<ContextItem | undefined> {
@@ -165,30 +174,60 @@ export class VsCodeWorkspacePort implements WorkspacePort {
 }
 
 export function resolveWorkspaceUri(path: string): vscode.Uri {
-  const validation = validateWorkspacePath(path);
-  if (!validation.ok) {
-    throw new Error(validation.message ?? `Refusing to access unsafe workspace path: ${path}`);
-  }
+  return resolveWorkspaceUriCandidates(path)[0];
+}
 
+function resolveWorkspaceUriCandidates(path: string): readonly vscode.Uri[] {
   const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
   if (workspaceFolders.length === 0) {
     throw new Error("CodeForge cannot see an open repo folder. Open the repo folder with File > Open Folder, then reload the CodeForge view.");
   }
 
-  const normalizedPath = path.trim().replace(/\\/g, "/");
-  if (isAbsoluteWorkspacePath(normalizedPath)) {
-    for (const folder of workspaceFolders) {
-      const uri = absoluteUriForFolder(normalizedPath, folder.uri);
-      if (toWorkspacePath(uri)) {
-        return uri;
+  const candidates: vscode.Uri[] = [];
+  const seen = new Set<string>();
+  const folderNames = workspaceFolders.map((folder) => folder.name);
+  for (const candidate of workspacePathCandidates(path, folderNames)) {
+    const validation = isFileUri(candidate) ? validateWorkspacePath(vscode.Uri.parse(candidate).fsPath) : validateWorkspacePath(candidate);
+    if (!validation.ok) {
+      continue;
+    }
+
+    for (const uri of urisForCandidate(candidate, workspaceFolders)) {
+      if (!toWorkspacePath(uri)) {
+        continue;
+      }
+      const key = uri.toString();
+      if (!seen.has(key)) {
+        seen.add(key);
+        candidates.push(uri);
       }
     }
-    throw new Error(`Path is outside the open repo folder(s): ${path}. Open repo folders: ${workspaceFolders.map((folder) => folder.name).join(", ")}.`);
   }
 
-  const workspaceFolder = workspaceFolders[0];
-  const cleanPath = normalizedPath.replace(/^\/+/, "");
-  return vscode.Uri.joinPath(workspaceFolder.uri, cleanPath);
+  if (candidates.length === 0) {
+    const validation = validateWorkspacePath(path);
+    throw new Error(validation.message ?? `Refusing to access unsafe workspace path: ${path}`);
+  }
+  return candidates;
+}
+
+function urisForCandidate(path: string, workspaceFolders: readonly vscode.WorkspaceFolder[]): readonly vscode.Uri[] {
+  if (isFileUri(path)) {
+    return [vscode.Uri.parse(path)];
+  }
+
+  if (isAbsoluteWorkspacePath(path)) {
+    for (const folder of workspaceFolders) {
+      const uri = absoluteUriForFolder(path, folder.uri);
+      if (toWorkspacePath(uri)) {
+        return [uri];
+      }
+    }
+    return [];
+  }
+
+  const cleanPath = path.replace(/^\/+/, "");
+  return workspaceFolders.map((folder) => vscode.Uri.joinPath(folder.uri, cleanPath));
 }
 
 export function toWorkspacePath(uri: vscode.Uri): string | undefined {
@@ -205,6 +244,10 @@ function isIgnoredDocument(document: vscode.TextDocument): boolean {
 
 function isAbsoluteWorkspacePath(path: string): boolean {
   return path.startsWith("/") || /^[A-Za-z]:\//.test(path);
+}
+
+function isFileUri(path: string): boolean {
+  return /^file:\/\//i.test(path);
 }
 
 function absoluteUriForFolder(path: string, folder: vscode.Uri): vscode.Uri {

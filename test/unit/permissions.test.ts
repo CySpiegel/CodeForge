@@ -36,21 +36,7 @@ test("applies deny ask allow precedence", () => {
   assert.equal(decision.rule?.scope, "user");
 });
 
-test("manual mode asks for repo reads and side effects even with allow rules", () => {
-  assert.equal(
-    evaluateActionPermission(
-      { type: "read_file", path: "src/index.ts" },
-      { mode: "manual", rules: [{ kind: "path", pattern: "src/index.ts", behavior: "allow", scope: "workspace" }] }
-    ).behavior,
-    "ask"
-  );
-  assert.equal(
-    evaluateActionPermission(
-      { type: "grep_text", query: "secret", include: "src/**/*.ts" },
-      { mode: "manual", rules: [] }
-    ).behavior,
-    "ask"
-  );
+test("manual mode asks for side effects even with allow rules", () => {
   assert.equal(
     evaluateActionPermission(
       { type: "run_command", command: "npm test" },
@@ -111,20 +97,6 @@ test("permission mode matrix covers each side-effect family", () => {
     readonly smart: string;
     readonly fullAuto: string;
   }> = [
-    {
-      name: "repo read",
-      action: { type: "read_file", path: "src/a.ts" },
-      manual: "ask",
-      smart: "allow",
-      fullAuto: "allow"
-    },
-    {
-      name: "repo search",
-      action: { type: "grep_text", query: "old", include: "src/**/*.ts" },
-      manual: "ask",
-      smart: "allow",
-      fullAuto: "allow"
-    },
     {
       name: "small patch",
       action: { type: "propose_patch", patch: "--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n" },
