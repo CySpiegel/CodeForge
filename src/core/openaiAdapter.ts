@@ -20,6 +20,7 @@ interface OpenAiStreamChunk {
   readonly choices?: ReadonlyArray<{
     readonly delta?: {
       readonly content?: string;
+      readonly reasoning_content?: string;
       readonly tool_calls?: readonly OpenAiToolCallDelta[];
     };
     readonly finish_reason?: string | null;
@@ -229,6 +230,9 @@ export class OpenAiCompatibleProvider implements LlmProvider {
       if (content) {
         yield { type: "content", text: content };
       }
+      if (choice.delta?.reasoning_content) {
+        yield { type: "progress" };
+      }
 
       for (const delta of choice.delta?.tool_calls ?? []) {
         const index = delta.index ?? 0;
@@ -274,12 +278,13 @@ export class OpenAiCompatibleProvider implements LlmProvider {
   }
 
   private fetchChatStream(url: string, request: LlmRequest, includeUsage: boolean): Promise<Response> {
+    const messages = ensureOpenAiToolResultPairing(request.messages);
     return fetch(url, {
       method: "POST",
       headers: this.headers(),
       body: JSON.stringify({
         model: request.model,
-        messages: request.messages.map(toOpenAiMessage),
+        messages: messages.map(toOpenAiMessage),
         temperature: request.temperature ?? 0.2,
         stream: true,
         ...(includeUsage ? { stream_options: { include_usage: true } } : {}),
@@ -317,6 +322,59 @@ function toOpenAiMessage(message: ChatMessage): Record<string, unknown> {
   }
 
   return result;
+}
+
+export function ensureOpenAiToolResultPairing(messages: readonly ChatMessage[]): readonly ChatMessage[] {
+  const repaired: ChatMessage[] = [];
+  let index = 0;
+
+  while (index < messages.length) {
+    const message = messages[index];
+    if (!message) {
+      index++;
+      continue;
+    }
+
+    if (message.role === "tool") {
+      index++;
+      continue;
+    }
+
+    repaired.push(message);
+    if (message.role !== "assistant" || !message.toolCalls || message.toolCalls.length === 0) {
+      index++;
+      continue;
+    }
+
+    const toolMessages: ChatMessage[] = [];
+    let nextIndex = index + 1;
+    while (nextIndex < messages.length && messages[nextIndex]?.role === "tool") {
+      toolMessages.push(messages[nextIndex]);
+      nextIndex++;
+    }
+
+    const usedToolMessageIndexes = new Set<number>();
+    for (const toolCall of message.toolCalls) {
+      const matchingIndex = toolMessages.findIndex((toolMessage, toolMessageIndex) =>
+        !usedToolMessageIndexes.has(toolMessageIndex) && toolMessage.toolCallId === toolCall.id
+      );
+      if (matchingIndex >= 0) {
+        usedToolMessageIndexes.add(matchingIndex);
+        repaired.push(toolMessages[matchingIndex]);
+      } else {
+        repaired.push({
+          role: "tool",
+          name: toolCall.name,
+          toolCallId: toolCall.id,
+          content: `<tool_use_error>Error: Tool call ${toolCall.name} was interrupted before CodeForge produced a result. Continue by inspecting current state before retrying.</tool_use_error>`
+        });
+      }
+    }
+
+    index = nextIndex;
+  }
+
+  return repaired;
 }
 
 function toOpenAiTool(tool: ToolDefinition): Record<string, unknown> {

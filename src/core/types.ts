@@ -30,6 +30,7 @@ export interface LlmRequest {
 
 export type LlmStreamEvent =
   | { readonly type: "content"; readonly text: string }
+  | { readonly type: "progress" }
   | { readonly type: "toolCalls"; readonly toolCalls: readonly ToolCall[] }
   | { readonly type: "usage"; readonly usage: TokenUsage }
   | { readonly type: "done" };

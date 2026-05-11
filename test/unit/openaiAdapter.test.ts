@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { OpenAiCompatibleProvider } from "../../src/core/openaiAdapter";
+import { ensureOpenAiToolResultPairing, OpenAiCompatibleProvider } from "../../src/core/openaiAdapter";
 
 test("streams OpenAI-compatible chat completion chunks", async () => {
   const originalFetch = globalThis.fetch;
@@ -90,6 +90,41 @@ test("stops streaming when OpenAI done event arrives even if the response body s
   }
 });
 
+test("treats streamed reasoning chunks as model progress", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const encoder = new TextEncoder();
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: "thinking" } }] })}\n\n`));
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: "call-1", type: "function", function: { name: "read_file", arguments: "{\"path\":\"README.md\"}" } }] } }] })}\n\n`));
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      }
+    });
+
+    return new Response(stream, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" }
+    });
+  };
+
+  try {
+    const provider = new OpenAiCompatibleProvider(
+      { id: "test", label: "Test", baseUrl: "http://127.0.0.1:4000/v1" },
+      { allowlist: [] }
+    );
+    const events = [];
+    for await (const event of provider.streamChat({ model: "local-model", messages: [{ role: "user", content: "hi" }] })) {
+      events.push(event);
+    }
+    assert.equal(events.some((event) => event.type === "progress"), true);
+    assert.equal(events.some((event) => event.type === "toolCalls"), true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("serializes assistant tool calls and tool results", async () => {
   const originalFetch = globalThis.fetch;
   let postedBody = "";
@@ -138,6 +173,29 @@ test("serializes assistant tool calls and tool results", async () => {
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("repairs interrupted assistant tool-call turns before OpenAI requests", () => {
+  const repaired = ensureOpenAiToolResultPairing([
+    {
+      role: "assistant",
+      content: "",
+      toolCalls: [
+        { id: "call-a", name: "edit_file", argumentsJson: "{\"path\":\"a.ts\"}" },
+        { id: "call-b", name: "edit_file", argumentsJson: "{\"path\":\"b.ts\"}" }
+      ]
+    },
+    { role: "tool", content: "edit_file a.ts\n\nEdited a.ts", name: "edit_file", toolCallId: "call-a" },
+    { role: "user", content: "continue" }
+  ]);
+
+  assert.equal(repaired.length, 4);
+  assert.equal(repaired[1]?.role, "tool");
+  assert.equal(repaired[1]?.toolCallId, "call-a");
+  assert.equal(repaired[2]?.role, "tool");
+  assert.equal(repaired[2]?.toolCallId, "call-b");
+  assert.match(repaired[2]?.content ?? "", /interrupted before CodeForge produced a result/);
+  assert.equal(repaired[3]?.role, "user");
 });
 
 test("reads context metadata from OpenAI API model discovery", async () => {

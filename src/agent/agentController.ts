@@ -280,6 +280,7 @@ interface QueuedCompact {
 interface PendingContinuation {
   readonly prompt?: string;
   readonly statusText: string;
+  readonly remainingInvocations?: readonly ToolInvocation[];
 }
 
 type QueuedWork = QueuedPrompt | QueuedCompact;
@@ -347,6 +348,7 @@ export class AgentController {
   private readonly events = new EventEmitter();
   private readonly approvals = new ApprovalQueue();
   private readonly workerApprovalWaiters = new Map<string, { readonly workerId: string; readonly resolve: (text: string) => void }>();
+  private readonly approvalContinuations = new Map<string, readonly ToolInvocation[]>();
   private readonly capabilityCache = new Map<string, ProviderCapabilities>();
   private readonly endpointCache = new Map<string, OpenAiEndpointInspection>();
   private readonly selectedModelByProfile = new Map<string, string>();
@@ -991,33 +993,53 @@ export class AgentController {
   ): AsyncIterable<LlmStreamEvent> {
     const iterator = provider.streamChat(request)[Symbol.asyncIterator]();
     const idleTimeoutMs = modelStreamIdleTimeoutMs();
+    const statusIntervalMs = 10_000;
+    let lastActivityAt = Date.now();
 
     try {
+      let nextResult = iterator.next();
       while (true) {
         if (abort.signal.aborted) {
           throw new Error(`${purpose} was stopped.`);
         }
 
         let timeout: ReturnType<typeof setTimeout> | undefined;
+        let heartbeat: ReturnType<typeof setTimeout> | undefined;
+        const remainingBeforeTimeoutMs = Math.max(1, idleTimeoutMs - (Date.now() - lastActivityAt));
         const timeoutPromise = new Promise<never>((_, reject) => {
           timeout = setTimeout(() => {
             abort.abort();
             reject(new Error(`${purpose} timed out because the model stream was idle for ${formatDuration(idleTimeoutMs)}.`));
-          }, idleTimeoutMs);
+          }, remainingBeforeTimeoutMs);
+        });
+        const heartbeatPromise = new Promise<"heartbeat">((resolve) => {
+          heartbeat = setTimeout(() => resolve("heartbeat"), statusIntervalMs);
         });
 
-        let result: IteratorResult<LlmStreamEvent>;
+        let result: IteratorResult<LlmStreamEvent> | "heartbeat";
         try {
-          result = await Promise.race([iterator.next(), timeoutPromise]);
+          result = await Promise.race([nextResult, timeoutPromise, heartbeatPromise]);
         } finally {
           if (timeout) {
             clearTimeout(timeout);
           }
+          if (heartbeat) {
+            clearTimeout(heartbeat);
+          }
+        }
+
+        if (result === "heartbeat") {
+          const idleMs = Date.now() - lastActivityAt;
+          const remainingMs = Math.max(0, idleTimeoutMs - idleMs);
+          this.emit({ type: "status", text: `${purpose} still waiting on ${provider.profile.label}: ${formatDuration(idleMs)} idle, ${formatDuration(remainingMs)} before timeout.` });
+          continue;
         }
 
         if (result.done) {
           return;
         }
+        lastActivityAt = Date.now();
+        nextResult = iterator.next();
         yield result.value;
       }
     } catch (error) {
@@ -1042,6 +1064,7 @@ export class AgentController {
     this.workers.clear();
     this.approvals.clear();
     this.workerApprovalWaiters.clear();
+    this.approvalContinuations.clear();
     this.continueAfterCurrentRun = false;
     this.pendingContinuation = undefined;
     this.queuedWork = [];
@@ -1161,18 +1184,29 @@ export class AgentController {
       this.emit({ type: "error", text: "That approval request is no longer pending." });
       return;
     }
+    const remainingInvocations = this.approvalContinuations.get(id);
+    this.approvalContinuations.delete(id);
     const workerWaiter = this.workerApprovalWaiters.get(id);
 
     const validation = validateAction(approval.action);
     if (!validation.ok) {
-      await this.recordApprovalResolved(id, false, validation.message ?? "Stored approval failed validation.");
+      const message = validation.message ?? "Stored approval failed validation.";
+      const text = toolError(message);
+      await this.recordApprovalResolved(id, false, message);
       if (workerWaiter) {
         this.workerApprovalWaiters.delete(id);
-        workerWaiter.resolve(toolError(validation.message ?? "Stored approval failed validation."));
+        workerWaiter.resolve(text);
+      } else {
+        this.appendToolResult(approval.toolCallId, approval.toolName ?? approval.action.type, text);
+        this.appendCancelledToolResults(remainingInvocations, message);
       }
-      this.emit({ type: "approvalResolved", id, accepted: false, text: "Stored approval failed validation." });
-      this.emit({ type: "error", text: validation.message ?? "Stored approval failed validation." });
+      this.emit({ type: "approvalResolved", id, accepted: false, text: message });
+      this.emit({ type: "toolResult", text });
+      this.emit({ type: "error", text: message });
       await this.publishState();
+      if (!workerWaiter) {
+        void this.continueAfterToolResult(approvalContinuationPrompt(approval.action, "failed"), "Continuing after failed action.");
+      }
       return;
     }
 
@@ -1224,7 +1258,7 @@ export class AgentController {
       this.emit({ type: "toolResult", text: transcriptResult });
       this.emitContextUsage();
       await this.publishState();
-      void this.continueAfterToolResult(approvalContinuationPrompt(approval.action, "accepted"), "Continuing after approval.");
+      void this.continueAfterToolResult(approvalContinuationPrompt(approval.action, "accepted"), "Continuing after approval.", remainingInvocations);
     } catch (error) {
       const message = errorMessage(error);
       const text = toolError(message);
@@ -1240,6 +1274,7 @@ export class AgentController {
         return;
       }
       this.appendToolResult(approval.toolCallId, approval.toolName ?? approval.action.type, text);
+      this.appendCancelledToolResults(remainingInvocations, `Previous approved ${approval.action.type} failed: ${message}`);
       this.emit({ type: "approvalResolved", id, accepted: true, text: `Approved action failed: ${message}` });
       this.emit({ type: "toolResult", text });
       this.emitContextUsage();
@@ -1275,6 +1310,8 @@ export class AgentController {
   async reject(id: string): Promise<void> {
     const approval = this.approvals.take(id);
     if (approval) {
+      const remainingInvocations = this.approvalContinuations.get(id);
+      this.approvalContinuations.delete(id);
       const text = `${approval.action.type}\n\nUser rejected this tool request. Treat this as a failed approach, do not stop the task, and look for an alternative way to satisfy the user's goal within the current permissions.`;
       const workerWaiter = this.workerApprovalWaiters.get(id);
       await this.recordApprovalResolved(id, false, "Rejected.");
@@ -1297,6 +1334,7 @@ export class AgentController {
         return;
       }
       this.appendToolResult(approval.toolCallId, approval.toolName ?? approval.action.type, text);
+      this.appendCancelledToolResults(remainingInvocations, `User rejected ${approval.action.type}; re-plan before requesting later tool calls from the same turn.`);
       this.emit({ type: "approvalResolved", id, accepted: false, text: "Rejected." });
       this.emit({ type: "toolResult", text });
       this.emitContextUsage();
@@ -1435,7 +1473,8 @@ export class AgentController {
           if (concurrentBatch.length > 0) {
             break;
           }
-          await this.requestApproval(invocation.action, invocation.toolCallId, decision);
+          const approval = await this.requestApproval(invocation.action, invocation.toolCallId, decision);
+          this.storeApprovalContinuation(approval.id, invocations.slice(index + 1));
           this.emitToolUseForInvocation(invocation, "approval", false);
           return false;
         }
@@ -1484,7 +1523,8 @@ export class AgentController {
 
       if (decision.behavior === "ask") {
         this.recordAudit(invocation.action, decision, "approval");
-        await this.requestApproval(invocation.action, invocation.toolCallId, decision);
+        const approval = await this.requestApproval(invocation.action, invocation.toolCallId, decision);
+        this.storeApprovalContinuation(approval.id, invocations.slice(index + 1));
         this.emitToolUseForInvocation(invocation, "approval", false);
         return false;
       }
@@ -1661,6 +1701,33 @@ export class AgentController {
     this.emitContextUsage();
   }
 
+  private storeApprovalContinuation(approvalId: string, remainingInvocations: readonly ToolInvocation[]): void {
+    if (remainingInvocations.length > 0) {
+      this.approvalContinuations.set(approvalId, remainingInvocations);
+    }
+  }
+
+  private appendCancelledToolResults(invocations: readonly ToolInvocation[] | undefined, reason: string): void {
+    if (!invocations || invocations.length === 0) {
+      return;
+    }
+    for (const invocation of invocations) {
+      const text = toolError(`Cancelled pending ${invocation.action.type}: ${reason}`);
+      this.emitToolUseForInvocation(invocation, "failed", isLocalReadOnlyAction(invocation.action));
+      this.appendToolResult(invocation.toolCallId, invocation.action.type, text);
+      this.emit({ type: "toolResult", text });
+    }
+    this.emitContextUsage();
+  }
+
+  private async continuePendingToolCalls(invocations: readonly ToolInvocation[] | undefined): Promise<boolean> {
+    if (!invocations || invocations.length === 0) {
+      return true;
+    }
+    this.emit({ type: "status", text: `Continuing ${invocations.length} queued tool call(s) from the approved turn.` });
+    return this.handleActions(invocations);
+  }
+
   private emitToolUseForInvocation(invocation: ToolInvocation, status: AgentToolUse["status"], readOnly: boolean): void {
     this.emit({
       type: "toolUse",
@@ -1761,6 +1828,8 @@ export class AgentController {
       return;
     }
 
+    const remainingInvocations = this.approvalContinuations.get(id);
+    this.approvalContinuations.delete(id);
     const text = formatQuestionAnswers(approval.action.questions, answers);
     const workerWaiter = this.workerApprovalWaiters.get(id);
     await this.recordApprovalResolved(id, true, "Answered.");
@@ -1779,7 +1848,7 @@ export class AgentController {
     this.emit({ type: "toolResult", text });
     this.emitContextUsage();
     await this.publishState();
-    void this.continueAfterToolResult();
+    void this.continueAfterToolResult(undefined, "Continuing after user answer.", remainingInvocations);
   }
 
   private formatToolList(): string {
@@ -2205,9 +2274,9 @@ export class AgentController {
     }
   }
 
-  private async continueAfterToolResult(continuationPrompt?: string, statusText = "Continuing after tool result."): Promise<void> {
+  private async continueAfterToolResult(continuationPrompt?: string, statusText = "Continuing after tool result.", remainingInvocations?: readonly ToolInvocation[]): Promise<void> {
     if (this.runningAbort) {
-      this.pendingContinuation = { prompt: continuationPrompt, statusText };
+      this.pendingContinuation = { prompt: continuationPrompt, statusText, remainingInvocations };
       this.continueAfterCurrentRun = true;
       return;
     }
@@ -2221,6 +2290,10 @@ export class AgentController {
       const model = await this.resolveModel(provider, abort.signal);
       if (continuationPrompt) {
         this.emit({ type: "status", text: statusText });
+      }
+      const completedPendingTools = await this.continuePendingToolCalls(remainingInvocations);
+      if (!completedPendingTools || abort.signal.aborted) {
+        return;
       }
       await this.runModelLoop(provider, model, abort, continuationPrompt);
     } catch (error) {
@@ -2262,7 +2335,7 @@ export class AgentController {
       const continuation = this.pendingContinuation;
       this.continueAfterCurrentRun = false;
       this.pendingContinuation = undefined;
-      void this.continueAfterToolResult(continuation?.prompt, continuation?.statusText);
+      void this.continueAfterToolResult(continuation?.prompt, continuation?.statusText, continuation?.remainingInvocations);
       return;
     }
     const nextWork = this.queuedWork.shift();

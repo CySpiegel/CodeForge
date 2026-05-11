@@ -387,6 +387,77 @@ test("Approved edits continue into the next planned tool request", async () => {
   assert.equal(harness.workspace.files.get("src/b.ts"), "export const b = 2;\n");
 });
 
+test("Approved edit continues queued tool calls from the same model turn before requesting the model again", async () => {
+  const harness = createControllerHarness({
+    mode: "agent",
+    permissionMode: "manual",
+    files: {
+      "src/a.ts": "export const a = 1;\n",
+      "src/b.ts": "export const b = 1;\n"
+    },
+    responses: [
+      {
+        toolCalls: [
+          toolCall("edit_file", { path: "src/a.ts", oldText: "1", newText: "2" }, "call-edit-a"),
+          toolCall("edit_file", { path: "src/b.ts", oldText: "1", newText: "2" }, "call-edit-b")
+        ]
+      },
+      { content: "Both same-turn edits are complete." }
+    ]
+  });
+
+  const firstApprovalSeen = new Promise<Extract<AgentUiEvent, { readonly type: "approvalRequested" }>>((resolve) => {
+    const dispose = harness.controller.onEvent((event) => {
+      if (event.type === "approvalRequested") {
+        dispose();
+        resolve(event);
+      }
+    });
+  });
+  const promptRun = harness.controller.sendPrompt("Update both files in one turn.");
+  const firstApproval = await firstApprovalSeen;
+  assert.equal(firstApproval.approval.action.type, "edit_file");
+  assert.equal(firstApproval.approval.action.path, "src/a.ts");
+  await promptRun;
+
+  const secondApprovalSeen = new Promise<Extract<AgentUiEvent, { readonly type: "approvalRequested" }>>((resolve) => {
+    const dispose = harness.controller.onEvent((event) => {
+      if (event.type === "approvalRequested" && event.approval.id !== firstApproval.approval.id) {
+        dispose();
+        resolve(event);
+      }
+    });
+  });
+  await harness.controller.approve(firstApproval.approval.id);
+  const secondApproval = await Promise.race([
+    secondApprovalSeen,
+    new Promise<never>((_, reject) => setTimeout(() => {
+      const approvals = harness.events
+        .filter((event): event is Extract<AgentUiEvent, { readonly type: "approvalRequested" }> => event.type === "approvalRequested")
+        .map((event) => `${event.approval.action.type}:${"path" in event.approval.action ? event.approval.action.path : event.approval.id}`)
+        .join(", ");
+      const statuses = harness.events
+        .filter((event): event is Extract<AgentUiEvent, { readonly type: "status" }> => event.type === "status")
+        .map((event) => event.text)
+        .join(" | ");
+      reject(new Error(`Timed out waiting for queued same-turn approval. approvals=[${approvals}] statuses=[${statuses}] requests=${harness.provider.requests.length}`));
+    }, 1000))
+  ]);
+  assert.equal(harness.provider.requests.length, 1);
+
+  assert.equal(secondApproval.approval.action.type, "edit_file");
+  assert.equal(secondApproval.approval.action.path, "src/b.ts");
+
+  await harness.controller.approve(secondApproval.approval.id);
+  await waitForEvent(harness.events, (event) => event.type === "message" && event.role === "assistant" && /same-turn edits/.test(event.text));
+
+  assert.equal(harness.workspace.files.get("src/a.ts"), "export const a = 2;\n");
+  assert.equal(harness.workspace.files.get("src/b.ts"), "export const b = 2;\n");
+  assert.equal(harness.provider.requests[1]?.messages.filter((message) => message.role === "tool").length, 2);
+  assert.ok(harness.provider.requests[1]?.messages.some((message) => message.role === "tool" && message.toolCallId === "call-edit-a"));
+  assert.ok(harness.provider.requests[1]?.messages.some((message) => message.role === "tool" && message.toolCallId === "call-edit-b"));
+});
+
 test("Review slash command runs a review prompt instead of spawning a worker", async () => {
   const harness = createControllerHarness({
     mode: "agent",
