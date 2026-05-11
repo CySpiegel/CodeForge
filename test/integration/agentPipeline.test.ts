@@ -190,6 +190,29 @@ test("Manual approval pauses side effects, then approve resumes the model loop",
   assert.equal(harness.workspace.files.get("APPROVED.md"), "approved");
 });
 
+test("Manual rejection resumes the model loop so the assistant can choose another path", async () => {
+  const harness = createControllerHarness({
+    mode: "agent",
+    permissionMode: "manual",
+    files: { "README.md": "# CodeForge\n" },
+    responses: [
+      { toolCalls: [toolCall("write_file", { path: "REJECTED.md", content: "rejected" })] },
+      { content: "I will use a different approach instead of that rejected write." }
+    ]
+  });
+
+  await harness.controller.sendPrompt("Try creating REJECTED.md.");
+  const approval = harness.events.find((event) => event.type === "approvalRequested");
+  assert.ok(approval && approval.type === "approvalRequested");
+
+  await harness.controller.reject(approval.approval.id);
+  await waitForEvent(harness.events, (event) => event.type === "message" && event.role === "assistant" && /different approach/.test(event.text));
+
+  assert.equal(harness.diff.writes.length, 0);
+  assert.equal(harness.workspace.files.has("REJECTED.md"), false);
+  assert.ok(harness.events.some((event) => event.type === "toolResult" && /look for an alternative way/.test(event.text)));
+});
+
 test("Invalid native tool calls return tool errors and allow a retry", async () => {
   const harness = createControllerHarness({
     mode: "ask",

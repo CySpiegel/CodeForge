@@ -255,6 +255,9 @@ export interface AgentAuditEntry {
 
 const maxAgentToolTurns = 25;
 const maxReadOnlyToolTurns = 12;
+const contextAutoCompactPercent = 80;
+const contextAttachmentRatio = 0.55;
+const contextToolResultTargetRatio = 0.6;
 const codeForgeToolSchemaMarker = "CODEFORGE_TOOL_SCHEMA_LOADED:";
 const mcpToolSchemaMarker = "CODEFORGE_MCP_TOOL_SCHEMA_LOADED:";
 
@@ -333,6 +336,7 @@ export class AgentController {
   private auditEntries: AgentAuditEntry[] = [];
   private lastTokenUsage: TokenUsage | undefined;
   private runningAbort: AbortController | undefined;
+  private continueAfterCurrentRun = false;
   private sessionId: string | undefined;
   private sessionStartPromise: Promise<string | undefined> | undefined;
 
@@ -400,6 +404,7 @@ export class AgentController {
         this.approvals.clear();
         this.workerApprovalWaiters.clear();
       }
+      this.continueAfterCurrentRun = false;
       this.emit({ type: "sessionReset" });
       this.emitInspector();
       this.emitContextUsage();
@@ -551,7 +556,7 @@ export class AgentController {
       detail: inspection.models.length > 0
         ? `${inspection.models.length} model(s) returned by /v1/models.`
         : "The endpoint returned no models from /v1/models.",
-      recommendation: inspection.models.length > 0 ? undefined : "Load a model in vLLM, LiteLLM, LM Studio, or the selected OpenAI API compatible server."
+      recommendation: inspection.models.length > 0 ? undefined : "Load a model in the selected OpenAI API compatible server."
     });
 
     if (inspection.models.length === 0) {
@@ -852,31 +857,7 @@ export class AgentController {
     try {
       const provider = await this.createProvider();
       const model = await this.resolveModel(provider, abort.signal);
-      const compactMessages: ChatMessage[] = [
-        {
-          role: "system",
-          content: `You compact coding assistant sessions. Preserve user goals, decisions, files discussed, pending work, and important constraints. Return a concise handoff summary only.${focus ? ` Focus especially on: ${focus}` : ""}`
-        },
-        {
-          role: "user",
-          content: this.messages.map((message) => `${message.role.toUpperCase()}:\n${message.content}`).join("\n\n")
-        }
-      ];
-
-      let summary = "";
-      for await (const event of provider.streamChat({ model, messages: compactMessages, temperature: 0, signal: abort.signal })) {
-        if (event.type === "content") {
-          summary += event.text;
-        }
-      }
-
-      this.replaceMessages([
-        this.systemMessage(),
-        {
-          role: "user",
-          content: `Compacted session context:\n\n${summary.trim()}`
-        }
-      ], "compact");
+      await this.compactSessionWithProvider(provider, model, abort, focus);
       await this.publishTranscript();
       this.emit({ type: "message", role: "system", text: "Context compacted with the selected model." });
       this.emitContextUsage();
@@ -885,7 +866,54 @@ export class AgentController {
       this.emit({ type: "error", text: error instanceof Error ? error.message : String(error) });
     } finally {
       this.runningAbort = undefined;
+      void this.runQueuedContinuation();
     }
+  }
+
+  private async autoCompactContextIfNeeded(provider: LlmProvider, model: string, abort: AbortController, phase: string): Promise<void> {
+    const usage = this.currentContextUsage();
+    if (usage.percent < contextAutoCompactPercent || this.approvals.list().length > 0 || this.messages.filter((message) => message.role !== "system").length === 0) {
+      return;
+    }
+
+    this.emit({ type: "status", text: `Auto-compacting context at ${usage.percent}% ${phase}.` });
+    try {
+      await this.compactSessionWithProvider(provider, model, abort, `Automatic compaction at ${usage.percent}% context usage.`);
+      await this.publishTranscript();
+      this.emit({ type: "message", role: "system", text: `Context auto-compacted at ${usage.percent}%.` });
+      this.emitContextUsage();
+      await this.publishState();
+    } catch (error) {
+      this.emit({ type: "error", text: `Auto-compaction failed: ${errorMessage(error)}` });
+    }
+  }
+
+  private async compactSessionWithProvider(provider: LlmProvider, model: string, abort: AbortController, focus = ""): Promise<void> {
+    const compactMessages: ChatMessage[] = [
+      {
+        role: "system",
+        content: `You compact coding assistant sessions. Preserve user goals, decisions, files discussed, pending work, and important constraints. Return a concise handoff summary only.${focus ? ` Focus especially on: ${focus}` : ""}`
+      },
+      {
+        role: "user",
+        content: this.messages.map((message) => `${message.role.toUpperCase()}:\n${message.content}`).join("\n\n")
+      }
+    ];
+
+    let summary = "";
+    for await (const event of provider.streamChat({ model, messages: compactMessages, temperature: 0, signal: abort.signal })) {
+      if (event.type === "content") {
+        summary += event.text;
+      }
+    }
+
+    this.replaceMessages([
+      this.systemMessage(),
+      {
+        role: "user",
+        content: `Compacted session context:\n\n${summary.trim()}`
+      }
+    ], "compact");
   }
 
   reset(): void {
@@ -904,6 +932,7 @@ export class AgentController {
     this.workers.clear();
     this.approvals.clear();
     this.workerApprovalWaiters.clear();
+    this.continueAfterCurrentRun = false;
     this.emit({ type: "sessionReset" });
     this.emitInspector();
     this.emitContextUsage();
@@ -980,6 +1009,7 @@ export class AgentController {
     try {
       const provider = await this.createProvider();
       const model = await this.resolveModel(provider, abort.signal);
+      await this.autoCompactContextIfNeeded(provider, model, abort, "before request");
       const memories = await this.memoryStore?.list() ?? [];
       const context = new ContextBuilder(this.workspace, this.effectiveContextLimits(), { memories, mcpResources: this.mcpContextItems, pinnedFiles: [...this.pinnedFiles] });
       const contextItems = await context.build(abort.signal);
@@ -998,11 +1028,13 @@ export class AgentController {
       this.emitContextUsage();
 
       await this.runModelLoop(provider, model, abort);
+      await this.autoCompactContextIfNeeded(provider, model, abort, "after request");
     } catch (error) {
       this.recordInspector("error", "run", "Request failed.", errorMessage(error));
       this.emit({ type: "error", text: error instanceof Error ? error.message : String(error) });
     } finally {
       this.runningAbort = undefined;
+      void this.runQueuedContinuation();
     }
   }
 
@@ -1108,7 +1140,7 @@ export class AgentController {
   async reject(id: string): Promise<void> {
     const approval = this.approvals.take(id);
     if (approval) {
-      const text = `${approval.action.type}\n\nUser rejected this tool request.`;
+      const text = `${approval.action.type}\n\nUser rejected this tool request. Treat this as a failed approach, do not stop the task, and look for an alternative way to satisfy the user's goal within the current permissions.`;
       const workerWaiter = this.workerApprovalWaiters.get(id);
       await this.recordApprovalResolved(id, false, "Rejected.");
       this.recordAudit(approval.action, approvalPermissionDecision(approval), "rejected");
@@ -2027,9 +2059,11 @@ export class AgentController {
 
   private async continueAfterToolResult(): Promise<void> {
     if (this.runningAbort) {
+      this.continueAfterCurrentRun = true;
       return;
     }
 
+    this.continueAfterCurrentRun = false;
     const abort = new AbortController();
     this.runningAbort = abort;
     try {
@@ -2041,6 +2075,13 @@ export class AgentController {
     } finally {
       this.runningAbort = undefined;
     }
+  }
+
+  private async runQueuedContinuation(): Promise<void> {
+    if (!this.continueAfterCurrentRun || this.runningAbort) {
+      return;
+    }
+    await this.continueAfterToolResult();
   }
 
   private appendToolResult(toolCallId: string | undefined, toolName: string, content: string): void {
@@ -2070,7 +2111,11 @@ export class AgentController {
       return;
     }
 
-    const result = compactOldToolResults(this.messages, { maxBytes: this.effectiveContextLimits().maxBytes });
+    const result = compactOldToolResults(this.messages, {
+      maxBytes: this.contextWindowMaxBytes(),
+      triggerRatio: contextAutoCompactPercent / 100,
+      targetRatio: contextToolResultTargetRatio
+    });
     if (result.compactedCount === 0) {
       return;
     }
@@ -2093,12 +2138,23 @@ export class AgentController {
 
   private async resolveModel(provider: LlmProvider, signal: AbortSignal): Promise<string> {
     const cachedInspection = this.endpointCache.get(provider.profile.id);
-    const configured = this.selectedModelFor(provider.profile, cachedInspection);
-    if (configured) {
-      return configured;
+    if (cachedInspection) {
+      const configured = this.selectedModelFor(provider.profile, cachedInspection);
+      if (configured) {
+        return configured;
+      }
     }
 
-    const inspection = await provider.inspectEndpoint(signal);
+    let inspection: OpenAiEndpointInspection;
+    try {
+      inspection = await provider.inspectEndpoint(signal);
+    } catch (error) {
+      const configured = this.selectedModelFor(provider.profile);
+      if (configured) {
+        return configured;
+      }
+      throw error;
+    }
     this.endpointCache.set(provider.profile.id, inspection);
     if (inspection.models.length === 0) {
       throw new Error("No model is configured and the endpoint did not return any models.");
@@ -3308,14 +3364,9 @@ export class AgentController {
   }
 
   private currentContextUsage(): ContextUsage {
-    const limits = this.effectiveContextLimits();
-    const selectedModel = this.selectedModelInfo();
-    const maxTokens = selectedModel?.contextLength
-      ? Math.max(1, Math.floor(selectedModel.contextLength * 0.8))
-      : undefined;
-    return buildContextUsage(this.messages, limits.maxBytes, this.lastContextItems, {
+    return buildContextUsage(this.messages, this.contextWindowMaxBytes(), this.lastContextItems, {
       actualTokenUsage: this.lastTokenUsage,
-      maxTokens
+      maxTokens: this.contextWindowMaxTokens()
     });
   }
 
@@ -3326,11 +3377,20 @@ export class AgentController {
       return configured;
     }
 
-    const usableTokens = Math.max(1024, Math.floor(selectedModel.contextLength * 0.8));
+    const usableTokens = Math.max(1024, Math.floor(selectedModel.contextLength * contextAttachmentRatio));
     return {
       ...configured,
       maxBytes: Math.max(8000, usableTokens * 4)
     };
+  }
+
+  private contextWindowMaxTokens(): number | undefined {
+    return this.selectedModelInfo()?.contextLength;
+  }
+
+  private contextWindowMaxBytes(): number {
+    const maxTokens = this.contextWindowMaxTokens();
+    return maxTokens ? Math.max(8000, maxTokens * 4) : this.config.getContextLimits().maxBytes;
   }
 
   private selectedModelInfo(): ModelInfo | undefined {

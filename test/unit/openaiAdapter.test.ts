@@ -97,19 +97,13 @@ test("serializes assistant tool calls and tool results", async () => {
   }
 });
 
-test("merges LM Studio metadata into OpenAI API model discovery", async () => {
+test("reads context metadata from OpenAI API model discovery", async () => {
   const originalFetch = globalThis.fetch;
+  const requestedUrls: string[] = [];
   globalThis.fetch = async (input: string | URL | Request) => {
     const url = input instanceof Request ? input.url : String(input);
+    requestedUrls.push(url);
     if (url.endsWith("/v1/models")) {
-      return new Response(JSON.stringify({
-        data: [
-          { id: "google/gemma-4-e4b", object: "model", owned_by: "organization_owner" },
-          { id: "text-embedding-nomic-embed-text-v1.5", object: "model", owned_by: "organization_owner" }
-        ]
-      }), { status: 200, headers: { "Content-Type": "application/json" } });
-    }
-    if (url.endsWith("/api/v0/models")) {
       return new Response(JSON.stringify({
         data: [
           { id: "google/gemma-4-e4b", object: "model", type: "vlm", max_context_length: 131072 },
@@ -126,7 +120,7 @@ test("merges LM Studio metadata into OpenAI API model discovery", async () => {
       { allowlist: [] }
     );
     const inspection = await provider.inspectEndpoint();
-    assert.equal(inspection.backendLabel, "LM Studio");
+    assert.equal(inspection.backendLabel, "OpenAI API compatible");
     assert.deepEqual(inspection.models, [
       {
         id: "google/gemma-4-e4b",
@@ -137,6 +131,7 @@ test("merges LM Studio metadata into OpenAI API model discovery", async () => {
       }
     ]);
     assert.deepEqual(await provider.listModels(), ["google/gemma-4-e4b"]);
+    assert.equal(requestedUrls.some((url) => url.endsWith("/api/v0/models")), false);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -153,10 +148,6 @@ test("treats accepted OpenAI tool schemas as native tool support", async () => {
         headers: { "Content-Type": "application/json" }
       });
     }
-    if (url.endsWith("/api/v0/models")) {
-      return new Response("not found", { status: 404 });
-    }
-
     postedBodies.push(JSON.parse(String(init?.body ?? "{}")));
     return new Response(JSON.stringify({
       choices: [
@@ -194,10 +185,6 @@ test("retries tool support probe without tool_choice when an endpoint rejects it
         headers: { "Content-Type": "application/json" }
       });
     }
-    if (url.endsWith("/api/v0/models")) {
-      return new Response("not found", { status: 404 });
-    }
-
     const body = JSON.parse(String(init?.body ?? "{}"));
     postedBodies.push(body);
     if (body.tool_choice) {

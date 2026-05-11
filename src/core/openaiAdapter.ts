@@ -122,12 +122,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
 
     const body = await response.json();
     let models = modelsFromBody(body);
-    let backend = detectBackend(response.headers, body, models);
-    const auxiliaryInspection = await this.inspectAuxiliaryEndpoint(signal).catch(() => undefined);
-    if (auxiliaryInspection) {
-      models = mergeModelInfo(models, auxiliaryInspection.models);
-      backend = auxiliaryInspection.backend;
-    }
+    const backend = detectBackend(response.headers, body, models);
     models = models.filter((model) => !isEmbeddingModel(model));
     return {
       backend,
@@ -266,38 +261,6 @@ export class OpenAiCompatibleProvider implements LlmProvider {
     }
   }
 
-  private auxiliaryEndpoint(path: string): string {
-    const url = new URL(this.openAiBaseUrl());
-    url.pathname = path;
-    url.search = "";
-    url.hash = "";
-    return url.toString();
-  }
-
-  private async inspectAuxiliaryEndpoint(signal?: AbortSignal): Promise<OpenAiEndpointInspection | undefined> {
-    const lmStudioUrl = this.auxiliaryEndpoint("/api/v0/models");
-    assertUrlAllowed(lmStudioUrl, this.policy);
-    const response = await fetch(lmStudioUrl, {
-      headers: this.headers(false),
-      signal
-    });
-    if (!response.ok) {
-      return undefined;
-    }
-
-    const body = await response.json();
-    const models = modelsFromBody(body);
-    if (models.length === 0) {
-      return undefined;
-    }
-
-    return {
-      backend: "lmstudio",
-      backendLabel: backendLabel("lmstudio"),
-      models
-    };
-  }
-
   private fetchChatStream(url: string, request: LlmRequest, includeUsage: boolean): Promise<Response> {
     return fetch(url, {
       method: "POST",
@@ -419,24 +382,6 @@ function modelsFromBody(body: unknown): readonly ModelInfo[] {
     .filter((model): model is ModelInfo => Boolean(model));
 }
 
-function mergeModelInfo(primary: readonly ModelInfo[], secondary: readonly ModelInfo[]): readonly ModelInfo[] {
-  const byId = new Map<string, ModelInfo>();
-  for (const model of secondary) {
-    byId.set(model.id, model);
-  }
-  for (const model of primary) {
-    byId.set(model.id, {
-      ...byId.get(model.id),
-      ...model,
-      contextLength: model.contextLength ?? byId.get(model.id)?.contextLength,
-      maxOutputTokens: model.maxOutputTokens ?? byId.get(model.id)?.maxOutputTokens,
-      supportsReasoning: model.supportsReasoning ?? byId.get(model.id)?.supportsReasoning,
-      type: model.type ?? byId.get(model.id)?.type
-    });
-  }
-  return [...byId.values()];
-}
-
 function isEmbeddingModel(model: ModelInfo): boolean {
   const fingerprint = `${model.id}\n${model.type ?? ""}`.toLowerCase();
   return fingerprint.includes("embedding") || fingerprint.includes("embed");
@@ -448,9 +393,6 @@ function detectBackend(headers: Headers, body: unknown, models: readonly ModelIn
   const modelText = models.map((model) => model.id).join("\n").toLowerCase();
   const fingerprint = `${headersText}\n${bodyText}\n${modelText}`;
 
-  if (fingerprint.includes("lm studio") || fingerprint.includes("lmstudio")) {
-    return "lmstudio";
-  }
   if (fingerprint.includes("litellm")) {
     return "litellm";
   }
@@ -466,8 +408,6 @@ function backendLabel(backend: OpenAiBackendKind): string {
       return "LiteLLM";
     case "vllm":
       return "vLLM";
-    case "lmstudio":
-      return "LM Studio";
     case "openai-api":
       return "OpenAI API compatible";
   }

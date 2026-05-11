@@ -46,7 +46,7 @@ export interface ProviderCapabilities {
   readonly nativeToolCalls: boolean;
 }
 
-export type OpenAiBackendKind = "openai-api" | "litellm" | "vllm" | "lmstudio";
+export type OpenAiBackendKind = "openai-api" | "litellm" | "vllm";
 
 export interface ModelInfo {
   readonly id: string;
