@@ -78,15 +78,27 @@ export class OpenAiCompatibleProvider implements LlmProvider {
     const parser = new SseParser();
     const toolCalls = new Map<number, OpenAiToolCallState>();
 
+    let streamDone = false;
+    streamLoop:
     for await (const rawChunk of response.body as unknown as AsyncIterable<Uint8Array>) {
       const events = parser.push(decoder.decode(rawChunk, { stream: true }));
       for (const event of events) {
+        if (event.data === "[DONE]") {
+          streamDone = true;
+          break streamLoop;
+        }
         yield* this.parseStreamEvent(event.data, toolCalls);
       }
     }
 
-    for (const event of parser.flush()) {
-      yield* this.parseStreamEvent(event.data, toolCalls);
+    if (!streamDone) {
+      for (const event of parser.flush()) {
+        if (event.data === "[DONE]") {
+          streamDone = true;
+          break;
+        }
+        yield* this.parseStreamEvent(event.data, toolCalls);
+      }
     }
 
     const finalToolCalls = [...toolCalls.values()]

@@ -47,6 +47,49 @@ test("streams OpenAI-compatible chat completion chunks", async () => {
   }
 });
 
+test("stops streaming when OpenAI done event arrives even if the response body stays open", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const encoder = new TextEncoder();
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "done" } }] })}\n\n`));
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+      }
+    });
+
+    return new Response(stream, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" }
+    });
+  };
+
+  try {
+    const provider = new OpenAiCompatibleProvider(
+      { id: "test", label: "Test", baseUrl: "http://127.0.0.1:4000/v1" },
+      { allowlist: [] }
+    );
+
+    const events = await Promise.race([
+      (async () => {
+        const result = [];
+        for await (const event of provider.streamChat({ model: "local-model", messages: [{ role: "user", content: "hi" }] })) {
+          result.push(event);
+        }
+        return result;
+      })(),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error("streamChat did not stop at [DONE]")), 250);
+      })
+    ]);
+
+    assert.equal(events.filter((event) => event.type === "content").map((event) => event.text).join(""), "done");
+    assert.equal(events[events.length - 1]?.type, "done");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("serializes assistant tool calls and tool results", async () => {
   const originalFetch = globalThis.fetch;
   let postedBody = "";

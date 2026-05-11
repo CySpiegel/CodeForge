@@ -2074,6 +2074,7 @@ export class AgentController {
       this.emit({ type: "error", text: error instanceof Error ? error.message : String(error) });
     } finally {
       this.runningAbort = undefined;
+      void this.runQueuedContinuation();
     }
   }
 
