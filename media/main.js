@@ -50,6 +50,7 @@
     modelMeta: document.getElementById("modelMeta"),
     maxTokens: document.getElementById("maxTokens"),
     commandTimeout: document.getElementById("commandTimeout"),
+    modelIdleTimeout: document.getElementById("modelIdleTimeout"),
     commandOutputLimit: document.getElementById("commandOutputLimit"),
     permissionModeButton: document.getElementById("permissionModeButton"),
     permissionModeMenu: document.getElementById("permissionModeMenu"),
@@ -422,6 +423,7 @@
       mcpServers,
       maxTokens: Number(elements.maxTokens?.value || 0),
       commandTimeoutSeconds: Number(elements.commandTimeout?.value),
+      modelIdleTimeoutSeconds: Number(elements.modelIdleTimeout?.value),
       commandOutputLimitBytes: tokensToBytes(elements.commandOutputLimit?.value),
       permissionRules
     });
@@ -582,6 +584,7 @@
     }
     setValue(elements.maxTokens, state.settings?.maxTokens ? String(state.settings.maxTokens) : "");
     setValue(elements.commandTimeout, String(state.settings?.commandTimeoutSeconds ?? 120));
+    setValue(elements.modelIdleTimeout, String(state.settings?.modelIdleTimeoutSeconds ?? 300));
     setValue(elements.commandOutputLimit, String(estimatedTokens(state.settings?.commandOutputLimitBytes ?? 200000)));
     renderPermissionModePicker();
     setValue(elements.permissionRules, JSON.stringify(state.settings?.permissionRules || [], null, 2));

@@ -377,6 +377,7 @@ export function createControllerHarness(options: ControllerHarnessOptions): Cont
     getConfiguredModel: () => fakeProfile.defaultModel ?? "",
     getContextLimits: () => contextLimits,
     getCommandTimeoutSeconds: () => 10,
+    getModelIdleTimeoutSeconds: () => 300,
     getCommandOutputLimitBytes: () => 12000,
     getActiveProfileId: () => fakeProfile.id,
     getProfiles: () => [fakeProfile]

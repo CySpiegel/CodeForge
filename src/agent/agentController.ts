@@ -180,6 +180,7 @@ export interface AgentSettingsSummary {
   readonly maxTokens?: number;
   readonly maxBytes: number;
   readonly commandTimeoutSeconds: number;
+  readonly modelIdleTimeoutSeconds: number;
   readonly commandOutputLimitBytes: number;
   readonly permissionMode: string;
   readonly permissionRules: readonly unknown[];
@@ -1005,7 +1006,7 @@ export class AgentController {
     purpose: string
   ): AsyncIterable<LlmStreamEvent> {
     const iterator = provider.streamChat(request)[Symbol.asyncIterator]();
-    const idleTimeoutMs = modelStreamIdleTimeoutMs();
+    const idleTimeoutMs = modelStreamIdleTimeoutMs(this.config.getModelIdleTimeoutSeconds());
     const statusIntervalMs = 10_000;
     let lastActivityAt = Date.now();
 
@@ -3634,6 +3635,7 @@ export class AgentController {
         maxTokens: contextLimits.maxTokens,
         maxBytes: contextLimits.maxBytes,
         commandTimeoutSeconds: this.config.getCommandTimeoutSeconds(),
+        modelIdleTimeoutSeconds: this.config.getModelIdleTimeoutSeconds(),
         commandOutputLimitBytes: this.config.getCommandOutputLimitBytes(),
         permissionMode: permissionPolicy.mode,
         permissionRules: permissionPolicy.rules,
@@ -4483,10 +4485,13 @@ function approvalContinuationPrompt(action: AgentAction, outcome: "accepted" | "
   return `CodeForge continuation: ${summary} was approved but failed, and the failure is now available above. Continue the original task by inspecting the current state and trying a corrected approach. Do not repeat the same failed action unchanged.`;
 }
 
-function modelStreamIdleTimeoutMs(): number {
+function modelStreamIdleTimeoutMs(configuredSeconds: number): number {
   const configured = Number(process.env.CODEFORGE_MODEL_STREAM_IDLE_TIMEOUT_MS);
   if (Number.isFinite(configured) && configured > 0) {
     return Math.max(10, Math.floor(configured));
+  }
+  if (Number.isFinite(configuredSeconds) && configuredSeconds > 0) {
+    return Math.max(30_000, Math.floor(configuredSeconds * 1000));
   }
   return defaultModelStreamIdleTimeoutMs;
 }

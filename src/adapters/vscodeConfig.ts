@@ -40,6 +40,10 @@ export class CodeForgeConfigService {
     return clampNumber(this.config().get<number>("commands.timeoutSeconds", 120), 5, 1800, 120);
   }
 
+  getModelIdleTimeoutSeconds(): number {
+    return clampNumber(this.config().get<number>("requests.idleTimeoutSeconds", 300), 30, 1800, 300);
+  }
+
   getCommandOutputLimitBytes(): number {
     return clampNumber(this.config().get<number>("commands.outputLimitBytes", 200000), 16000, 2_000_000, 200000);
   }
@@ -160,6 +164,9 @@ export class CodeForgeConfigService {
     if (settings.commandTimeoutSeconds !== undefined) {
       await config.update("commands.timeoutSeconds", clampNumber(settings.commandTimeoutSeconds, 5, 1800, 120), vscode.ConfigurationTarget.Global);
     }
+    if (settings.modelIdleTimeoutSeconds !== undefined) {
+      await config.update("requests.idleTimeoutSeconds", clampNumber(settings.modelIdleTimeoutSeconds, 30, 1800, 300), vscode.ConfigurationTarget.Global);
+    }
     if (settings.commandOutputLimitBytes !== undefined) {
       await config.update("commands.outputLimitBytes", clampNumber(settings.commandOutputLimitBytes, 16000, 2_000_000, 200000), vscode.ConfigurationTarget.Global);
     }
@@ -272,6 +279,7 @@ export interface CodeForgeSettingsUpdate {
   readonly maxTokens: number;
   readonly maxBytes: number;
   readonly commandTimeoutSeconds: number;
+  readonly modelIdleTimeoutSeconds: number;
   readonly commandOutputLimitBytes: number;
   readonly permissionMode: PermissionMode;
   readonly permissionRules: readonly PermissionRule[];

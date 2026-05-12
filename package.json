@@ -318,7 +318,14 @@
           "default": 120,
           "minimum": 5,
           "maximum": 1800,
-          "description": "Maximum execution time for approved shell commands."
+          "description": "Maximum execution time for approved shell commands. This does not control model response streaming."
+        },
+        "codeforge.requests.idleTimeoutSeconds": {
+          "type": "number",
+          "default": 300,
+          "minimum": 30,
+          "maximum": 1800,
+          "description": "Maximum time CodeForge waits without model stream activity before stopping a model request."
         },
         "codeforge.commands.outputLimitBytes": {
           "type": "number",

@@ -208,7 +208,8 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
               <label>Model<input id="modelInput" type="text" placeholder="Model ID"></label>
               <div id="modelMeta" class="settings-meta wide"></div>
               <label class="wide">Context window tokens<input id="maxTokens" type="number" min="0" max="10000000" placeholder="Auto"></label>
-              <label>Terminal timeout seconds<input id="commandTimeout" type="number" min="5" max="1800"></label>
+              <label>Terminal command timeout seconds<input id="commandTimeout" type="number" min="5" max="1800"></label>
+              <label>Model idle timeout seconds<input id="modelIdleTimeout" type="number" min="30" max="1800"></label>
               <label>Terminal output tokens<input id="commandOutputLimit" type="number" min="4000" max="500000"></label>
               <label class="wide">Network allowlist<textarea id="allowlist" rows="3" placeholder="one host, origin, or CIDR per line"></textarea></label>
             </div>
@@ -360,6 +361,7 @@ interface WebviewMessage {
   readonly maxTokens?: number;
   readonly maxBytes?: number;
   readonly commandTimeoutSeconds?: number;
+  readonly modelIdleTimeoutSeconds?: number;
   readonly commandOutputLimitBytes?: number;
 }
 
