@@ -657,7 +657,11 @@
     if (!text || text === "Idle") {
       return { label: "Ready", busy: false };
     }
-    if (/^(Calling|Model request|.* still waiting on )/.test(text) || /^Streaming response$/.test(text)) {
+    const waitingMatch = text.match(/^(?:.* )?still waiting on [^:]+: ([^,]+) idle, ([^.]+) before timeout\./);
+    if (waitingMatch) {
+      return { label: `Waiting for model (${waitingMatch[1]} idle)`, busy: true };
+    }
+    if (/^Calling/.test(text) || /^Streaming response$/.test(text)) {
       return { label: "Generating", busy: true };
     }
     if (/^Generating$/.test(text)) {

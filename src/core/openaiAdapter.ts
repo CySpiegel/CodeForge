@@ -82,13 +82,21 @@ export class OpenAiCompatibleProvider implements LlmProvider {
     let streamDone = false;
     streamLoop:
     for await (const rawChunk of response.body as unknown as AsyncIterable<Uint8Array>) {
-      const events = parser.push(decoder.decode(rawChunk, { stream: true }));
+      const text = decoder.decode(rawChunk, { stream: true });
+      const events = parser.push(text);
+      if (events.length === 0 && text.trim()) {
+        yield { type: "progress" };
+      }
       for (const event of events) {
         if (event.data === "[DONE]") {
           streamDone = true;
           break streamLoop;
         }
         yield* this.parseStreamEvent(event.data, toolCalls);
+        if (hasFinishReason(event.data)) {
+          streamDone = true;
+          break streamLoop;
+        }
       }
     }
 
@@ -99,6 +107,10 @@ export class OpenAiCompatibleProvider implements LlmProvider {
           break;
         }
         yield* this.parseStreamEvent(event.data, toolCalls);
+        if (hasFinishReason(event.data)) {
+          streamDone = true;
+          break;
+        }
       }
     }
 
@@ -518,6 +530,15 @@ function headersToText(headers: Headers): string {
     lines.push(`${key}: ${value}`);
   });
   return lines.join("\n");
+}
+
+function hasFinishReason(data: string): boolean {
+  try {
+    const chunk = JSON.parse(data) as OpenAiStreamChunk;
+    return (chunk.choices ?? []).some((choice) => choice.finish_reason !== undefined && choice.finish_reason !== null);
+  } catch {
+    return false;
+  }
 }
 
 function findPositiveInteger(value: unknown, keys: readonly string[], depth = 0): number | undefined {

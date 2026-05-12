@@ -377,6 +377,35 @@ test("Existing file edits must read the file before approval", async () => {
   assertAssistantMessage(harness.events, /read README\.md before editing/);
 });
 
+test("Edit preflight recovery can read the file and then request approval", async () => {
+  const harness = createControllerHarness({
+    mode: "agent",
+    permissionMode: "smart",
+    files: { "README.md": "# CodeForge\nold\n" },
+    responses: [
+      { toolCalls: [toolCall("edit_file", { path: "README.md", oldText: "old", newText: "new" }, "call-bad-edit")] },
+      { toolCalls: [toolCall("read_file", { path: "README.md" }, "call-read")] },
+      { toolCalls: [toolCall("edit_file", { path: "README.md", oldText: "old", newText: "new" }, "call-good-edit")] },
+      { content: "Recovered and finished the edit." }
+    ]
+  });
+
+  await harness.controller.sendPrompt("Edit README.");
+  const approval = harness.events.find((event): event is Extract<AgentUiEvent, { readonly type: "approvalRequested" }> =>
+    event.type === "approvalRequested"
+  );
+
+  assert.ok(approval);
+  assert.equal(approval.approval.toolCallId, "call-good-edit");
+  assert.ok(harness.events.some((event) => event.type === "toolResult" && /requires reading README\.md/.test(event.text)));
+  assertToolCompleted(harness.events, "read_file");
+
+  await harness.controller.approve(approval.approval.id);
+  await waitForEvent(harness.events, (event) => event.type === "message" && event.role === "assistant" && /Recovered and finished/.test(event.text));
+
+  assert.equal(harness.workspace.files.get("README.md"), "# CodeForge\nnew\n");
+});
+
 test("Invalid edit preflight returns a tool error instead of asking approval for a doomed edit", async () => {
   const harness = createControllerHarness({
     mode: "agent",

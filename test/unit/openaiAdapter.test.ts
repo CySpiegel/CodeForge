@@ -90,6 +90,49 @@ test("stops streaming when OpenAI done event arrives even if the response body s
   }
 });
 
+test("stops streaming when an OpenAI-compatible endpoint sends finish_reason without done", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const encoder = new TextEncoder();
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "done" } }] })}\n\n`));
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] })}\n\n`));
+      }
+    });
+
+    return new Response(stream, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" }
+    });
+  };
+
+  try {
+    const provider = new OpenAiCompatibleProvider(
+      { id: "test", label: "Test", baseUrl: "http://127.0.0.1:4000/v1" },
+      { allowlist: [] }
+    );
+
+    const events = await Promise.race([
+      (async () => {
+        const result = [];
+        for await (const event of provider.streamChat({ model: "local-model", messages: [{ role: "user", content: "hi" }] })) {
+          result.push(event);
+        }
+        return result;
+      })(),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error("streamChat did not stop at finish_reason")), 250);
+      })
+    ]);
+
+    assert.equal(events.filter((event) => event.type === "content").map((event) => event.text).join(""), "done");
+    assert.equal(events[events.length - 1]?.type, "done");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("treats streamed reasoning chunks as model progress", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => {
@@ -120,6 +163,41 @@ test("treats streamed reasoning chunks as model progress", async () => {
     }
     assert.equal(events.some((event) => event.type === "progress"), true);
     assert.equal(events.some((event) => event.type === "toolCalls"), true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("treats partial SSE chunks as model progress", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const encoder = new TextEncoder();
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "hel" } }] })}`));
+        controller.enqueue(encoder.encode("\n\n"));
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+      }
+    });
+
+    return new Response(stream, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" }
+    });
+  };
+
+  try {
+    const provider = new OpenAiCompatibleProvider(
+      { id: "test", label: "Test", baseUrl: "http://127.0.0.1:4000/v1" },
+      { allowlist: [] }
+    );
+    const events = [];
+    for await (const event of provider.streamChat({ model: "local-model", messages: [{ role: "user", content: "hi" }] })) {
+      events.push(event);
+    }
+
+    assert.equal(events[0]?.type, "progress");
+    assert.equal(events.some((event) => event.type === "content"), true);
   } finally {
     globalThis.fetch = originalFetch;
   }
