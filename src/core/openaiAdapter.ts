@@ -326,6 +326,7 @@ function toOpenAiMessage(message: ChatMessage): Record<string, unknown> {
 
 export function ensureOpenAiToolResultPairing(messages: readonly ChatMessage[]): readonly ChatMessage[] {
   const repaired: ChatMessage[] = [];
+  const seenToolCallIds = new Set<string>();
   let index = 0;
 
   while (index < messages.length) {
@@ -340,11 +341,30 @@ export function ensureOpenAiToolResultPairing(messages: readonly ChatMessage[]):
       continue;
     }
 
-    repaired.push(message);
     if (message.role !== "assistant" || !message.toolCalls || message.toolCalls.length === 0) {
+      repaired.push(message);
       index++;
       continue;
     }
+
+    const toolCalls = message.toolCalls.filter((toolCall) => {
+      if (seenToolCallIds.has(toolCall.id)) {
+        return false;
+      }
+      seenToolCallIds.add(toolCall.id);
+      return true;
+    });
+
+    if (toolCalls.length === 0) {
+      repaired.push({
+        role: "assistant",
+        content: message.content.trim() ? message.content : "[Duplicate tool calls removed before OpenAI request.]"
+      });
+      index++;
+      continue;
+    }
+
+    repaired.push(toolCalls.length === message.toolCalls.length ? message : { ...message, toolCalls });
 
     const toolMessages: ChatMessage[] = [];
     let nextIndex = index + 1;
@@ -354,7 +374,7 @@ export function ensureOpenAiToolResultPairing(messages: readonly ChatMessage[]):
     }
 
     const usedToolMessageIndexes = new Set<number>();
-    for (const toolCall of message.toolCalls) {
+    for (const toolCall of toolCalls) {
       const matchingIndex = toolMessages.findIndex((toolMessage, toolMessageIndex) =>
         !usedToolMessageIndexes.has(toolMessageIndex) && toolMessage.toolCallId === toolCall.id
       );

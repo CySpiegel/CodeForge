@@ -114,7 +114,12 @@ test("Agent mode executes edit_file in full auto through the diff pipeline", asy
     permissionMode: "fullAuto",
     files: { "README.md": "# CodeForge\nold value\n" },
     responses: [
-      { toolCalls: [toolCall("edit_file", { path: "README.md", oldText: "old value", newText: "new value" })] },
+      {
+        toolCalls: [
+          toolCall("read_file", { path: "README.md" }),
+          toolCall("edit_file", { path: "README.md", oldText: "old value", newText: "new value" })
+        ]
+      },
       { content: "Edited README.md." }
     ]
   });
@@ -158,7 +163,12 @@ test("Full auto edit failures return tool errors and keep the model loop alive",
     permissionMode: "fullAuto",
     files: { "README.md": "# CodeForge\nold value\n" },
     responses: [
-      { toolCalls: [toolCall("edit_file", { path: "README.md", oldText: "missing value", newText: "new value" })] },
+      {
+        toolCalls: [
+          toolCall("read_file", { path: "README.md" }),
+          toolCall("edit_file", { path: "README.md", oldText: "missing value", newText: "new value" })
+        ]
+      },
       { content: "I will retry after reading the current file." }
     ]
   });
@@ -319,7 +329,12 @@ test("Smart approval asks before applying file edits in Agent mode", async () =>
     permissionMode: "smart",
     files: { "README.md": "# CodeForge\nold\n" },
     responses: [
-      { toolCalls: [toolCall("edit_file", { path: "README.md", oldText: "old", newText: "new" })] },
+      {
+        toolCalls: [
+          toolCall("read_file", { path: "README.md" }),
+          toolCall("edit_file", { path: "README.md", oldText: "old", newText: "new" })
+        ]
+      },
       { content: "Smart-approved edit completed." }
     ]
   });
@@ -338,6 +353,52 @@ test("Smart approval asks before applying file edits in Agent mode", async () =>
   assert.equal(harness.workspace.files.get("README.md"), "# CodeForge\nnew\n");
 });
 
+test("Existing file edits must read the file before approval", async () => {
+  const harness = createControllerHarness({
+    mode: "agent",
+    permissionMode: "smart",
+    files: { "README.md": "# CodeForge\nold\n" },
+    responses: [
+      { toolCalls: [toolCall("edit_file", { path: "README.md", oldText: "old", newText: "new" })] },
+      { content: "I will read README.md before editing it." }
+    ]
+  });
+
+  await harness.controller.sendPrompt("Edit README.");
+
+  assert.equal(harness.events.some((event) => event.type === "approvalRequested"), false);
+  assert.ok(harness.events.some((event) => event.type === "toolResult" && /requires reading README\.md/.test(event.text)));
+  assert.equal(harness.diff.edits.length, 0);
+  assert.equal(harness.workspace.files.get("README.md"), "# CodeForge\nold\n");
+  assertAssistantMessage(harness.events, /read README\.md before editing/);
+});
+
+test("Invalid edit preflight returns a tool error instead of asking approval for a doomed edit", async () => {
+  const harness = createControllerHarness({
+    mode: "agent",
+    permissionMode: "smart",
+    files: { "src/current.ts": "export const value = 1;\n" },
+    responses: [
+      {
+        toolCalls: [
+          toolCall("read_file", { path: "src/current.ts" }),
+          toolCall("edit_file", { path: "src/current.ts", oldText: "export const missing = 1;", newText: "export const value = 2;" })
+        ]
+      },
+      { content: "I will read the current file and retry with exact text." }
+    ]
+  });
+
+  await harness.controller.sendPrompt("Update src/current.ts.");
+
+  assert.equal(harness.events.some((event) => event.type === "approvalRequested"), false);
+  assert.ok(harness.events.some((event) => event.type === "toolResult" && /oldText was not found/.test(event.text)));
+  assert.ok(harness.events.some((event) => event.type === "toolResult" && /Current file excerpts/.test(event.text)));
+  assertAssistantMessage(harness.events, /read the current file and retry/);
+  assert.equal(harness.diff.edits.length, 0);
+  assert.equal(harness.workspace.files.get("src/current.ts"), "export const value = 1;\n");
+});
+
 test("Approved edits continue into the next planned tool request", async () => {
   const harness = createControllerHarness({
     mode: "agent",
@@ -347,8 +408,18 @@ test("Approved edits continue into the next planned tool request", async () => {
       "src/b.ts": "export const b = 1;\n"
     },
     responses: [
-      { toolCalls: [toolCall("edit_file", { path: "src/a.ts", oldText: "1", newText: "2" }, "call-edit-a")] },
-      { toolCalls: [toolCall("edit_file", { path: "src/b.ts", oldText: "1", newText: "2" }, "call-edit-b")] },
+      {
+        toolCalls: [
+          toolCall("read_file", { path: "src/a.ts" }, "call-read-a"),
+          toolCall("edit_file", { path: "src/a.ts", oldText: "1", newText: "2" }, "call-edit-a")
+        ]
+      },
+      {
+        toolCalls: [
+          toolCall("read_file", { path: "src/b.ts" }, "call-read-b"),
+          toolCall("edit_file", { path: "src/b.ts", oldText: "1", newText: "2" }, "call-edit-b")
+        ]
+      },
       { content: "Both planned edits are complete." }
     ]
   });
@@ -398,7 +469,9 @@ test("Approved edit continues queued tool calls from the same model turn before 
     responses: [
       {
         toolCalls: [
+          toolCall("read_file", { path: "src/a.ts" }, "call-read-a"),
           toolCall("edit_file", { path: "src/a.ts", oldText: "1", newText: "2" }, "call-edit-a"),
+          toolCall("read_file", { path: "src/b.ts" }, "call-read-b"),
           toolCall("edit_file", { path: "src/b.ts", oldText: "1", newText: "2" }, "call-edit-b")
         ]
       },
@@ -453,7 +526,9 @@ test("Approved edit continues queued tool calls from the same model turn before 
 
   assert.equal(harness.workspace.files.get("src/a.ts"), "export const a = 2;\n");
   assert.equal(harness.workspace.files.get("src/b.ts"), "export const b = 2;\n");
-  assert.equal(harness.provider.requests[1]?.messages.filter((message) => message.role === "tool").length, 2);
+  assert.equal(harness.provider.requests[1]?.messages.filter((message) => message.role === "tool").length, 4);
+  assert.ok(harness.provider.requests[1]?.messages.some((message) => message.role === "tool" && message.toolCallId === "call-read-a"));
+  assert.ok(harness.provider.requests[1]?.messages.some((message) => message.role === "tool" && message.toolCallId === "call-read-b"));
   assert.ok(harness.provider.requests[1]?.messages.some((message) => message.role === "tool" && message.toolCallId === "call-edit-a"));
   assert.ok(harness.provider.requests[1]?.messages.some((message) => message.role === "tool" && message.toolCallId === "call-edit-b"));
 });
@@ -521,7 +596,12 @@ test("Preview failures still surface an approval instead of failing the request"
     permissionMode: "smart",
     files: { "README.md": "# CodeForge\nold\n" },
     responses: [
-      { toolCalls: [toolCall("edit_file", { path: "README.md", oldText: "old", newText: "new" })] }
+      {
+        toolCalls: [
+          toolCall("read_file", { path: "README.md" }),
+          toolCall("edit_file", { path: "README.md", oldText: "old", newText: "new" })
+        ]
+      }
     ]
   });
   harness.diff.previewEditFile = async () => {
@@ -565,20 +645,28 @@ test("Approved action execution failures are returned to the model and continue"
     permissionMode: "manual",
     files: { "README.md": "# CodeForge\n" },
     responses: [
-      { toolCalls: [toolCall("edit_file", { path: "README.md", oldText: "missing text", newText: "replacement" })] },
-      { content: "I recovered from the failed approved edit." }
+      {
+        toolCalls: [
+          toolCall("read_file", { path: "README.md" }),
+          toolCall("write_file", { path: "README.md", content: "# Replacement\n" })
+        ]
+      },
+      { content: "I recovered from the failed approved write." }
     ]
   });
+  harness.diff.applyWriteFile = async () => {
+    throw new Error("simulated apply failure");
+  };
 
-  await harness.controller.sendPrompt("Edit README.");
+  await harness.controller.sendPrompt("Write README.");
   const approval = harness.events.find((event) => event.type === "approvalRequested");
   assert.ok(approval && approval.type === "approvalRequested");
 
   await harness.controller.approve(approval.approval.id);
-  await waitForEvent(harness.events, (event) => event.type === "message" && event.role === "assistant" && /recovered from the failed approved edit/.test(event.text));
+  await waitForEvent(harness.events, (event) => event.type === "message" && event.role === "assistant" && /recovered from the failed approved write/.test(event.text));
 
   assert.equal(harness.workspace.files.get("README.md"), "# CodeForge\n");
-  assert.ok(harness.events.some((event) => event.type === "toolResult" && /oldText was not found/.test(event.text)));
+  assert.ok(harness.events.some((event) => event.type === "toolResult" && /simulated apply failure/.test(event.text)));
 });
 
 test("Invalid native tool calls return tool errors and allow a retry", async () => {

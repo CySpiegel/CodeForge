@@ -198,6 +198,28 @@ test("repairs interrupted assistant tool-call turns before OpenAI requests", () 
   assert.equal(repaired[3]?.role, "user");
 });
 
+test("deduplicates repeated assistant tool-call ids before OpenAI requests", () => {
+  const repaired = ensureOpenAiToolResultPairing([
+    {
+      role: "assistant",
+      content: "",
+      toolCalls: [{ id: "call-a", name: "read_file", argumentsJson: "{\"path\":\"a.ts\"}" }]
+    },
+    { role: "tool", content: "read_file a.ts\n\n1", name: "read_file", toolCallId: "call-a" },
+    {
+      role: "assistant",
+      content: "",
+      toolCalls: [{ id: "call-a", name: "read_file", argumentsJson: "{\"path\":\"a.ts\"}" }]
+    },
+    { role: "tool", content: "read_file a.ts\n\n1", name: "read_file", toolCallId: "call-a" }
+  ]);
+
+  assert.equal(repaired.length, 3);
+  assert.equal(repaired[2]?.role, "assistant");
+  assert.equal(repaired[2]?.toolCalls, undefined);
+  assert.match(repaired[2]?.content ?? "", /Duplicate tool calls removed/);
+});
+
 test("reads context metadata from OpenAI API model discovery", async () => {
   const originalFetch = globalThis.fetch;
   const requestedUrls: string[] = [];

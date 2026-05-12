@@ -6,6 +6,8 @@
     approvals: document.getElementById("approvals"),
     form: document.getElementById("promptForm"),
     input: document.getElementById("promptInput"),
+    runStatusLabel: document.getElementById("runStatusLabel"),
+    runStatusDots: document.getElementById("runStatusDots"),
     slashCommandMenu: document.getElementById("slashCommandMenu"),
     stopRun: document.getElementById("stopRun"),
     settingsPanel: document.getElementById("settingsPanel"),
@@ -86,6 +88,8 @@
   let editingMemoryId = "";
   let contextTooltipText = "Context used: 0 / 0 tokens (0%)\nClick to compact context.";
   let currentRunStatus = "Ready";
+  let currentRunStatusDetail = "Ready";
+  let currentRunStatusBusy = false;
   const builtInSlashCommands = [
     { name: "compact", description: "Compact the current session context", argumentHint: "[focus]" },
     { name: "context", description: "Show context usage and attached local context" },
@@ -483,7 +487,7 @@
       }
       addMessage(message.role, message.text);
     } else if (message.type === "assistantDelta") {
-      setRunStatus("Streaming response");
+      setRunStatus("Generating");
       if (!streamingMessage) {
         streamingMessage = addMessage("assistant", "");
       }
@@ -610,29 +614,16 @@
       elements.clearPinnedFiles.title = pinned.length > 0 ? `Clear pinned files:\n${pinned.join("\n")}` : "No pinned files";
       elements.clearPinnedFiles.disabled = pinned.length === 0;
     }
-    const bits = ["Local OpenAI API"];
-    if (workspaceReady) {
-      bits.push("Repo ready");
-    }
-    if (pinned.length > 0) {
-      bits.push(`${pinned.length} pinned`);
-    }
-    const tip = document.querySelector(".composer-tip");
-    if (tip) {
-      tip.replaceChildren();
-      const strong = document.createElement("strong");
-      strong.textContent = "CodeForge";
-      const status = document.createElement("span");
-      status.className = "composer-run-status";
-      status.textContent = currentRunStatus && currentRunStatus !== "Idle" ? currentRunStatus : "Ready";
-      tip.append(strong, document.createTextNode(" "), status, document.createTextNode(` ${bits.join(" - ")}`));
-    }
+    renderRunStatus();
   }
 
   function setRunStatus(text) {
     const normalized = String(text || "").trim();
-    currentRunStatus = !normalized || normalized === "Idle" ? "Ready" : truncateStatus(normalized);
-    renderActiveContext();
+    const display = runStatusDisplay(normalized);
+    currentRunStatus = truncateStatus(display.label);
+    currentRunStatusDetail = normalized || display.label;
+    currentRunStatusBusy = display.busy;
+    renderRunStatus();
   }
 
   function updateRunStatusFromToolUse(toolUse) {
@@ -650,6 +641,53 @@
 
   function truncateStatus(value) {
     return value.length > 64 ? `${value.slice(0, 61)}...` : value;
+  }
+
+  function renderRunStatus() {
+    if (elements.runStatusLabel) {
+      elements.runStatusLabel.textContent = currentRunStatus || "Ready";
+      elements.runStatusLabel.title = currentRunStatusDetail || currentRunStatus || "Ready";
+    }
+    if (elements.runStatusDots) {
+      elements.runStatusDots.classList.toggle("active", currentRunStatusBusy);
+    }
+  }
+
+  function runStatusDisplay(text) {
+    if (!text || text === "Idle") {
+      return { label: "Ready", busy: false };
+    }
+    if (/^(Calling|Model request|.* still waiting on )/.test(text) || /^Streaming response$/.test(text)) {
+      return { label: "Generating", busy: true };
+    }
+    if (/^Generating$/.test(text)) {
+      return { label: "Generating", busy: true };
+    }
+    if (/^Continuing after /.test(text)) {
+      return { label: "Generating", busy: true };
+    }
+    if (/^Continuing \d+ queued tool call/.test(text)) {
+      return { label: "Running queued tools", busy: true };
+    }
+    if (/^(Compacting context|Auto-compacting context)/.test(text)) {
+      return { label: "Compacting context", busy: true };
+    }
+    if (/^Running /.test(text)) {
+      return { label: text, busy: true };
+    }
+    if (/^Waiting for approval/.test(text)) {
+      return { label: "Waiting for approval", busy: false };
+    }
+    if (/^Stopping /.test(text)) {
+      return { label: "Stopping", busy: true };
+    }
+    if (/^Stopped/.test(text)) {
+      return { label: "Stopped", busy: false };
+    }
+    if (/^Error:/.test(text)) {
+      return { label: text, busy: false };
+    }
+    return { label: text, busy: false };
   }
 
   function renderMemoryList() {

@@ -32,6 +32,7 @@ export interface WorkerManagerOptions {
   readonly selectedModelInfo: () => ModelInfo | undefined;
   readonly permissionPolicy: () => PermissionPolicy;
   readonly executeAction: (action: AgentAction, toolCallId: string | undefined, worker: WorkerSummary) => Promise<string>;
+  readonly onReadFile?: (path: string, content: string, maxBytes: number) => void;
   readonly record: (factory: (sessionId: string) => SessionRecord) => void;
   readonly onDidChange: (workers: readonly WorkerSummary[]) => void;
   readonly onNotice: (message: string) => void;
@@ -531,6 +532,9 @@ export class WorkerManager {
     });
 
     for (const result of results) {
+      if (!result.isError && result.invocation.action.type === "read_file") {
+        this.options.onReadFile?.(result.invocation.action.path, readFileContentFromToolResult(result.content, result.invocation.action.path), 48000);
+      }
       trackResultPaths(task, result.content);
       this.appendWorkerToolResult(task, result.invocation, result.content);
     }
@@ -766,6 +770,11 @@ function trackResultPaths(task: WorkerTask, content: string): void {
 
 function toolError(message: string): string {
   return `<tool_use_error>Error: ${message}</tool_use_error>`;
+}
+
+function readFileContentFromToolResult(result: string, path: string): string {
+  const prefix = `read_file ${path}\n\n`;
+  return result.startsWith(prefix) ? result.slice(prefix.length) : result.replace(/^read_file[^\n]*\n\n/, "");
 }
 
 function finalSummary(assistantText: string, fallback: string | undefined): string {

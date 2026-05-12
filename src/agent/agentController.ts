@@ -39,6 +39,7 @@ import { OpenAiCompatibleProvider } from "../core/openaiAdapter";
 import { evaluateActionPermission, permissionModeLabel } from "../core/permissions";
 import { SessionRecord, SessionSnapshot, SessionStore, SessionSummary } from "../core/session";
 import { classifyShellCommand } from "../core/shellSemantics";
+import { normalizeWorkspacePathInput } from "../core/workspacePaths";
 import {
   AgentAction,
   AgentMode,
@@ -333,6 +334,13 @@ interface ToolSchemaSearchResult {
   readonly content: string;
 }
 
+interface ReadFileSnapshot {
+  readonly content: string;
+  readonly maxBytes: number;
+  readonly readAt: number;
+  readonly source: "tool" | "worker";
+}
+
 export class AgentController {
   private readonly config: CodeForgeConfigService;
   private readonly workspace: WorkspacePort;
@@ -352,6 +360,8 @@ export class AgentController {
   private readonly capabilityCache = new Map<string, ProviderCapabilities>();
   private readonly endpointCache = new Map<string, OpenAiEndpointInspection>();
   private readonly selectedModelByProfile = new Map<string, string>();
+  private readonly readFileState = new Map<string, ReadFileSnapshot>();
+  private readonly notebookReadState = new Set<string>();
   private messages: ChatMessage[] = [];
   private tasks = new Map<string, CodeForgeTask>();
   private lastContextItems: readonly ContextItem[] = [];
@@ -400,6 +410,7 @@ export class AgentController {
       selectedModelInfo: () => this.selectedModelInfo(),
       permissionPolicy: () => this.config.getPermissionPolicy(),
       executeAction: (action, toolCallId, worker) => this.executeWorkerAction(action, toolCallId, worker),
+      onReadFile: (path, content, maxBytes) => this.rememberReadFile(path, content, maxBytes, "worker"),
       record: (factory) => this.persistSessionRecord(factory),
       onDidChange: (workers) => this.emit({ type: "workers", workers }),
       onNotice: (message) => this.emit({ type: "message", role: "system", text: message })
@@ -422,6 +433,8 @@ export class AgentController {
         this.lastContextItems = [];
         this.mcpContextItems = [];
         this.pinnedFiles.clear();
+        this.readFileState.clear();
+        this.notebookReadState.clear();
         this.inspectorEntries = [];
         this.auditEntries = [];
         this.lastTokenUsage = undefined;
@@ -1056,6 +1069,8 @@ export class AgentController {
     this.lastContextItems = [];
     this.mcpContextItems = [];
     this.pinnedFiles.clear();
+    this.readFileState.clear();
+    this.notebookReadState.clear();
     this.inspectorEntries = [];
     this.auditEntries = [];
     this.lastTokenUsage = undefined;
@@ -1473,7 +1488,12 @@ export class AgentController {
           if (concurrentBatch.length > 0) {
             break;
           }
-          const approval = await this.requestApproval(invocation.action, invocation.toolCallId, decision);
+          const approval = await this.requestApprovalOrReturnToolError(invocation, decision);
+          if (!approval) {
+            continuedWithLocalContext = true;
+            index++;
+            continue;
+          }
           this.storeApprovalContinuation(approval.id, invocations.slice(index + 1));
           this.emitToolUseForInvocation(invocation, "approval", false);
           return false;
@@ -1523,7 +1543,12 @@ export class AgentController {
 
       if (decision.behavior === "ask") {
         this.recordAudit(invocation.action, decision, "approval");
-        const approval = await this.requestApproval(invocation.action, invocation.toolCallId, decision);
+        const approval = await this.requestApprovalOrReturnToolError(invocation, decision);
+        if (!approval) {
+          continuedWithLocalContext = true;
+          index++;
+          continue;
+        }
         this.storeApprovalContinuation(approval.id, invocations.slice(index + 1));
         this.emitToolUseForInvocation(invocation, "approval", false);
         return false;
@@ -1606,6 +1631,7 @@ export class AgentController {
   private async requestApproval(action: AgentAction, toolCallId: string | undefined, decision: PermissionDecision, metadata?: { readonly detail?: string; readonly risk?: string; readonly origin?: ApprovalRequest["origin"] }): Promise<ApprovalRequest> {
     let approvalMetadata = metadata ?? this.approvalMetadata(action, decision);
     try {
+      await this.preflightWritableAction(action);
       if (action.type === "propose_patch") {
         await this.diff.previewPatch(action.patch);
       } else if (action.type === "write_file") {
@@ -1614,6 +1640,9 @@ export class AgentController {
         await this.diff.previewEditFile(action);
       }
     } catch (error) {
+      if (isRecoverableEditPreflightError(error)) {
+        throw error;
+      }
       const previewError = `Diff preview unavailable: ${errorMessage(error)}`;
       this.recordInspector("warn", "approval", `Preview failed for ${action.type}.`, previewError);
       approvalMetadata = {
@@ -1626,6 +1655,95 @@ export class AgentController {
     this.recordInspector("warn", "approval", `Approval requested for ${action.type}.`, decision.reason);
     this.emit({ type: "approvalRequested", approval });
     return approval;
+  }
+
+  private async requestApprovalOrReturnToolError(invocation: ToolInvocation, decision: PermissionDecision): Promise<ApprovalRequest | undefined> {
+    try {
+      return await this.requestApproval(invocation.action, invocation.toolCallId, decision);
+    } catch (error) {
+      if (!isRecoverableEditPreflightError(error)) {
+        throw error;
+      }
+      const message = errorMessage(error);
+      this.recordAudit(invocation.action, decision, "failed");
+      this.recordInspector("warn", "approval", `${invocation.action.type} failed preflight.`, firstLines(message, 12));
+      this.appendDeniedOrInvalidToolResult(invocation, message);
+      return undefined;
+    }
+  }
+
+  private async preflightWritableAction(action: AgentAction): Promise<void> {
+    if (action.type === "notebook_edit_cell") {
+      const current = await this.readWorkspaceFileIfExists(action.path, 1);
+      if (current.exists && !this.notebookReadState.has(readStateKey(action.path))) {
+        throw modelRecoverableToolError([
+          `notebook_edit_cell requires reading ${action.path} before modifying an existing notebook.`,
+          "Call notebook_read for the exact repo-relative path, inspect the current cells, then retry the notebook edit.",
+          "Do not ask the user to approve this unchanged."
+        ].join("\n"));
+      }
+      return;
+    }
+
+    if (action.type !== "write_file" && action.type !== "edit_file") {
+      return;
+    }
+
+    const current = await this.readWorkspaceFileIfExists(action.path, 1);
+    if (!current.exists) {
+      return;
+    }
+
+    const key = readStateKey(action.path);
+    const snapshot = this.readFileState.get(key);
+    if (!snapshot) {
+      throw modelRecoverableToolError([
+        `${action.type} requires reading ${action.path} before modifying an existing file.`,
+        "Call read_file for the exact repo-relative path, inspect the current contents, then retry the edit or write.",
+        "Do not ask the user to approve this unchanged."
+      ].join("\n"));
+    }
+
+    const latest = await this.readWorkspaceFileIfExists(action.path, snapshot.maxBytes);
+    if (!latest.exists || latest.content !== snapshot.content) {
+      this.readFileState.delete(key);
+      throw modelRecoverableToolError([
+        `${action.type} cannot modify ${action.path} because the file changed since it was read.`,
+        "Call read_file again, inspect the current contents, then retry with a fresh edit or full-file write.",
+        "Do not repeat the same stale tool call unchanged."
+      ].join("\n"));
+    }
+  }
+
+  private async readWorkspaceFileIfExists(path: string, maxBytes: number): Promise<{ readonly exists: boolean; readonly content: string }> {
+    try {
+      return {
+        exists: true,
+        content: await this.workspace.readTextFile(path, maxBytes, this.runningAbort?.signal)
+      };
+    } catch (error) {
+      const message = errorMessage(error);
+      if (isMissingFileError(message)) {
+        return { exists: false, content: "" };
+      }
+      throw error;
+    }
+  }
+
+  private rememberReadFile(path: string, content: string, maxBytes: number, source: ReadFileSnapshot["source"]): void {
+    this.readFileState.set(readStateKey(path), {
+      content,
+      maxBytes,
+      readAt: Date.now(),
+      source
+    });
+  }
+
+  private async rememberCurrentFile(path: string): Promise<void> {
+    const current = await this.readWorkspaceFileIfExists(path, 48000);
+    if (current.exists) {
+      this.rememberReadFile(path, current.content, 48000, "tool");
+    }
   }
 
   private approvalMetadata(action: AgentAction, decision: PermissionDecision): { readonly detail?: string; readonly risk?: string } {
@@ -1759,7 +1877,16 @@ export class AgentController {
 
     if (decision.behavior === "ask") {
       this.recordAudit(action, decision, "approval");
-      const approval = await this.requestApproval(action, toolCallId, decision, this.workerApprovalMetadata(worker, action, decision));
+      let approval: ApprovalRequest;
+      try {
+        approval = await this.requestApproval(action, toolCallId, decision, this.workerApprovalMetadata(worker, action, decision));
+      } catch (error) {
+        if (!isRecoverableEditPreflightError(error)) {
+          throw error;
+        }
+        this.recordAudit(action, decision, "failed");
+        return toolError(errorMessage(error));
+      }
       this.emit({
         type: "toolUse",
         toolUse: {
@@ -2030,6 +2157,9 @@ export class AgentController {
         }
       );
       transcriptResult = result.content;
+      if (!result.isError && action.type === "read_file") {
+        this.rememberReadFile(action.path, readFileContentFromToolResult(transcriptResult, action.path), 48000, "tool");
+      }
       await this.runLocalHooks("postTool", action);
       return transcriptResult;
     }
@@ -2096,6 +2226,7 @@ export class AgentController {
 
     if (action.type === "notebook_read") {
       transcriptResult = await this.notebooks.execute(action, this.runningAbort?.signal);
+      this.notebookReadState.add(readStateKey(action.path));
       await this.runLocalHooks("postTool", action);
       return transcriptResult;
     }
@@ -2141,17 +2272,21 @@ export class AgentController {
     }
 
     if (action.type === "write_file") {
+      await this.preflightWritableAction(action);
       await this.recordCheckpoint(action, `Before writing ${action.path}.`);
       const changed = await this.diff.applyWriteFile(action);
       transcriptResult = `write_file ${action.path}\n\nWrote ${changed.join(", ")}.${await this.verifyChangedFiles(changed)}`;
+      this.rememberReadFile(action.path, action.content, Math.max(48000, Buffer.byteLength(action.content, "utf8")), "tool");
       await this.runLocalHooks("postTool", action);
       return transcriptResult;
     }
 
     if (action.type === "edit_file") {
+      await this.preflightWritableAction(action);
       await this.recordCheckpoint(action, `Before editing ${action.path}.`);
       const changed = await this.diff.applyEditFile(action);
       transcriptResult = `edit_file ${action.path}\n\nEdited ${changed.join(", ")}.${await this.verifyChangedFiles(changed)}`;
+      await this.rememberCurrentFile(action.path);
       await this.runLocalHooks("postTool", action);
       return transcriptResult;
     }
@@ -2175,9 +2310,11 @@ export class AgentController {
     }
 
     if (action.type === "notebook_edit_cell") {
+      await this.preflightWritableAction(action);
       await this.recordCheckpoint(action, `Before editing notebook ${action.path} cell ${action.index}.`);
       transcriptResult = await this.notebooks.execute(action, this.runningAbort?.signal);
       transcriptResult = `${transcriptResult}${await this.verifyChangedFiles([action.path])}`;
+      this.notebookReadState.add(readStateKey(action.path));
       await this.runLocalHooks("postTool", action);
       return transcriptResult;
     }
@@ -2677,6 +2814,8 @@ export class AgentController {
     this.lastContextItems = [];
     this.mcpContextItems = [];
     this.pinnedFiles.clear();
+    this.readFileState.clear();
+    this.notebookReadState.clear();
     this.inspectorEntries = [];
     this.auditEntries = [];
     this.lastTokenUsage = undefined;
@@ -4355,6 +4494,39 @@ function formatDuration(milliseconds: number): string {
   }
   const minutes = seconds / 60;
   return `${Number.isInteger(minutes) ? minutes : minutes.toFixed(1)}m`;
+}
+
+function isRecoverableEditPreflightError(error: unknown): boolean {
+  if (isRecord(error) && error.modelRecoverableToolError === true) {
+    return true;
+  }
+  const message = errorMessage(error);
+  return /edit_file oldText (?:was not found|appears \d+ times)/.test(message)
+    || /requires reading .* before modifying an existing file/.test(message)
+    || /requires reading .* before modifying an existing notebook/.test(message)
+    || /cannot modify .* because the file changed since it was read/.test(message);
+}
+
+function modelRecoverableToolError(message: string): Error & { readonly modelRecoverableToolError: true } {
+  const error = new Error(message) as Error & { modelRecoverableToolError: true };
+  Object.defineProperty(error, "modelRecoverableToolError", {
+    value: true,
+    enumerable: true
+  });
+  return error;
+}
+
+function readStateKey(path: string): string {
+  return normalizeWorkspacePathInput(path).replace(/^\/+/, "").replace(/^\.\//, "");
+}
+
+function readFileContentFromToolResult(result: string, path: string): string {
+  const prefix = `read_file ${path}\n\n`;
+  return result.startsWith(prefix) ? result.slice(prefix.length) : result.replace(/^read_file[^\n]*\n\n/, "");
+}
+
+function isMissingFileError(message: string): boolean {
+  return /(?:no such file|not found|does not exist|enoent|unable to resolve nonexistent)/i.test(message);
 }
 
 function summaryForInvocation(invocation: ToolInvocation): string {

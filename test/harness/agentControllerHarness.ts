@@ -215,6 +215,10 @@ export class FakeDiffService {
   }
 
   async previewEditFile(action: EditFileAction): Promise<void> {
+    const original = this.workspace.files.get(normalizePath(action.path)) ?? "";
+    if (!original.includes(action.oldText)) {
+      throw new Error(`edit_file oldText was not found in ${action.path}.\n\nCurrent file excerpts that may be relevant:\n1: ${original.split(/\r?\n/)[0] ?? ""}`);
+    }
     this.previews.push(action.path);
   }
 

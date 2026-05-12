@@ -279,7 +279,10 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
     <footer class="composer">
       <form id="promptForm" class="prompt">
         <div class="composer-card">
-          <div class="composer-tip"><strong>CodeForge</strong> Local OpenAI API</div>
+          <div class="composer-tip" aria-live="polite">
+            <span id="runStatusLabel" class="composer-run-status">Ready</span>
+            <span id="runStatusDots" class="composer-run-dots" aria-hidden="true"><span></span><span></span><span></span></span>
+          </div>
           <div class="prompt-input-wrap">
             <textarea id="promptInput" rows="1" placeholder="Describe what to build" aria-controls="slashCommandMenu" aria-autocomplete="list"></textarea>
             <div id="slashCommandMenu" class="slash-command-menu hidden" role="listbox" aria-label="Slash commands"></div>
