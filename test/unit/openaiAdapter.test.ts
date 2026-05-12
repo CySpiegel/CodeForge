@@ -133,6 +133,107 @@ test("stops streaming when an OpenAI-compatible endpoint sends finish_reason wit
   }
 });
 
+test("stops streaming after an OpenAI-compatible endpoint goes quiet after content", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalGrace = process.env.CODEFORGE_OPENAI_STREAM_COMPLETION_GRACE_MS;
+  process.env.CODEFORGE_OPENAI_STREAM_COMPLETION_GRACE_MS = "25";
+  globalThis.fetch = async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const encoder = new TextEncoder();
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "done" } }] })}`));
+      }
+    });
+
+    return new Response(stream, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" }
+    });
+  };
+
+  try {
+    const provider = new OpenAiCompatibleProvider(
+      { id: "test", label: "Test", baseUrl: "http://127.0.0.1:4000/v1" },
+      { allowlist: [] }
+    );
+
+    const events = await Promise.race([
+      (async () => {
+        const result = [];
+        for await (const event of provider.streamChat({ model: "local-model", messages: [{ role: "user", content: "hi" }] })) {
+          result.push(event);
+        }
+        return result;
+      })(),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error("streamChat did not stop after quiet content stream")), 250);
+      })
+    ]);
+
+    assert.equal(events.filter((event) => event.type === "content").map((event) => event.text).join(""), "done");
+    assert.equal(events[events.length - 1]?.type, "done");
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalGrace === undefined) {
+      delete process.env.CODEFORGE_OPENAI_STREAM_COMPLETION_GRACE_MS;
+    } else {
+      process.env.CODEFORGE_OPENAI_STREAM_COMPLETION_GRACE_MS = originalGrace;
+    }
+  }
+});
+
+test("returns tool calls after an OpenAI-compatible endpoint goes quiet", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalGrace = process.env.CODEFORGE_OPENAI_STREAM_COMPLETION_GRACE_MS;
+  process.env.CODEFORGE_OPENAI_STREAM_COMPLETION_GRACE_MS = "25";
+  globalThis.fetch = async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const encoder = new TextEncoder();
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: "call-1", type: "function", function: { name: "write_file", arguments: "{\"path\":\"test/unit/a.test.ts\",\"content\":\"ok\"}" } }] } }] })}\n\n`));
+      }
+    });
+
+    return new Response(stream, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" }
+    });
+  };
+
+  try {
+    const provider = new OpenAiCompatibleProvider(
+      { id: "test", label: "Test", baseUrl: "http://127.0.0.1:4000/v1" },
+      { allowlist: [] }
+    );
+
+    const events = await Promise.race([
+      (async () => {
+        const result = [];
+        for await (const event of provider.streamChat({ model: "local-model", messages: [{ role: "user", content: "hi" }] })) {
+          result.push(event);
+        }
+        return result;
+      })(),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error("streamChat did not stop after quiet tool-call stream")), 250);
+      })
+    ]);
+
+    const toolCallEvent = events.find((event) => event.type === "toolCalls");
+    assert.ok(toolCallEvent && toolCallEvent.type === "toolCalls");
+    assert.equal(toolCallEvent.toolCalls[0]?.name, "write_file");
+    assert.equal(toolCallEvent.toolCalls[0]?.argumentsJson, "{\"path\":\"test/unit/a.test.ts\",\"content\":\"ok\"}");
+    assert.equal(events[events.length - 1]?.type, "done");
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalGrace === undefined) {
+      delete process.env.CODEFORGE_OPENAI_STREAM_COMPLETION_GRACE_MS;
+    } else {
+      process.env.CODEFORGE_OPENAI_STREAM_COMPLETION_GRACE_MS = originalGrace;
+    }
+  }
+});
+
 test("treats streamed reasoning chunks as model progress", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => {

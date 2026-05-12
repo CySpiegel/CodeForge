@@ -660,7 +660,7 @@
     if (!text || text === "Idle") {
       return { label: "Ready", busy: false };
     }
-    const waitingMatch = text.match(/^(?:.* )?still waiting on [^:]+: ([^,]+) idle, ([^.]+) before timeout\./);
+    const waitingMatch = text.match(/still waiting on [^:]+: ([^,]+) idle, (.+?) before timeout\./);
     if (waitingMatch) {
       return { label: `Waiting for model (${waitingMatch[1]} idle)`, busy: true };
     }

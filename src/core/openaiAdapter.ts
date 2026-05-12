@@ -78,40 +78,73 @@ export class OpenAiCompatibleProvider implements LlmProvider {
     const decoder = new TextDecoder();
     const parser = new SseParser();
     const toolCalls = new Map<number, OpenAiToolCallState>();
+    const reader = response.body.getReader();
+    const streamCompletionGraceMs = openAiStreamCompletionGraceMs();
+    let sawStreamEvent = false;
 
     let streamDone = false;
-    streamLoop:
-    for await (const rawChunk of response.body as unknown as AsyncIterable<Uint8Array>) {
-      const text = decoder.decode(rawChunk, { stream: true });
-      const events = parser.push(text);
-      if (events.length === 0 && text.trim()) {
-        yield { type: "progress" };
-      }
-      for (const event of events) {
-        if (event.data === "[DONE]") {
-          streamDone = true;
-          break streamLoop;
+    try {
+      streamLoop:
+      while (true) {
+        let quietTimer: ReturnType<typeof setTimeout> | undefined;
+        const readPromise = reader.read();
+        const quietPromise = sawStreamEvent
+          ? new Promise<"quiet">((resolve) => {
+            quietTimer = setTimeout(() => resolve("quiet"), streamCompletionGraceMs);
+          })
+          : undefined;
+        let readResult: ReadableStreamReadResult<Uint8Array> | "quiet";
+        try {
+          readResult = quietPromise ? await Promise.race([readPromise, quietPromise]) : await readPromise;
+        } finally {
+          if (quietTimer) {
+            clearTimeout(quietTimer);
+          }
         }
-        yield* this.parseStreamEvent(event.data, toolCalls);
-        if (hasFinishReason(event.data)) {
-          streamDone = true;
-          break streamLoop;
-        }
-      }
-    }
 
-    if (!streamDone) {
-      for (const event of parser.flush()) {
-        if (event.data === "[DONE]") {
-          streamDone = true;
+        if (readResult === "quiet") {
+          await reader.cancel().catch(() => undefined);
           break;
         }
-        yield* this.parseStreamEvent(event.data, toolCalls);
-        if (hasFinishReason(event.data)) {
-          streamDone = true;
+        if (readResult.done) {
           break;
+        }
+
+        const text = decoder.decode(readResult.value, { stream: true });
+        const events = parser.push(text);
+        if (events.length === 0 && text.trim()) {
+          sawStreamEvent = true;
+          yield { type: "progress" };
+        }
+        for (const event of events) {
+          if (event.data === "[DONE]") {
+            streamDone = true;
+            break streamLoop;
+          }
+          sawStreamEvent = true;
+          yield* this.parseStreamEvent(event.data, toolCalls);
+          if (hasFinishReason(event.data)) {
+            streamDone = true;
+            break streamLoop;
+          }
         }
       }
+
+      if (!streamDone) {
+        for (const event of parser.flush()) {
+          if (event.data === "[DONE]") {
+            streamDone = true;
+            break;
+          }
+          yield* this.parseStreamEvent(event.data, toolCalls);
+          if (hasFinishReason(event.data)) {
+            streamDone = true;
+            break;
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
     }
 
     const finalToolCalls = [...toolCalls.values()]
@@ -539,6 +572,14 @@ function hasFinishReason(data: string): boolean {
   } catch {
     return false;
   }
+}
+
+function openAiStreamCompletionGraceMs(): number {
+  const configured = Number(process.env.CODEFORGE_OPENAI_STREAM_COMPLETION_GRACE_MS);
+  if (Number.isFinite(configured) && configured > 0) {
+    return Math.min(Math.max(configured, 10), 120_000);
+  }
+  return 15_000;
 }
 
 function findPositiveInteger(value: unknown, keys: readonly string[], depth = 0): number | undefined {
