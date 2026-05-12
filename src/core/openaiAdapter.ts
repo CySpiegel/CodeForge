@@ -241,6 +241,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
         current.name = delta.function?.name ?? current.name;
         current.argumentsJson += delta.function?.arguments ?? "";
         toolCalls.set(index, current);
+        yield { type: "progress" };
       }
     }
   }

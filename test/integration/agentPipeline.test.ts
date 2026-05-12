@@ -319,6 +319,8 @@ test("Manual approval pauses side effects, then approve resumes the model loop",
   await harness.controller.approve(approval.approval.id);
   await waitForEvent(harness.events, (event) => event.type === "message" && event.role === "assistant" && /Approved write completed/.test(event.text));
 
+  assert.ok(harness.events.some((event) => event.type === "toolUse" && event.toolUse.name === "write_file" && event.toolUse.status === "running"));
+  assert.ok(harness.events.some((event) => event.type === "toolUse" && event.toolUse.name === "write_file" && event.toolUse.status === "completed"));
   assert.equal(harness.diff.writes.length, 1);
   assert.equal(harness.workspace.files.get("APPROVED.md"), "approved");
 });
@@ -349,6 +351,8 @@ test("Smart approval asks before applying file edits in Agent mode", async () =>
   await harness.controller.approve(approval.approval.id);
   await waitForEvent(harness.events, (event) => event.type === "message" && event.role === "assistant" && /Smart-approved edit completed/.test(event.text));
 
+  assert.ok(harness.events.some((event) => event.type === "toolUse" && event.toolUse.name === "edit_file" && event.toolUse.status === "running"));
+  assert.ok(harness.events.some((event) => event.type === "toolUse" && event.toolUse.name === "edit_file" && event.toolUse.status === "completed"));
   assert.equal(harness.diff.edits.length, 1);
   assert.equal(harness.workspace.files.get("README.md"), "# CodeForge\nnew\n");
 });

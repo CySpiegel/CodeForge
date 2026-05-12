@@ -125,6 +125,45 @@ test("treats streamed reasoning chunks as model progress", async () => {
   }
 });
 
+test("treats streamed tool-call argument chunks as model progress", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const encoder = new TextEncoder();
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: "call-1", type: "function", function: { name: "edit_file", arguments: "{\"path\":" } }] } }] })}\n\n`));
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: "\"README.md\",\"oldText\":\"old\",\"newText\":\"new\"}" } }] } }] })}\n\n`));
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      }
+    });
+
+    return new Response(stream, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" }
+    });
+  };
+
+  try {
+    const provider = new OpenAiCompatibleProvider(
+      { id: "test", label: "Test", baseUrl: "http://127.0.0.1:4000/v1" },
+      { allowlist: [] }
+    );
+    const events = [];
+    for await (const event of provider.streamChat({ model: "local-model", messages: [{ role: "user", content: "hi" }] })) {
+      events.push(event);
+    }
+
+    assert.equal(events.filter((event) => event.type === "progress").length, 2);
+    const toolCallEvent = events.find((event) => event.type === "toolCalls");
+    assert.ok(toolCallEvent && toolCallEvent.type === "toolCalls");
+    assert.equal(toolCallEvent.toolCalls[0]?.name, "edit_file");
+    assert.equal(toolCallEvent.toolCalls[0]?.argumentsJson, "{\"path\":\"README.md\",\"oldText\":\"old\",\"newText\":\"new\"}");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("serializes assistant tool calls and tool results", async () => {
   const originalFetch = globalThis.fetch;
   let postedBody = "";

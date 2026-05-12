@@ -1202,11 +1202,13 @@ export class AgentController {
     const remainingInvocations = this.approvalContinuations.get(id);
     this.approvalContinuations.delete(id);
     const workerWaiter = this.workerApprovalWaiters.get(id);
+    const approvalInvocation = invocationForApproval(approval);
 
     const validation = validateAction(approval.action);
     if (!validation.ok) {
       const message = validation.message ?? "Stored approval failed validation.";
       const text = toolError(message);
+      this.emitToolUseForInvocation(approvalInvocation, "failed", false);
       await this.recordApprovalResolved(id, false, message);
       if (workerWaiter) {
         this.workerApprovalWaiters.delete(id);
@@ -1227,6 +1229,7 @@ export class AgentController {
 
     if (approval.origin === "worker" && !workerWaiter) {
       const text = "This worker approval expired because the worker is no longer running.";
+      this.emitToolUseForInvocation(approvalInvocation, "failed", false);
       await this.recordApprovalResolved(id, false, text);
       this.emit({ type: "approvalResolved", id, accepted: false, text });
       this.emit({ type: "error", text });
@@ -1235,6 +1238,7 @@ export class AgentController {
     }
     if (workerWaiter && !this.workers.list().some((worker) => worker.id === workerWaiter.workerId && worker.status === "running")) {
       const text = "This worker approval expired because the worker was stopped before approval.";
+      this.emitToolUseForInvocation(approvalInvocation, "failed", false);
       this.workerApprovalWaiters.delete(id);
       workerWaiter.resolve(toolError(text));
       await this.recordApprovalResolved(id, false, text);
@@ -1247,8 +1251,10 @@ export class AgentController {
     await this.recordApprovalResolved(id, true, "Accepted.");
     this.recordAudit(approval.action, approvalPermissionDecision(approval), "accepted");
     this.recordInspector("info", "approval", `Approved ${approval.action.type}.`, approval.summary);
+    this.emitToolUseForInvocation(approvalInvocation, "running", false);
     try {
       const transcriptResult = await this.executePermittedAction(approval.action, approval.toolCallId);
+      this.emitToolUseForInvocation(approvalInvocation, isToolErrorText(transcriptResult) ? "failed" : "completed", false);
       if (workerWaiter) {
         this.workerApprovalWaiters.delete(id);
         workerWaiter.resolve(transcriptResult);
@@ -1277,6 +1283,7 @@ export class AgentController {
     } catch (error) {
       const message = errorMessage(error);
       const text = toolError(message);
+      this.emitToolUseForInvocation(approvalInvocation, "failed", false);
       this.recordAudit(approval.action, approvalPermissionDecision(approval), "failed");
       this.recordInspector("error", "approval", `Approved ${approval.action.type} failed.`, message);
       if (workerWaiter) {
@@ -4482,6 +4489,15 @@ function modelStreamIdleTimeoutMs(): number {
     return Math.max(10, Math.floor(configured));
   }
   return defaultModelStreamIdleTimeoutMs;
+}
+
+function invocationForApproval(approval: ApprovalRequest): ToolInvocation {
+  return {
+    id: approval.toolCallId ?? approval.id,
+    action: approval.action,
+    source: approval.toolCallId ? "native" : "json",
+    toolCallId: approval.toolCallId
+  };
 }
 
 function formatDuration(milliseconds: number): string {
