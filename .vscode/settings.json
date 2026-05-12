@@ -1,5 +1,7 @@
 {
     "codeforge.model": "google/gemma-4-31b",
     "codeforge.agent.mode": "agent",
-    "codeforge.permissions.mode": "smart"
+    "codeforge.permissions.mode": "smart",
+    "codeforge.permissions.rules": [],
+    "codeforge.mcp.servers": []
 }
