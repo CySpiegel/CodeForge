@@ -50,13 +50,20 @@ interface OpenAiToolCallState {
   argumentsJson: string;
 }
 
+export interface OpenAiProviderOptions {
+  readonly streamCompletionGraceMs?: number;
+  readonly streamQuietExtensions?: number;
+}
+
 export class OpenAiCompatibleProvider implements LlmProvider {
   readonly profile: ProviderProfile;
   private readonly policy: NetworkPolicy;
+  private readonly options: OpenAiProviderOptions;
 
-  constructor(profile: ProviderProfile, policy: NetworkPolicy) {
+  constructor(profile: ProviderProfile, policy: NetworkPolicy, options: OpenAiProviderOptions = {}) {
     this.profile = profile;
     this.policy = policy;
+    this.options = options;
   }
 
   async *streamChat(request: LlmRequest): AsyncIterable<LlmStreamEvent> {
@@ -79,15 +86,20 @@ export class OpenAiCompatibleProvider implements LlmProvider {
     const parser = new SseParser();
     const toolCalls = new Map<number, OpenAiToolCallState>();
     const reader = response.body.getReader();
-    const streamCompletionGraceMs = openAiStreamCompletionGraceMs();
+    const streamCompletionGraceMs = resolveStreamCompletionGraceMs(this.options.streamCompletionGraceMs);
     let sawStreamEvent = false;
+    let quietExtensionsRemaining = resolveStreamQuietExtensions(this.options.streamQuietExtensions);
 
     let streamDone = false;
+    let pendingRead: Promise<ReadableStreamReadResult<Uint8Array>> | undefined;
     try {
       streamLoop:
       while (true) {
         let quietTimer: ReturnType<typeof setTimeout> | undefined;
-        const readPromise = reader.read();
+        if (!pendingRead) {
+          pendingRead = reader.read();
+        }
+        const readPromise = pendingRead;
         const quietPromise = sawStreamEvent
           ? new Promise<"quiet">((resolve) => {
             quietTimer = setTimeout(() => resolve("quiet"), streamCompletionGraceMs);
@@ -103,9 +115,14 @@ export class OpenAiCompatibleProvider implements LlmProvider {
         }
 
         if (readResult === "quiet") {
+          if (quietExtensionsRemaining > 0 && hasIncompleteToolCallArgs(toolCalls)) {
+            quietExtensionsRemaining--;
+            continue;
+          }
           await reader.cancel().catch(() => undefined);
           break;
         }
+        pendingRead = undefined;
         if (readResult.done) {
           break;
         }
@@ -574,12 +591,44 @@ function hasFinishReason(data: string): boolean {
   }
 }
 
-function openAiStreamCompletionGraceMs(): number {
+function resolveStreamCompletionGraceMs(optionMs: number | undefined): number {
+  if (typeof optionMs === "number" && Number.isFinite(optionMs) && optionMs > 0) {
+    return Math.min(Math.max(optionMs, 10), 120_000);
+  }
   const configured = Number(process.env.CODEFORGE_OPENAI_STREAM_COMPLETION_GRACE_MS);
   if (Number.isFinite(configured) && configured > 0) {
     return Math.min(Math.max(configured, 10), 120_000);
   }
-  return 15_000;
+  return 30_000;
+}
+
+function resolveStreamQuietExtensions(optionCount: number | undefined): number {
+  if (typeof optionCount === "number" && Number.isFinite(optionCount) && optionCount >= 0) {
+    return Math.min(Math.max(Math.floor(optionCount), 0), 5);
+  }
+  const configured = Number(process.env.CODEFORGE_OPENAI_STREAM_QUIET_EXTENSIONS);
+  if (Number.isFinite(configured) && configured >= 0) {
+    return Math.min(Math.max(Math.floor(configured), 0), 5);
+  }
+  return 1;
+}
+
+function hasIncompleteToolCallArgs(toolCalls: ReadonlyMap<number, OpenAiToolCallState>): boolean {
+  for (const toolCall of toolCalls.values()) {
+    if (!toolCall.name) {
+      continue;
+    }
+    const args = toolCall.argumentsJson.trim();
+    if (args.length === 0) {
+      return true;
+    }
+    try {
+      JSON.parse(args);
+    } catch {
+      return true;
+    }
+  }
+  return false;
 }
 
 function findPositiveInteger(value: unknown, keys: readonly string[], depth = 0): number | undefined {

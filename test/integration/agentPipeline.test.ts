@@ -798,6 +798,69 @@ test("controller loads concrete MCP tool schemas and maps function calls back to
   }
 });
 
+test("agent loop stops after the configured number of consecutive invalid tool-call retries", async () => {
+  const harness = createControllerHarness({
+    mode: "agent",
+    permissionMode: "fullAuto",
+    files: { "README.md": "# CodeForge\n" },
+    maxInvalidToolCallRetries: 1,
+    responses: [
+      { toolCalls: [toolCall("does_not_exist", {})] },
+      { toolCalls: [toolCall("also_missing", {})] },
+      { toolCalls: [toolCall("still_missing", {})] }
+    ]
+  });
+
+  await harness.controller.sendPrompt("Try something the model cannot do.");
+
+  assert.ok(harness.events.some((event) => event.type === "error" && /consecutive invalid tool-call/i.test(event.text)), "expected an error event explaining the invalid tool-call cap");
+  const completion = harness.events.find((event) => event.type === "runComplete");
+  assert.ok(completion && completion.type === "runComplete");
+  assert.equal(completion.reason, "idle");
+  assert.ok(harness.provider.requests.length <= 3, `should not have exhausted the full tool turn budget, got ${harness.provider.requests.length} requests`);
+});
+
+test("runPrompt emits runComplete with reason idle after a finished turn", async () => {
+  const harness = createControllerHarness({
+    mode: "agent",
+    permissionMode: "fullAuto",
+    files: { "README.md": "# CodeForge\n" },
+    responses: [
+      { toolCalls: [toolCall("write_file", { path: "DONE.md", content: "ok" })] },
+      { content: "Wrote DONE.md." }
+    ]
+  });
+
+  await harness.controller.sendPrompt("Create DONE.md.");
+
+  const completion = harness.events.find((event) => event.type === "runComplete");
+  assert.ok(completion && completion.type === "runComplete", "expected a runComplete event");
+  assert.equal(completion.reason, "idle");
+});
+
+test("runPrompt emits runComplete with reason awaitingApproval when an approval is pending", async () => {
+  const harness = createControllerHarness({
+    mode: "agent",
+    permissionMode: "manual",
+    files: { "README.md": "# CodeForge\n" },
+    responses: [
+      { toolCalls: [toolCall("write_file", { path: "PENDING.md", content: "wait" })] },
+      { content: "Approved." }
+    ]
+  });
+
+  await harness.controller.sendPrompt("Create PENDING.md.");
+
+  const approval = harness.events.find((event) => event.type === "approvalRequested");
+  assert.ok(approval && approval.type === "approvalRequested");
+  const completion = harness.events.find((event) => event.type === "runComplete");
+  assert.ok(completion && completion.type === "runComplete", "expected a runComplete event while waiting for approval");
+  assert.equal(completion.reason, "awaitingApproval");
+
+  await harness.controller.approve(approval.approval.id);
+  await waitForEvent(harness.events, (event) => event.type === "runComplete" && event.reason === "idle");
+});
+
 function assertToolCompleted(events: readonly AgentUiEvent[], name: string): void {
   assert.ok(events.some((event) => event.type === "toolUse" && event.toolUse.name === name && event.toolUse.status === "completed"), `${name} should complete`);
 }

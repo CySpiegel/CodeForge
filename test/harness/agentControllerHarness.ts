@@ -356,6 +356,8 @@ export interface ControllerHarnessOptions {
   readonly mcpServers?: readonly McpServerConfig[];
   readonly permissionMode?: PermissionMode;
   readonly contextLimits?: ContextLimits;
+  readonly maxInvalidToolCallRetries?: number;
+  readonly streamCompletionGraceSeconds?: number;
 }
 
 export function createControllerHarness(options: ControllerHarnessOptions): ControllerHarness {
@@ -378,6 +380,8 @@ export function createControllerHarness(options: ControllerHarnessOptions): Cont
     getContextLimits: () => contextLimits,
     getCommandTimeoutSeconds: () => 10,
     getModelIdleTimeoutSeconds: () => 300,
+    getStreamCompletionGraceSeconds: () => options.streamCompletionGraceSeconds ?? 30,
+    getMaxInvalidToolCallRetries: () => options.maxInvalidToolCallRetries ?? 3,
     getCommandOutputLimitBytes: () => 12000,
     getActiveProfileId: () => fakeProfile.id,
     getProfiles: () => [fakeProfile]

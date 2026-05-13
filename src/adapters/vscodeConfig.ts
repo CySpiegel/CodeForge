@@ -44,6 +44,14 @@ export class CodeForgeConfigService {
     return clampNumber(this.config().get<number>("requests.idleTimeoutSeconds", 300), 30, 1800, 300);
   }
 
+  getStreamCompletionGraceSeconds(): number {
+    return clampNumber(this.config().get<number>("requests.streamCompletionGraceSeconds", 30), 1, 120, 30);
+  }
+
+  getMaxInvalidToolCallRetries(): number {
+    return clampNumber(this.config().get<number>("agent.maxInvalidToolCallRetries", 3), 0, 20, 3);
+  }
+
   getCommandOutputLimitBytes(): number {
     return clampNumber(this.config().get<number>("commands.outputLimitBytes", 200000), 16000, 2_000_000, 200000);
   }
@@ -167,6 +175,12 @@ export class CodeForgeConfigService {
     if (settings.modelIdleTimeoutSeconds !== undefined) {
       await config.update("requests.idleTimeoutSeconds", clampNumber(settings.modelIdleTimeoutSeconds, 30, 1800, 300), vscode.ConfigurationTarget.Global);
     }
+    if (settings.streamCompletionGraceSeconds !== undefined) {
+      await config.update("requests.streamCompletionGraceSeconds", clampNumber(settings.streamCompletionGraceSeconds, 1, 120, 30), vscode.ConfigurationTarget.Global);
+    }
+    if (settings.maxInvalidToolCallRetries !== undefined) {
+      await this.updateRepoSetting("agent.maxInvalidToolCallRetries", clampNumber(settings.maxInvalidToolCallRetries, 0, 20, 3));
+    }
     if (settings.commandOutputLimitBytes !== undefined) {
       await config.update("commands.outputLimitBytes", clampNumber(settings.commandOutputLimitBytes, 16000, 2_000_000, 200000), vscode.ConfigurationTarget.Global);
     }
@@ -280,6 +294,8 @@ export interface CodeForgeSettingsUpdate {
   readonly maxBytes: number;
   readonly commandTimeoutSeconds: number;
   readonly modelIdleTimeoutSeconds: number;
+  readonly streamCompletionGraceSeconds: number;
+  readonly maxInvalidToolCallRetries: number;
   readonly commandOutputLimitBytes: number;
   readonly permissionMode: PermissionMode;
   readonly permissionRules: readonly PermissionRule[];

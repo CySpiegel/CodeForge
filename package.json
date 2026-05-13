@@ -2,7 +2,7 @@
   "name": "codeforge",
   "displayName": "CodeForge",
   "description": "A self-hosted-first coding harness extension for Visual Studio Code.",
-  "version": "0.0.8",
+  "version": "0.0.9",
   "publisher": "codeforge",
   "license": "UNLICENSED",
   "engines": {
@@ -326,6 +326,21 @@
           "minimum": 30,
           "maximum": 1800,
           "description": "Maximum time CodeForge waits without model stream activity before stopping a model request."
+        },
+        "codeforge.requests.streamCompletionGraceSeconds": {
+          "type": "number",
+          "default": 30,
+          "minimum": 1,
+          "maximum": 120,
+          "description": "Time the OpenAI adapter waits after the last streamed chunk before treating the stream as finished. Increase this for slow local models that pause between tool-call argument fragments."
+        },
+        "codeforge.agent.maxInvalidToolCallRetries": {
+          "type": "number",
+          "default": 3,
+          "minimum": 0,
+          "maximum": 20,
+          "scope": "resource",
+          "description": "How many consecutive iterations the agent loop will tolerate when the model only produces invalid (unparseable) native tool calls before stopping with an error."
         },
         "codeforge.commands.outputLimitBytes": {
           "type": "number",

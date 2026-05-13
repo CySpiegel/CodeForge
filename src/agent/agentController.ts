@@ -92,7 +92,8 @@ export type AgentUiEvent =
   | { readonly type: "openSettings" }
   | { readonly type: "approvalRequested"; readonly approval: ApprovalRequest }
   | { readonly type: "approvalResolved"; readonly id: string; readonly accepted: boolean; readonly text: string }
-  | { readonly type: "error"; readonly text: string };
+  | { readonly type: "error"; readonly text: string }
+  | { readonly type: "runComplete"; readonly reason: "idle" | "awaitingApproval" };
 
 export interface AgentUiState {
   readonly profiles: readonly AgentProfileSummary[];
@@ -181,6 +182,8 @@ export interface AgentSettingsSummary {
   readonly maxBytes: number;
   readonly commandTimeoutSeconds: number;
   readonly modelIdleTimeoutSeconds: number;
+  readonly streamCompletionGraceSeconds: number;
+  readonly maxInvalidToolCallRetries: number;
   readonly commandOutputLimitBytes: number;
   readonly permissionMode: string;
   readonly permissionRules: readonly unknown[];
@@ -1368,6 +1371,8 @@ export class AgentController {
 
   private async runModelLoop(provider: LlmProvider, model: string, abort: AbortController, continuationPrompt?: string): Promise<void> {
     const maxToolTurns = this.config.getAgentMode() === "agent" ? maxAgentToolTurns : maxReadOnlyToolTurns;
+    const maxInvalidRetries = this.config.getMaxInvalidToolCallRetries();
+    let consecutiveInvalidIterations = 0;
     for (let iteration = 0; iteration < maxToolTurns; iteration++) {
       this.compactOldToolResultsIfNeeded();
       this.emit({ type: "status", text: `Calling ${provider.profile.label} / ${model}` });
@@ -1437,11 +1442,20 @@ export class AgentController {
       const actions = [...invocations, ...fallbackActions];
       if (actions.length === 0) {
         if (invalidNativeToolCalls.length > 0) {
+          consecutiveInvalidIterations++;
+          if (consecutiveInvalidIterations > maxInvalidRetries) {
+            const stopMessage = `Stopped after ${consecutiveInvalidIterations} consecutive invalid tool-call iteration${consecutiveInvalidIterations === 1 ? "" : "s"} from the model.`;
+            this.recordInspector("error", "run", stopMessage, "Raise codeforge.agent.maxInvalidToolCallRetries if your model needs more retries, or check the model's tool-call format.");
+            this.emit({ type: "error", text: stopMessage });
+            this.emit({ type: "status", text: stopMessage });
+            return;
+          }
           continue;
         }
         this.emit({ type: "status", text: "Idle" });
         return;
       }
+      consecutiveInvalidIterations = 0;
 
       const shouldContinue = await this.handleActions(actions);
       if (abort.signal.aborted) {
@@ -2485,6 +2499,7 @@ export class AgentController {
     }
     const nextWork = this.queuedWork.shift();
     if (!nextWork) {
+      this.emitRunCompleteIfIdle();
       return;
     }
     if (nextWork.type === "compact") {
@@ -2492,6 +2507,14 @@ export class AgentController {
     } else {
       void this.runPrompt(nextWork.visiblePrompt, nextWork.modelPrompt, false);
     }
+  }
+
+  private emitRunCompleteIfIdle(): void {
+    if (this.runningAbort || this.continueAfterCurrentRun || this.queuedWork.length > 0) {
+      return;
+    }
+    const reason = this.approvals.list().length > 0 ? "awaitingApproval" : "idle";
+    this.emit({ type: "runComplete", reason });
   }
 
   private appendToolResult(toolCallId: string | undefined, toolName: string, content: string): void {
@@ -2543,7 +2566,9 @@ export class AgentController {
       return this.providerFactory();
     }
     const profile = await this.config.getActiveProfile();
-    return new OpenAiCompatibleProvider(profile, this.config.getNetworkPolicy());
+    return new OpenAiCompatibleProvider(profile, this.config.getNetworkPolicy(), {
+      streamCompletionGraceMs: this.config.getStreamCompletionGraceSeconds() * 1000
+    });
   }
 
   private async resolveModel(provider: LlmProvider, signal: AbortSignal): Promise<string> {
@@ -3636,6 +3661,8 @@ export class AgentController {
         maxBytes: contextLimits.maxBytes,
         commandTimeoutSeconds: this.config.getCommandTimeoutSeconds(),
         modelIdleTimeoutSeconds: this.config.getModelIdleTimeoutSeconds(),
+        streamCompletionGraceSeconds: this.config.getStreamCompletionGraceSeconds(),
+        maxInvalidToolCallRetries: this.config.getMaxInvalidToolCallRetries(),
         commandOutputLimitBytes: this.config.getCommandOutputLimitBytes(),
         permissionMode: permissionPolicy.mode,
         permissionRules: permissionPolicy.rules,

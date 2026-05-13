@@ -130,6 +130,9 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
         maxTokens: typeof message.maxTokens === "number" ? message.maxTokens : undefined,
         maxBytes: typeof message.maxBytes === "number" ? message.maxBytes : undefined,
         commandTimeoutSeconds: typeof message.commandTimeoutSeconds === "number" ? message.commandTimeoutSeconds : undefined,
+        modelIdleTimeoutSeconds: typeof message.modelIdleTimeoutSeconds === "number" ? message.modelIdleTimeoutSeconds : undefined,
+        streamCompletionGraceSeconds: typeof message.streamCompletionGraceSeconds === "number" ? message.streamCompletionGraceSeconds : undefined,
+        maxInvalidToolCallRetries: typeof message.maxInvalidToolCallRetries === "number" ? message.maxInvalidToolCallRetries : undefined,
         commandOutputLimitBytes: typeof message.commandOutputLimitBytes === "number" ? message.commandOutputLimitBytes : undefined,
         permissionMode: parsePermissionMode(message.permissionMode),
         permissionRules: message.permissionRules === undefined ? undefined : parsePermissionRules(message.permissionRules, "workspace")
@@ -210,6 +213,8 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
               <label class="wide">Context window tokens<input id="maxTokens" type="number" min="0" max="10000000" placeholder="Auto"></label>
               <label>Terminal command timeout seconds<input id="commandTimeout" type="number" min="5" max="1800"></label>
               <label>Model idle timeout seconds<input id="modelIdleTimeout" type="number" min="30" max="1800"></label>
+              <label>Stream completion grace seconds<input id="streamCompletionGrace" type="number" min="1" max="120" title="Time the OpenAI adapter waits after the last streamed chunk before treating the stream as finished. Raise for slow local models."></label>
+              <label>Max invalid tool-call retries<input id="maxInvalidToolCallRetries" type="number" min="0" max="20" title="Consecutive invalid tool-call iterations the agent will tolerate before stopping with an error."></label>
               <label>Terminal output tokens<input id="commandOutputLimit" type="number" min="4000" max="500000"></label>
               <label class="wide">Network allowlist<textarea id="allowlist" rows="3" placeholder="one host, origin, or CIDR per line"></textarea></label>
             </div>
@@ -362,6 +367,8 @@ interface WebviewMessage {
   readonly maxBytes?: number;
   readonly commandTimeoutSeconds?: number;
   readonly modelIdleTimeoutSeconds?: number;
+  readonly streamCompletionGraceSeconds?: number;
+  readonly maxInvalidToolCallRetries?: number;
   readonly commandOutputLimitBytes?: number;
 }
 

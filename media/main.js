@@ -51,6 +51,8 @@
     maxTokens: document.getElementById("maxTokens"),
     commandTimeout: document.getElementById("commandTimeout"),
     modelIdleTimeout: document.getElementById("modelIdleTimeout"),
+    streamCompletionGrace: document.getElementById("streamCompletionGrace"),
+    maxInvalidToolCallRetries: document.getElementById("maxInvalidToolCallRetries"),
     commandOutputLimit: document.getElementById("commandOutputLimit"),
     permissionModeButton: document.getElementById("permissionModeButton"),
     permissionModeMenu: document.getElementById("permissionModeMenu"),
@@ -424,6 +426,8 @@
       maxTokens: Number(elements.maxTokens?.value || 0),
       commandTimeoutSeconds: Number(elements.commandTimeout?.value),
       modelIdleTimeoutSeconds: Number(elements.modelIdleTimeout?.value),
+      streamCompletionGraceSeconds: Number(elements.streamCompletionGrace?.value),
+      maxInvalidToolCallRetries: Number(elements.maxInvalidToolCallRetries?.value),
       commandOutputLimitBytes: tokensToBytes(elements.commandOutputLimit?.value),
       permissionRules
     });
@@ -520,6 +524,13 @@
     } else if (message.type === "error") {
       setRunStatus(`Error: ${message.text || "request failed"}`);
       addMessage("system error", `Error: ${message.text}`);
+    } else if (message.type === "runComplete") {
+      streamingMessage = undefined;
+      if (message.reason === "awaitingApproval") {
+        setRunStatus("Waiting for approval");
+      } else {
+        setRunStatus("Idle");
+      }
     }
   });
 
@@ -585,6 +596,8 @@
     setValue(elements.maxTokens, state.settings?.maxTokens ? String(state.settings.maxTokens) : "");
     setValue(elements.commandTimeout, String(state.settings?.commandTimeoutSeconds ?? 120));
     setValue(elements.modelIdleTimeout, String(state.settings?.modelIdleTimeoutSeconds ?? 300));
+    setValue(elements.streamCompletionGrace, String(state.settings?.streamCompletionGraceSeconds ?? 30));
+    setValue(elements.maxInvalidToolCallRetries, String(state.settings?.maxInvalidToolCallRetries ?? 3));
     setValue(elements.commandOutputLimit, String(estimatedTokens(state.settings?.commandOutputLimitBytes ?? 200000)));
     renderPermissionModePicker();
     setValue(elements.permissionRules, JSON.stringify(state.settings?.permissionRules || [], null, 2));

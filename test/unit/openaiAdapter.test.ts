@@ -234,6 +234,69 @@ test("returns tool calls after an OpenAI-compatible endpoint goes quiet", async 
   }
 });
 
+test("extends the quiet grace once when tool-call arguments have not finished parsing", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalGrace = process.env.CODEFORGE_OPENAI_STREAM_COMPLETION_GRACE_MS;
+  const originalExtensions = process.env.CODEFORGE_OPENAI_STREAM_QUIET_EXTENSIONS;
+  process.env.CODEFORGE_OPENAI_STREAM_COMPLETION_GRACE_MS = "25";
+  process.env.CODEFORGE_OPENAI_STREAM_QUIET_EXTENSIONS = "1";
+  globalThis.fetch = async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const encoder = new TextEncoder();
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: "call-1", type: "function", function: { name: "write_file", arguments: "{\"path\":\"a.t" } }] } }] })}\n\n`));
+        setTimeout(() => {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: "xt\",\"content\":\"ok\"}" } }] } }] })}\n\n`));
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "tool_calls" }] })}\n\n`));
+          controller.close();
+        }, 35);
+      }
+    });
+
+    return new Response(stream, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" }
+    });
+  };
+
+  try {
+    const provider = new OpenAiCompatibleProvider(
+      { id: "test", label: "Test", baseUrl: "http://127.0.0.1:4000/v1" },
+      { allowlist: [] }
+    );
+
+    const events = await Promise.race([
+      (async () => {
+        const result = [];
+        for await (const event of provider.streamChat({ model: "local-model", messages: [{ role: "user", content: "hi" }] })) {
+          result.push(event);
+        }
+        return result;
+      })(),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error("streamChat did not finish in time")), 500);
+      })
+    ]);
+
+    const toolCallEvent = events.find((event) => event.type === "toolCalls");
+    assert.ok(toolCallEvent && toolCallEvent.type === "toolCalls");
+    assert.equal(toolCallEvent.toolCalls[0]?.argumentsJson, "{\"path\":\"a.txt\",\"content\":\"ok\"}");
+    JSON.parse(toolCallEvent.toolCalls[0]?.argumentsJson ?? "");
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalGrace === undefined) {
+      delete process.env.CODEFORGE_OPENAI_STREAM_COMPLETION_GRACE_MS;
+    } else {
+      process.env.CODEFORGE_OPENAI_STREAM_COMPLETION_GRACE_MS = originalGrace;
+    }
+    if (originalExtensions === undefined) {
+      delete process.env.CODEFORGE_OPENAI_STREAM_QUIET_EXTENSIONS;
+    } else {
+      process.env.CODEFORGE_OPENAI_STREAM_QUIET_EXTENSIONS = originalExtensions;
+    }
+  }
+});
+
 test("treats streamed reasoning chunks as model progress", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => {
