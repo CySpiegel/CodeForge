@@ -381,6 +381,7 @@ export function createControllerHarness(options: ControllerHarnessOptions): Cont
     maxLessonBytes: 24000,
     skillsEnabled: true,
     skillsMinRepeats: 3,
+    agentsEnabled: false,
     embeddingsEnabled: false,
     ...options.learningSettings
   };
@@ -393,6 +394,7 @@ export function createControllerHarness(options: ControllerHarnessOptions): Cont
     getConfiguredModel: () => fakeProfile.defaultModel ?? "",
     getContextLimits: () => contextLimits,
     getLearningSettings: () => learningSettings,
+    getWorkersMaxConcurrent: () => 3,
     getCommandTimeoutSeconds: () => 10,
     getModelIdleTimeoutSeconds: () => 300,
     getStreamCompletionGraceSeconds: () => options.streamCompletionGraceSeconds ?? 30,

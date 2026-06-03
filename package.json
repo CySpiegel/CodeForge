@@ -2,7 +2,7 @@
   "name": "codeforge",
   "displayName": "CodeForge",
   "description": "A self-hosted-first coding harness extension for Visual Studio Code.",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "publisher": "codeforge",
   "license": "UNLICENSED",
   "engines": {
@@ -349,6 +349,14 @@
           "maximum": 2000000,
           "description": "Maximum stdout and stderr bytes retained per approved shell command stream."
         },
+        "codeforge.workers.maxConcurrent": {
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "maximum": 16,
+          "scope": "resource",
+          "description": "Maximum number of CodeForge sub-agents (workers) that run at once. Additional spawns queue and start as running workers finish."
+        },
         "codeforge.learning.enabled": {
           "type": "boolean",
           "default": true,
@@ -424,6 +432,12 @@
           "maximum": 50,
           "scope": "resource",
           "description": "How many times a similar successful procedure must recur before CodeForge proposes a skill for it."
+        },
+        "codeforge.learning.agents.enabled": {
+          "type": "boolean",
+          "default": false,
+          "scope": "resource",
+          "description": "Allow CodeForge to propose specialized sub-agents (.codeforge/agents) when a kind of task recurs. Proposals are always review-only — they are never written without your approval, even in automatic autonomy."
         },
         "codeforge.learning.embeddings.enabled": {
           "type": "boolean",

@@ -92,7 +92,7 @@ export function normalizeSessionRecord(value: unknown): SessionRecord | undefine
         : undefined;
     }
     case "learning":
-      return isLearningEvent(value.event) && (value.kind === "lesson" || value.kind === "skill") && typeof value.ref === "string" && typeof value.summary === "string"
+      return isLearningEvent(value.event) && (value.kind === "lesson" || value.kind === "skill" || value.kind === "agent") && typeof value.ref === "string" && typeof value.summary === "string"
         ? {
           type: "learning",
           sessionId: value.sessionId,

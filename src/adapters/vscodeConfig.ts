@@ -47,8 +47,13 @@ export class CodeForgeConfigService {
       maxLessonBytes: clampNumber(this.config().get<number>("learning.maxLessonBytes", 24000), 1000, 500000, 24000),
       skillsEnabled: this.config().get<boolean>("learning.skills.enabled", true),
       skillsMinRepeats: clampNumber(this.config().get<number>("learning.skills.minRepeats", 3), 2, 50, 3),
+      agentsEnabled: this.config().get<boolean>("learning.agents.enabled", false),
       embeddingsEnabled: this.config().get<boolean>("learning.embeddings.enabled", false)
     };
+  }
+
+  getWorkersMaxConcurrent(): number {
+    return clampNumber(this.config().get<number>("workers.maxConcurrent", 3), 1, 16, 3);
   }
 
   getCommandTimeoutSeconds(): number {

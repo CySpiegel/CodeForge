@@ -334,7 +334,7 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
   },
   {
     name: "worker_output",
-    description: "Read the current status and transcript of a CodeForge worker or local agent.",
+    description: "Read a CodeForge worker/agent's status and transcript. Set wait=true to block until it finishes — spawn several agents, then read each back with wait=true to run them in parallel and join the results.",
     searchHint: "read worker transcript",
     risk: "automation",
     concurrencySafe: true,
@@ -343,6 +343,7 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
       type: "object",
       properties: {
         workerId: { type: "string" },
+        wait: { type: "boolean", description: "Block until the worker finishes before returning its transcript." },
         reason: { type: "string" }
       },
       required: ["workerId"],
@@ -350,7 +351,7 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
     },
     parse(input) {
       return typeof input.workerId === "string"
-        ? { type: "worker_output", workerId: input.workerId, reason: optionalString(input.reason) }
+        ? { type: "worker_output", workerId: input.workerId, wait: input.wait === true, reason: optionalString(input.reason) }
         : undefined;
     },
     validate(action) {

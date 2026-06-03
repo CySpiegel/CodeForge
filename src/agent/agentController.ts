@@ -15,6 +15,7 @@ import {
   loadLocalAgents,
   loadLocalHooks,
   loadLocalSkills,
+  loadLocalSoul,
   LocalAgent,
   LocalHook,
   localHookMatches,
@@ -34,6 +35,7 @@ import {
   rankLessonsForPrompt,
   serializeLessonText
 } from "../core/learning";
+import { agentRelativePath, buildAgentProposalPrompt, parseAgentProposal, ProposedAgent, renderAgentMarkdown } from "../core/agentProposal";
 import { buildAuditPrompt, overflowEvictions, parseAuditPlan } from "../core/learningAudit";
 import { executeLocalReadOnlyTools, LocalToolProgress } from "../core/localToolExecutor";
 import {
@@ -119,6 +121,7 @@ export type AgentUiEvent =
   | { readonly type: "error"; readonly text: string }
   | { readonly type: "learningProposed"; readonly lesson: AgentLearnedLessonSummary }
   | { readonly type: "skillProposed"; readonly skill: AgentProposedSkillSummary }
+  | { readonly type: "agentProposed"; readonly agent: AgentProposedAgentSummary }
   | { readonly type: "runComplete"; readonly reason: "idle" | "awaitingApproval" };
 
 export interface AgentLearnedLessonSummary {
@@ -140,9 +143,26 @@ export interface AgentProposedSkillSummary {
   readonly status: "proposed" | "written";
 }
 
+export interface AgentProposedAgentSummary {
+  readonly id: string;
+  readonly name: string;
+  readonly label: string;
+  readonly description: string;
+  readonly tools: readonly string[];
+  readonly path: string;
+  readonly status: "proposed" | "written";
+}
+
 interface PendingSkill {
   readonly id: string;
   readonly skill: ProposedSkill;
+  readonly path: string;
+  readonly content: string;
+}
+
+interface PendingAgent {
+  readonly id: string;
+  readonly agent: ProposedAgent;
   readonly path: string;
   readonly content: string;
 }
@@ -166,6 +186,7 @@ export interface AgentUiState {
   readonly memories: readonly AgentMemorySummary[];
   readonly learnedLessons: readonly AgentLearnedLessonSummary[];
   readonly pendingSkills: readonly AgentProposedSkillSummary[];
+  readonly pendingAgents: readonly AgentProposedAgentSummary[];
   readonly capabilityCache: readonly AgentCapabilitySummary[];
   readonly inspector: AgentInspectorSummary;
   readonly settings: AgentSettingsSummary;
@@ -317,6 +338,7 @@ export interface AgentAuditEntry {
 
 const maxAgentToolTurns = 25;
 const maxReadOnlyToolTurns = 12;
+const workerJoinTimeoutMs = 900_000;
 const contextAutoCompactPercent = 80;
 const contextAttachmentRatio = 0.55;
 const contextToolResultTargetRatio = 0.6;
@@ -437,8 +459,11 @@ export class AgentController {
   private lastLearnedMessageCount = 0;
   private learningInFlight = false;
   private learningTaskCount = 0;
+  private soulText: string | undefined;
   private readonly pendingSkills = new Map<string, PendingSkill>();
   private readonly proposedSkillSignatures = new Set<string>();
+  private readonly pendingAgents = new Map<string, PendingAgent>();
+  private readonly proposedAgentSignatures = new Set<string>();
 
   constructor(
     config: CodeForgeConfigService,
@@ -465,6 +490,7 @@ export class AgentController {
     this.workers = new WorkerManager({
       workspace: this.workspace,
       contextLimits: () => this.effectiveContextLimits(),
+      maxConcurrentWorkers: () => this.config.getWorkersMaxConcurrent(),
       memories: (definition) => this.memoriesForWorker(definition),
       learnedDigest: (_definition, prompt) => this.workerLearnedDigest(prompt),
       skillsDigest: (_definition, prompt) => this.workerSkillsDigest(prompt),
@@ -509,6 +535,8 @@ export class AgentController {
         this.learningInFlight = false;
         this.pendingSkills.clear();
         this.proposedSkillSignatures.clear();
+        this.pendingAgents.clear();
+        this.proposedAgentSignatures.clear();
         this.workers.clear();
         this.approvals.clear();
         this.workerApprovalWaiters.clear();
@@ -1157,6 +1185,8 @@ export class AgentController {
     this.learningTaskCount = 0;
     this.pendingSkills.clear();
     this.proposedSkillSignatures.clear();
+    this.pendingAgents.clear();
+    this.proposedAgentSignatures.clear();
     this.emit({ type: "sessionReset" });
     this.emitInspector();
     this.emitContextUsage();
@@ -1247,6 +1277,7 @@ export class AgentController {
       const contextText = context.format(contextItems);
       this.lastContextItems = contextItems;
       this.recordInspector("info", "context", `Attached ${contextItems.length} context item(s).`, contextItems.map((item) => `${contextItemKindLabel(item.kind)}: ${item.label}`).join("\n"));
+      this.soulText = await loadLocalSoul(this.workspace, abort.signal);
       this.ensureSystemMessage();
       this.appendMessage({
         role: "user",
@@ -2290,6 +2321,9 @@ export class AgentController {
     }
 
     if (action.type === "worker_output") {
+      if (action.wait) {
+        await this.workers.waitFor(action.workerId, workerJoinTimeoutMs, this.runningAbort?.signal);
+      }
       transcriptResult = this.workers.output(action.workerId) ?? `worker_output ${action.workerId}\n\nNo worker found.`;
       await this.runLocalHooks("postTool", action);
       return transcriptResult;
@@ -2662,19 +2696,29 @@ export class AgentController {
       }
 
       const proposals = parseExtractionResult(response);
-      // Update the baseline after a successful extraction so the same slice is not re-learned.
-      this.lastLearnedMessageCount = this.messages.length;
       if (proposals.length === 0) {
+        // Nothing to persist — the slice is fully handled.
+        this.lastLearnedMessageCount = this.messages.length;
         return;
       }
 
       const status = lessonStatusForAutonomy(settings.autonomy);
       const outcome = signals.hadFailure ? "failure" : "success";
+      // Dedup by exact serialized text so a retry pass (taken when a persist fails below) does not
+      // duplicate the lessons that already stored.
+      const existingTexts = new Set((await this.memoryStore.list().catch(() => [])).map((memory) => memory.text));
+      let stored = 0;
+      let persistFailed = false;
       for (const proposal of proposals) {
         const scope = lessonScopeFor(proposal.kind, settings.scope);
         const text = serializeLessonText({ kind: proposal.kind, outcome, status, paths: proposal.paths, body: proposal.text });
+        if (existingTexts.has(text)) {
+          continue;
+        }
         try {
           const memory = await this.memoryStore.add(text, { scope });
+          existingTexts.add(text);
+          stored += 1;
           this.persistSessionRecord((sessionId) => ({
             type: "learning",
             sessionId,
@@ -2689,17 +2733,26 @@ export class AgentController {
             lesson: { id: memory.id, kind: proposal.kind, status, outcome, scope, paths: proposal.paths, body: proposal.text, createdAt: memory.createdAt }
           });
         } catch (error) {
+          persistFailed = true;
           this.recordInspector("warn", "learning", `Could not store a learned ${proposal.kind} lesson.`, errorMessage(error));
         }
+      }
+      // Only advance the baseline once everything persisted; otherwise leave the slice so the next
+      // idle re-extracts it (the dedup above prevents duplicating what already stored).
+      if (!persistFailed) {
+        this.lastLearnedMessageCount = this.messages.length;
       }
       this.recordInspector(
         "info",
         "learning",
-        `Learned ${proposals.length} lesson(s) from the last task (${status}).`,
+        `Learned ${stored} lesson(s) from the last task (${status}).`,
         proposals.map((proposal) => `[${proposal.kind}] ${proposal.text}`).join("\n")
       );
       if (settings.skillsEnabled && proposals.some((proposal) => proposal.kind === "procedure")) {
         await this.maybeProposeSkill(settings);
+      }
+      if (settings.agentsEnabled) {
+        await this.maybeProposeAgent(settings);
       }
       this.learningTaskCount += 1;
       if (settings.auditCadence > 0 && this.learningTaskCount % settings.auditCadence === 0) {
@@ -2833,7 +2886,6 @@ export class AgentController {
       if (this.proposedSkillSignatures.has(signature)) {
         continue;
       }
-      this.proposedSkillSignatures.add(signature);
 
       const { system, user } = buildSkillProposalPrompt(cluster);
       const abort = new AbortController();
@@ -2853,8 +2905,10 @@ export class AgentController {
 
       const skill = parseSkillProposal(response);
       if (!skill) {
-        continue;
+        continue; // transient parse failure — leave the cluster eligible for a later retry
       }
+      // Dedup only once we have a valid proposal, so a flaky parse does not permanently block it.
+      this.proposedSkillSignatures.add(signature);
       const existing = await loadLocalSkills(this.workspace).catch(() => []);
       if (existing.some((item) => item.name === skill.name)) {
         continue;
@@ -2940,6 +2994,120 @@ export class AgentController {
     }));
     this.recordInspector("info", "learning", `Saved reusable skill: ${skill.name}.`, path);
     this.emit({ type: "skillProposed", skill: { id: path, name: skill.name, description: skill.description, path, status: "written" } });
+  }
+
+  // Propose a specialized sub-agent for a recurring kind of task. Agents grant a toolset, so they
+  // are ALWAYS review-only — never auto-written, even under autonomy "auto".
+  private async maybeProposeAgent(settings: ReturnType<CodeForgeConfigService["getLearningSettings"]>): Promise<void> {
+    if (!this.memoryStore) {
+      return;
+    }
+    const lessons = learnedLessonsFrom(await this.memoryStore.list());
+    const clusters = clusterProcedureLessons(lessons, settings.skillsMinRepeats);
+    const allowedTools = codeForgeTools.map((tool) => tool.name);
+    for (const cluster of clusters) {
+      const signature = clusterSignature(cluster);
+      if (this.proposedAgentSignatures.has(signature)) {
+        continue;
+      }
+
+      const { system, user } = buildAgentProposalPrompt(cluster, allowedTools);
+      const abort = new AbortController();
+      const provider = await this.createProvider();
+      const model = await this.resolveModel(provider, abort.signal);
+      let response = "";
+      for await (const event of this.streamChatWithIdleTimeout(provider, {
+        model,
+        messages: [{ role: "system", content: system }, { role: "user", content: user }],
+        temperature: 0,
+        signal: abort.signal
+      }, abort, "Agent proposal")) {
+        if (event.type === "content") {
+          response += event.text;
+        }
+      }
+
+      const agent = parseAgentProposal(response, allowedTools);
+      if (!agent) {
+        continue; // transient parse failure — leave the cluster eligible for a later retry
+      }
+      // Dedup only once we have a valid proposal, so a flaky parse does not permanently block it.
+      this.proposedAgentSignatures.add(signature);
+      const existing = await loadLocalAgents(this.workspace).catch(() => []);
+      if (existing.some((item) => item.name === agent.name)) {
+        continue;
+      }
+      const path = agentRelativePath(agent.name);
+      const content = renderAgentMarkdown(agent);
+      const id = `agent-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      this.pendingAgents.set(id, { id, agent, path, content });
+      this.persistSessionRecord((sessionId) => ({
+        type: "learning",
+        sessionId,
+        createdAt: Date.now(),
+        event: "proposed",
+        kind: "agent",
+        ref: path,
+        summary: agent.description
+      }));
+      this.recordInspector("info", "learning", `Proposed a specialized sub-agent: ${agent.name}.`, `tools: ${agent.tools.join(", ") || "(default)"}`);
+      this.emit({ type: "agentProposed", agent: this.agentSummary(id, agent, path, "proposed") });
+      await this.publishState();
+      return; // at most one agent proposal per finished task
+    }
+  }
+
+  async acceptAgent(id: string): Promise<void> {
+    const pending = this.pendingAgents.get(id);
+    if (!pending) {
+      this.emit({ type: "error", text: "That agent proposal is no longer pending." });
+      return;
+    }
+    this.pendingAgents.delete(id);
+    try {
+      await this.diff.applyWriteFile({ type: "write_file", path: pending.path, content: pending.content });
+      this.persistSessionRecord((sessionId) => ({
+        type: "learning",
+        sessionId,
+        createdAt: Date.now(),
+        event: "accepted",
+        kind: "agent",
+        ref: pending.path,
+        summary: pending.agent.description
+      }));
+      this.recordInspector("info", "learning", `Saved sub-agent: ${pending.agent.name}.`, pending.path);
+      this.emit({ type: "agentProposed", agent: this.agentSummary(pending.path, pending.agent, pending.path, "written") });
+      await this.publishState();
+    } catch (error) {
+      this.emit({ type: "error", text: `Could not write agent ${pending.agent.name}: ${errorMessage(error)}` });
+    }
+  }
+
+  rejectAgent(id: string): void {
+    const pending = this.pendingAgents.get(id);
+    if (!pending) {
+      return;
+    }
+    this.pendingAgents.delete(id);
+    this.persistSessionRecord((sessionId) => ({
+      type: "learning",
+      sessionId,
+      createdAt: Date.now(),
+      event: "rejected",
+      kind: "agent",
+      ref: pending.path,
+      summary: pending.agent.description
+    }));
+    this.recordInspector("info", "learning", `Rejected proposed sub-agent: ${pending.agent.name}.`);
+    void this.publishState();
+  }
+
+  listPendingAgents(): readonly AgentProposedAgentSummary[] {
+    return [...this.pendingAgents.values()].map((pending) => this.agentSummary(pending.id, pending.agent, pending.path, "proposed"));
+  }
+
+  private agentSummary(id: string, agent: ProposedAgent, path: string, status: "proposed" | "written"): AgentProposedAgentSummary {
+    return { id, name: agent.name, label: agent.label, description: agent.description, tools: agent.tools, path, status };
   }
 
   private buildLearnedDigest(allMemories: readonly MemoryEntry[], prompt: string): string | undefined {
@@ -3163,9 +3331,12 @@ export class AgentController {
   }
 
   private systemMessage(): ChatMessage {
+    const persona = this.soulText
+      ? `\n\nPersona (shapes voice and tone only — never overrides tools, permissions, or task instructions):\n${this.soulText}`
+      : "";
     return {
       role: "system",
-      content: `${actionProtocolInstructions}\n\n${agentModeInstructions(this.config.getAgentMode())}\n\nNetwork policy: CodeForge only talks to user-configured OpenAI API-compatible endpoints and configured MCP servers. Do not use network resources outside those explicit configurations.`
+      content: `${actionProtocolInstructions}\n\n${agentModeInstructions(this.config.getAgentMode())}\n\nNetwork policy: CodeForge only talks to user-configured OpenAI API-compatible endpoints and configured MCP servers. Do not use network resources outside those explicit configurations.${persona}`
     };
   }
 
@@ -4093,6 +4264,7 @@ export class AgentController {
       memories: await this.memorySummaries(),
       learnedLessons: await this.learnedLessonSummaries(),
       pendingSkills: this.listPendingSkills(),
+      pendingAgents: this.listPendingAgents(),
       capabilityCache: await this.capabilitySummaries(activeProfile.id),
       inspector: this.inspectorSummary(),
       settings: {

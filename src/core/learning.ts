@@ -20,6 +20,7 @@ export interface LearningSettings {
   readonly maxLessonBytes: number;
   readonly skillsEnabled: boolean;
   readonly skillsMinRepeats: number;
+  readonly agentsEnabled: boolean;
   readonly embeddingsEnabled: boolean;
 }
 

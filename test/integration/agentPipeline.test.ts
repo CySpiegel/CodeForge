@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { AgentUiEvent } from "../../src/agent/agentController";
 import { isLearnedEntry, parseLesson } from "../../src/core/learning";
-import { loadLocalSkills } from "../../src/core/localExtensions";
+import { loadLocalAgents, loadLocalSkills } from "../../src/core/localExtensions";
 import { createControllerHarness, toolCall, waitForEvent } from "../harness/agentControllerHarness";
 
 test("/doctor runs diagnostics without consuming a chat completion", async () => {
@@ -1219,4 +1219,81 @@ test("Learned panel accepts and rejects proposed lessons, gating what gets injec
   await harness.controller.sendPrompt("Again.");
   assert.equal(harness.provider.requests.some((request) => request.messages.some((message) => /ACCEPT-ME/.test(message.content))), true);
   assert.equal(harness.provider.requests.some((request) => request.messages.some((message) => /REJECT-ME/.test(message.content))), false);
+});
+
+test("a .codeforge/soul.md persona is injected into the system prompt", async () => {
+  const harness = createControllerHarness({
+    mode: "agent",
+    files: { ".codeforge/soul.md": "You are Forge: terse, dry, and bullet-pointed." },
+    responses: [{ content: "ok" }]
+  });
+
+  await harness.controller.sendPrompt("hello");
+
+  const system = harness.provider.requests[0].messages.find((message) => message.role === "system");
+  assert.ok(system);
+  assert.match(system.content, /Persona/);
+  assert.match(system.content, /You are Forge: terse, dry, and bullet-pointed\./);
+});
+
+test("Learning proposes a sub-agent for a recurring task type (review-only) and accept writes a loadable AGENT.md", async () => {
+  const harness = createControllerHarness({
+    mode: "agent",
+    permissionMode: "fullAuto",
+    learningSettings: { enabled: true, autonomy: "auto", skillsEnabled: false, agentsEnabled: true, skillsMinRepeats: 2 },
+    files: { "src/auth.ts": "export const auth = 1;\n" },
+    responses: [
+      { toolCalls: [toolCall("write_file", { path: "src/auth.ts", content: "a" })] },
+      { content: "done" },
+      { content: "[{\"kind\":\"fix\",\"text\":\"Auth tokens expire; refresh before use\",\"paths\":[\"src/auth.ts\"]}]" },
+      { toolCalls: [toolCall("write_file", { path: "src/auth.ts", content: "b" })] },
+      { content: "done" },
+      { content: "[{\"kind\":\"fix\",\"text\":\"Auth refresh must handle 401 retries\",\"paths\":[\"src/auth.ts\"]}]" },
+      { content: "{\"name\":\"auth-fixer\",\"label\":\"Auth Fixer\",\"description\":\"Fix auth token issues\",\"tools\":[\"read_file\",\"edit_file\"],\"body\":\"Diagnose and fix auth token problems.\"}" }
+    ]
+  });
+
+  await harness.controller.sendPrompt("Fix auth.");
+  await waitForEvent(harness.events, (event) => event.type === "learningProposed");
+  await harness.controller.sendPrompt("Fix auth again.");
+  const proposed = await waitForEventValue(harness.events, (event) => event.type === "agentProposed" ? event : undefined);
+
+  assert.equal(proposed.agent.status, "proposed");
+  assert.deepEqual(proposed.agent.tools, ["read_file", "edit_file"]);
+  // review-only: nothing written until accepted, even though autonomy is "auto"
+  assert.equal(harness.workspace.files.has(".codeforge/agents/auth-fixer/AGENT.md"), false);
+  assert.equal(harness.controller.listPendingAgents().length, 1);
+
+  await harness.controller.acceptAgent(proposed.agent.id);
+  assert.equal(harness.workspace.files.has(".codeforge/agents/auth-fixer/AGENT.md"), true);
+  const agents = await loadLocalAgents(harness.workspace);
+  const learnedAgent = agents.find((agent) => agent.name === "auth-fixer");
+  assert.ok(learnedAgent);
+  assert.deepEqual(learnedAgent.tools, ["read_file", "edit_file"]);
+});
+
+test("Re-extracting an identical lesson does not duplicate it in the store", async () => {
+  const harness = createControllerHarness({
+    mode: "agent",
+    permissionMode: "fullAuto",
+    learningSettings: { enabled: true, autonomy: "auto", skillsEnabled: false },
+    files: { "README.md": "# CodeForge\n" },
+    responses: [
+      { toolCalls: [toolCall("write_file", { path: "A.md", content: "a" })] },
+      { content: "done" },
+      { content: "[{\"kind\":\"fact\",\"text\":\"DUP-ME\",\"paths\":[]}]" },
+      { toolCalls: [toolCall("write_file", { path: "B.md", content: "b" })] },
+      { content: "done" },
+      { content: "[{\"kind\":\"fact\",\"text\":\"DUP-ME\",\"paths\":[]}]" }
+    ]
+  });
+
+  await harness.controller.sendPrompt("First.");
+  await waitForEvent(harness.events, (event) => event.type === "learningProposed");
+  await harness.controller.sendPrompt("Second.");
+  // give the second learning pass time to run
+  await new Promise((resolve) => setTimeout(resolve, 60));
+
+  const learned = harness.memory.memories.filter((memory) => isLearnedEntry(memory)).map((memory) => parseLesson(memory)!);
+  assert.equal(learned.filter((lesson) => lesson.body === "DUP-ME").length, 1);
 });

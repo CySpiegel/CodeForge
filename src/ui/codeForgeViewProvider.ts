@@ -126,6 +126,10 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
       await this.controller.acceptSkill(message.id);
     } else if (message.type === "rejectSkill" && typeof message.id === "string") {
       this.controller.rejectSkill(message.id);
+    } else if (message.type === "acceptAgent" && typeof message.id === "string") {
+      await this.controller.acceptAgent(message.id);
+    } else if (message.type === "rejectAgent" && typeof message.id === "string") {
+      this.controller.rejectAgent(message.id);
     } else if (message.type === "saveSettings") {
       await this.controller.updateSettings({
         activeProfileId: typeof message.activeProfileId === "string" ? message.activeProfileId : undefined,
@@ -278,6 +282,7 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
           </div>
           <div id="settingsPaneLearned" class="settings-pane hidden" data-settings-pane="learned">
             <p class="settings-meta wide">Lessons and skills CodeForge has learned from finished tasks. Accept the ones worth keeping; rejecting one removes it.</p>
+            <div id="learnedAgents" class="learned-skills" aria-live="polite"></div>
             <div id="learnedSkills" class="learned-skills" aria-live="polite"></div>
             <div id="learnedList" class="memory-list" aria-live="polite"></div>
           </div>

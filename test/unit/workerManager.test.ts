@@ -383,3 +383,53 @@ test("workers receive a ranked learned-lesson digest and relevant skill bodies i
   assert.match(context, /EDIT-REGISTRY-THEN-PROTOCOL/);
   assert.match(context, /PLAIN-NOTE/);
 });
+
+test("worker manager bounds concurrency to maxConcurrentWorkers", async () => {
+  let inFlight = 0;
+  let maxInFlight = 0;
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const provider: LlmProvider = {
+    profile: { id: "local", label: "Local", baseUrl: "http://127.0.0.1:1234" },
+    async *streamChat() {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await gate;
+      inFlight -= 1;
+      yield { type: "content", text: "Scope: x\nResult: ok\nKey files: none\nFiles changed: none\nIssues: none\nConfidence: high" };
+      yield { type: "done" };
+    },
+    async listModels() { return ["local-model"]; },
+    async inspectEndpoint() { return { backend: "openai-api" as const, backendLabel: "x", models: [{ id: "local-model" }] }; },
+    async probeCapabilities() { return { streaming: true, modelListing: true, nativeToolCalls: false }; }
+  };
+  const manager = new WorkerManager({
+    workspace: fakeWorkspace(),
+    contextLimits: () => ({ maxFiles: 8, maxBytes: 32000 }),
+    maxConcurrentWorkers: () => 2,
+    memories: async () => [],
+    mcpResources: () => [],
+    createProvider: async () => provider,
+    resolveModel: async () => "local-model",
+    capabilities: async () => ({ streaming: true, modelListing: true, nativeToolCalls: false }),
+    selectedModelInfo: () => ({ id: "local-model", contextLength: 8192 }),
+    permissionPolicy: () => ({ mode: "smart", rules: [] }),
+    executeAction: async () => "ok",
+    record: () => undefined,
+    onDidChange: () => undefined,
+    onNotice: () => undefined
+  });
+
+  const ids = ["a", "b", "c", "d", "e"].map((label) => manager.spawn("explore", `task ${label}`).id);
+  const deadline = Date.now() + 1000;
+  while (maxInFlight < 2 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(maxInFlight, 2, "no more than 2 workers should run at once");
+
+  release();
+  for (const id of ids) {
+    await waitForWorker(manager, id, "completed");
+  }
+  assert.equal(maxInFlight, 2);
+});

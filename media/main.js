@@ -29,6 +29,7 @@
     memoryList: document.getElementById("memoryList"),
     learnedList: document.getElementById("learnedList"),
     learnedSkills: document.getElementById("learnedSkills"),
+    learnedAgents: document.getElementById("learnedAgents"),
     endpointPickerButton: document.getElementById("endpointPickerButton"),
     endpointPickerMenu: document.getElementById("endpointPickerMenu"),
     endpointPickerLabel: document.getElementById("endpointPickerLabel"),
@@ -766,6 +767,7 @@
   }
 
   function renderLearned() {
+    renderLearnedAgents();
     renderLearnedSkills();
     if (!elements.learnedList) {
       return;
@@ -809,6 +811,42 @@
       actions.append(reject);
       row.append(meta, actions);
       elements.learnedList.append(row);
+    }
+  }
+
+  function renderLearnedAgents() {
+    if (!elements.learnedAgents) {
+      return;
+    }
+    const agents = (Array.isArray(state?.pendingAgents) ? state.pendingAgents : []).filter((agent) => agent.status === "proposed");
+    elements.learnedAgents.replaceChildren();
+    for (const agent of agents) {
+      const row = document.createElement("div");
+      row.className = "memory-row";
+      const meta = document.createElement("div");
+      meta.className = "memory-meta";
+      const title = document.createElement("div");
+      title.className = "memory-title";
+      title.textContent = `Proposed sub-agent: ${agent.name}`;
+      const text = document.createElement("div");
+      text.className = "memory-text";
+      const tools = Array.isArray(agent.tools) && agent.tools.length ? ` · tools: ${agent.tools.join(", ")}` : "";
+      text.textContent = `${agent.description || ""} (${agent.path}${tools})`;
+      meta.append(title, text);
+      const accept = document.createElement("button");
+      accept.type = "button";
+      accept.textContent = "Create agent";
+      accept.addEventListener("click", () => vscode.postMessage({ type: "acceptAgent", id: agent.id }));
+      const reject = document.createElement("button");
+      reject.type = "button";
+      reject.className = "secondary";
+      reject.textContent = "Reject";
+      reject.addEventListener("click", () => vscode.postMessage({ type: "rejectAgent", id: agent.id }));
+      const actions = document.createElement("div");
+      actions.className = "memory-row-actions";
+      actions.append(accept, reject);
+      row.append(meta, actions);
+      elements.learnedAgents.append(row);
     }
   }
 

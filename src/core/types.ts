@@ -253,6 +253,7 @@ export interface SpawnAgentAction {
 export interface WorkerOutputAction {
   readonly type: "worker_output";
   readonly workerId: string;
+  readonly wait?: boolean;
   readonly reason?: string;
 }
 

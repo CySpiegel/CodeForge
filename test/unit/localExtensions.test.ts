@@ -8,6 +8,7 @@ import {
   loadLocalCommands,
   loadLocalHooks,
   loadLocalSkills,
+  loadLocalSoul,
   localHookMatches,
   parseLocalHooks,
   renderLocalCommand,
@@ -146,6 +147,17 @@ test("loads hooks from .codeforge/hooks.json when present", async () => {
 
   assert.equal(hooks.length, 1);
   assert.equal(hooks[0].path, ".codeforge/hooks.json");
+});
+
+test("loadLocalSoul returns the bounded persona body, or undefined when absent", async () => {
+  const withSoul = new FakeWorkspace({ ".codeforge/soul.md": "---\nname: Forge\n---\nYou are Forge: terse, dry, bullet-pointed." });
+  assert.equal(await loadLocalSoul(withSoul), "You are Forge: terse, dry, bullet-pointed.");
+
+  const big = "x".repeat(9000);
+  const bounded = await loadLocalSoul(new FakeWorkspace({ ".codeforge/soul.md": big }));
+  assert.ok(bounded && bounded.length <= 4000);
+
+  assert.equal(await loadLocalSoul(new FakeWorkspace({})), undefined);
 });
 
 class FakeWorkspace implements WorkspacePort {

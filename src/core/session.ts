@@ -97,7 +97,7 @@ export interface SessionLearningRecord {
   readonly sessionId: string;
   readonly createdAt: number;
   readonly event: "proposed" | "accepted" | "rejected" | "audited";
-  readonly kind: "lesson" | "skill";
+  readonly kind: "lesson" | "skill" | "agent";
   readonly ref: string;
   readonly summary: string;
 }

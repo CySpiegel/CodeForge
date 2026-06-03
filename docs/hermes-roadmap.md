@@ -1,9 +1,14 @@
 # Hermes-likeness roadmap: multi sub-agents, learned agents, persona
 
 Status of the learning work so far:
-- **Done** — memory + skills learning loop (extraction, ranked injection, periodic audit, review UI), and **#2 sub-agent learning**: workers now receive the same prompt-ranked learned-lesson digest plus the bodies of the most relevant skills (`workerLearnedDigest` / `workerSkillsDigest` in `agentController.ts`, plumbed through `WorkerManagerOptions` → `ContextBuilder`).
+- **Done** — memory + skills learning loop (extraction, ranked injection, periodic audit, review UI), and **#2 sub-agent learning**: workers receive the same prompt-ranked learned-lesson digest plus the bodies of the most relevant skills.
+- **Done — #1a** parallel fan-out: `WorkerManager` concurrency cap (`codeforge.workers.maxConcurrent`, default 3) + queue; `worker_output` gained a `wait` flag so the model can spawn several agents then join their results.
+- **Done — #4** soul/persona: `.codeforge/soul.md` loaded and injected (bounded) into the system prompt.
+- **Done — #3** learned agent proposals: recurring task types proposed as review-only `.codeforge/agents/*.md` (tools validated against the registry), surfaced in the Learned tab.
+- **Partial — #1b** worktree isolation: `src/adapters/worktree.ts` (`GitWorktreeManager`) shipped + real-git tested. The WorkerManager wiring + merge-back via approvals is the documented next step (see HANDOFF).
+- **Deferred — #5** crons: poor fit for a daemon-less VS Code extension; see below.
 
-This doc plans the next three steps. Each section is independently shippable.
+The sections below are the original designs; consult the HANDOFF file for current status and next steps.
 
 ---
 

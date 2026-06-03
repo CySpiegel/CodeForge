@@ -6,6 +6,8 @@ const skillsDirectoryGlob = ".codeforge/skills/*/SKILL.md";
 const agentsFileGlob = ".codeforge/agents/*.md";
 const agentsDirectoryGlob = ".codeforge/agents/*/AGENT.md";
 const hooksPath = ".codeforge/hooks.json";
+const soulPath = ".codeforge/soul.md";
+const maxSoulBytes = 4000;
 
 export interface LocalCommand {
   readonly name: string;
@@ -72,6 +74,18 @@ export async function loadLocalCommands(workspace: WorkspacePort, signal?: Abort
     });
   }
   return commands;
+}
+
+// The "soul" / persona file shapes the agent's voice and tone. It is intentionally bounded so it
+// cannot crowd out tools or task context, and it never overrides permissions or instructions.
+export async function loadLocalSoul(workspace: WorkspacePort, signal?: AbortSignal): Promise<string | undefined> {
+  try {
+    const raw = await workspace.readTextFile(soulPath, maxSoulBytes * 2, signal);
+    const body = parseMarkdownFile(raw).body.trim();
+    return body ? Buffer.from(body, "utf8").subarray(0, maxSoulBytes).toString("utf8") : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export async function loadLocalSkills(workspace: WorkspacePort, signal?: AbortSignal): Promise<readonly LocalSkill[]> {

@@ -24,6 +24,7 @@ import { WorkerDefinition, WorkerKind, WorkerSessionEvent, WorkerStatus, WorkerS
 export interface WorkerManagerOptions {
   readonly workspace: WorkspacePort;
   readonly contextLimits: () => ContextLimits;
+  readonly maxConcurrentWorkers?: () => number;
   readonly memories: (definition: WorkerDefinition) => Promise<readonly MemoryEntry[]>;
   readonly learnedDigest?: (definition: WorkerDefinition, prompt: string) => Promise<string | undefined>;
   readonly skillsDigest?: (definition: WorkerDefinition, prompt: string) => Promise<string | undefined>;
@@ -84,6 +85,7 @@ const workerCoreToolNames = new Set([
   "run_command"
 ]);
 
+const defaultMaxConcurrentWorkers = 4;
 const maxTranscriptEntries = 120;
 const maxTranscriptTextBytes = 80_000;
 const summaryEmitIntervalMs = 250;
@@ -208,6 +210,8 @@ Never invent MCP server IDs.`;
 export class WorkerManager {
   private readonly options: WorkerManagerOptions;
   private readonly tasks = new Map<string, WorkerTask>();
+  private readonly runQueue: WorkerTask[] = [];
+  private activeRuns = 0;
 
   constructor(options: WorkerManagerOptions) {
     this.options = options;
@@ -222,6 +226,7 @@ export class WorkerManager {
       task.abortController?.abort();
     }
     this.tasks.clear();
+    this.runQueue.length = 0;
     this.emitChanged();
   }
 
@@ -265,8 +270,34 @@ export class WorkerManager {
     this.tasks.set(task.id, task);
     this.appendTranscript(task, "status", `${definition.label} worker started: ${trimmedPrompt}`, "started");
     this.emitChanged();
-    void this.run(task);
+    this.enqueueRun(task);
     return summarizeWorker(task);
+  }
+
+  private maxConcurrent(): number {
+    const configured = this.options.maxConcurrentWorkers?.();
+    return typeof configured === "number" && Number.isFinite(configured) && configured >= 1 ? Math.floor(configured) : defaultMaxConcurrentWorkers;
+  }
+
+  // Bound how many workers run at once so a single local endpoint is not overwhelmed by a fan-out.
+  // Excess spawns queue and start as running workers finish.
+  private enqueueRun(task: WorkerTask): void {
+    this.runQueue.push(task);
+    this.pump();
+  }
+
+  private pump(): void {
+    while (this.activeRuns < this.maxConcurrent() && this.runQueue.length > 0) {
+      const task = this.runQueue.shift();
+      if (!task || task.status !== "running" || !this.tasks.has(task.id)) {
+        continue;
+      }
+      this.activeRuns += 1;
+      void this.run(task).finally(() => {
+        this.activeRuns = Math.max(0, this.activeRuns - 1);
+        this.pump();
+      });
+    }
   }
 
   stop(workerId: string): boolean {
@@ -322,6 +353,7 @@ export class WorkerManager {
       task.abortController?.abort();
     }
     this.tasks.clear();
+    this.runQueue.length = 0;
 
     for (const record of records) {
       if (record.type !== "worker") {

@@ -1,6 +1,6 @@
 # CodeForge Handoff
 
-Last updated: 2026-05-11
+Last updated: 2026-06-03
 
 ## Project Direction
 
@@ -16,101 +16,105 @@ Keep these design constraints intact:
 - network access limited to localhost, private IP ranges, and explicitly allowlisted on-prem hosts
 - all file edits, commands, MCP service calls, and memory writes routed through typed tools and permission policy
 
-## Current State
+## Current State (v0.1.10)
 
-The roadmap is implemented through Phase 11:
+Core product (Phases 0–11) is unchanged and described in the git history. Two recent bodies of work sit on top:
 
-- Phase 0-7: core tool loop, permissions, VS Code file/search/edit flows, sessions, memory, shell execution, UI, and local extension points.
-- Phase 8: local/on-prem MCP configuration, validation, resource attachment, and tool calls.
-- Phase 9/9B/9C: worker agents, model-facing internal tools, deferred tool schema loading, invalid tool-call recovery, concurrency-safe tool batching, and concrete MCP tool schemas.
-- Phase 10: `/doctor`, settings/session migrations, package contract tests, extension-host checks, and release guardrails.
-- Phase 11: offline workspace index, pinned context files, run inspector, permission audit, post-edit diagnostics verification, in-app memory management, and persisted endpoint capability cache.
+1. **Approval-continuation fix** (v0.0.10): after approving an edit/command in Smart/Manual modes the loop continues. Root cause was a `tool → user` adjacency injected into the post-approval request that local chat templates mis-render; the fix re-requests the transcript ending in the tool result (matching the working Full-Auto path) and folds the "keep going" guidance into the tool result. See `agentController.ts` `runModelLoop` / `approve`.
 
-The repo was clean before this handoff file was added.
+2. **Hermes-style learning + multi sub-agent system** (this session) — described below.
 
-## Key Features To Know
-
-- Endpoint abstraction is shown as **OpenAI API** only. LiteLLM, vLLM, and LM Studio are treated as transparent OpenAI-compatible backends.
-- `/v1/models` discovery feeds model list, context length, output token metadata, and reasoning-model indicators when exposed by the server.
-- Model capability probing detects native OpenAI tool-call support and caches capability results in VS Code global storage.
-- Ask and Plan modes are read-only for side effects; Agent mode can edit, run approved commands, and iterate.
-- Slash commands include `/doctor`, `/index`, `/pin`, `/unpin`, `/pins`, `/inspect`, `/audit`, `/capabilities`, `/models`, `/memory`, `/mcp`, `/workers`, `/agent`, `/ask`, and `/plan`.
-- Context includes project instructions, explicit memories, MCP resources, pinned files, active/open files, an offline workspace index, and a file list.
-- After file edits, CodeForge checks VS Code diagnostics for changed files and returns those diagnostics to the model.
-- The run inspector surfaces tool execution, context attachment, endpoint probes, approvals, verification events, and permission audit history.
-
-## Important Files
-
-- `src/agent/agentController.ts`: main orchestration, slash commands, tool loop, approvals, `/doctor`, inspector/audit, pinned context, memory UI APIs, edit verification, capability caching.
-- `src/core/toolRegistry.ts`: model-facing internal tool definitions, validation, summaries, risk metadata.
-- `src/core/workspaceIndex.ts`: offline codebase index builder.
-- `src/core/contextBuilder.ts`: context assembly and pinned/index attachment.
-- `src/core/endpointCapabilityCache.ts`: capability cache contracts.
-- `src/adapters/vscodeEndpointCapabilityStore.ts`: VS Code global-state capability cache adapter.
-- `src/adapters/vscodeMemoryStore.ts`: local memory persistence and update support.
-- `src/ui/codeForgeViewProvider.ts`: VS Code webview bridge and settings panel message handling.
-- `media/main.js`: extension UI behavior.
-- `media/styles.css`: extension UI styles.
-- `docs/roadmap.md`: current phase status.
-- `docs/testing.md`: verification checklist.
-- `README.md`: user-facing explanation.
-
-## Verification Already Run
-
-These passed after Phase 11 implementation:
-
+**Tests: 174 pass / 0 fail.** `tsc` clean, extension compiles. Run:
 ```bash
-npm test
-npm run compile
-node --check media/main.js
-npm run vscode:test
+npm run compile && npm run compile:tests && node --test out-test/test/unit/*.test.js out-test/test/integration/*.test.js
 ```
 
-`npm test` passed 24 tests, including workspace index, pinned context, inspector/audit, memory management, edit verification, package contract, migrations, and agent pipeline tests.
+## Learning + multi-agent system
 
-## Known Local Endpoint
+### What it does
+After a finished Agent-mode task, CodeForge distils durable **lessons** from its own work (corrective on failure, reusable on success), stores them, and injects the relevant ones into future prompts — for the main loop **and** sub-agents. Repeated successful procedures are proposed as reusable **skills**; recurring task types are proposed as review-only **sub-agents**. A periodic self-audit dedups/prunes the lesson library. A `.codeforge/soul.md` persona shapes tone. Sub-agents run with a concurrency cap and can be joined.
 
-A live OpenAI-compatible endpoint has been used at:
+### Hermes → CodeForge mapping
+- Memory → learned lessons as `MemoryEntry` rows (a parseable `[codeforge-learned …]` tag line in `text`); user-scoped persists cross-repo via `globalStorageUri`.
+- Skills → `.codeforge/skills/<name>/SKILL.md` (existing loader).
+- Soul → `.codeforge/soul.md` injected (bounded) into the system prompt.
+- Self-improving loop → extraction on run-complete + periodic audit.
+- Sub-agents → `WorkerManager` (concurrency-capped, lesson/skill-aware).
 
-```text
-http://127.0.0.1:1234
-```
+### New modules
+- `src/core/learning.ts` — lesson (de)serialization, extraction prompt + tolerant parser, ranking, bounded digest, settings normalizers.
+- `src/core/skillProposal.ts` — procedure clustering, skill prompt/parse/render, `formatSkillsDigest` (worker skill injection).
+- `src/core/agentProposal.ts` — agent prompt/parse (tools validated against the registry)/render. **Review-only.**
+- `src/core/learningAudit.ts` — audit prompt, plan parser, deterministic overflow eviction.
+- `src/adapters/worktree.ts` — `GitWorktreeManager` (git worktree create/diff/remove). **Adapter only — not yet wired into workers (see Next steps).**
 
-Known model:
+### Key changed files
+- `src/agent/agentController.ts` — `maybeLearnFromRun` (fire-and-forget on `emitRunCompleteIfIdle` idle; `learningInFlight` + slice-baseline guards), `collectRunSignals`, `maybeProposeSkill` / `maybeProposeAgent`, `runLearningAudit`, `buildLearnedDigest`, `workerLearnedDigest` / `workerSkillsDigest`, `memoriesForWorker` (now `plainMemoriesFrom`), soul injection in `systemMessage`, `worker_output` `wait` handling, accept/reject lesson|skill|agent + pending maps.
+- `src/agent/workerManager.ts` — concurrency cap (`activeRuns`/`runQueue`/`pump`/`enqueueRun`), `learnedDigest`/`skillsDigest` options.
+- `src/core/contextBuilder.ts` — `learnedDigest` + `skillsDigest` sources.
+- `src/adapters/vscodeMemoryStore.ts` — split workspace/global persistence with merge+dedup.
+- `src/core/session.ts` / `sessionMigration.ts` — `SessionLearningRecord`.
+- `src/core/localExtensions.ts` — `loadLocalSoul`, exported `isSafeExtensionName`.
+- `media/main.js` + `src/ui/codeForgeViewProvider.ts` — **Learned** settings tab (accept/reject lessons, skills, agents).
 
-```text
-google/gemma-4-e4b
-```
+### Configuration (`codeforge.*`)
+- `learning.enabled` (true), `learning.autonomy` (review|hybrid|auto, default review), `learning.scope` (split|repo|global, default split)
+- `learning.auditCadence` (15), `learning.maxLessons` (60), `learning.maxLessonBytes` (24000)
+- `learning.skills.enabled` (true), `learning.skills.minRepeats` (3)
+- `learning.agents.enabled` (**false** — opt-in; agents are review-only)
+- `learning.embeddings.enabled` (false — **declared but not yet wired**, see Next steps)
+- `workers.maxConcurrent` (3)
 
-Use this for live smoke testing when it is running.
+### Autonomy / safety rules (do not regress)
+- Learning is **fire-and-forget and fully guarded** — it must never block or break a run.
+- `review` autonomy → lessons are stored `proposed` and are **not** injected until accepted; `hybrid`/`auto` store them `accepted`.
+- **Agents are always review-only**, even under `autonomy: "auto"`. Proposed agent tools are validated against the real registry.
+- Skill/agent file writes go through `diff.applyWriteFile`; nothing is written without accept except skills under `autonomy: "auto"`.
 
-## Next Recommended Work
+## Code review done this session (all fixed)
+An adversarial multi-agent review confirmed 4 issues; all fixed + covered or reasoned:
+1. **[high]** `maybeLearnFromRun` advanced the learning baseline before persisting → a failed `memoryStore.add` lost the lesson. Fixed: advance baseline only when all persists succeed; added exact-text dedup so a retry pass doesn't duplicate. Regression test: "Re-extracting an identical lesson does not duplicate it".
+2. **[med]** `maybeProposeSkill` recorded the cluster signature before parse/validation → a transient parse failure permanently blocked retry. Fixed: record signature only after a valid parse.
+3. **[med]** Same pattern in `maybeProposeAgent`. Fixed the same way.
+4. **[med]** `loadLocalSoul` truncated by characters, not bytes. Fixed: `Buffer.from(...).subarray(0, maxSoulBytes)`.
 
-Do release hardening next:
+## Next steps (ordered) — additional improvements discovered
 
-1. Commit the current work.
-2. Build a VSIX.
-3. Install it into a clean VS Code profile.
-4. Configure `http://127.0.0.1:1234`.
-5. Run `/doctor`.
-6. Test Ask, Plan, and Agent against the live endpoint.
-7. Verify settings tabs, dropdowns, slash menu, memory UI, inspector, pinned context controls, MCP settings, and model picker.
+1. **Wire 1b (worktree isolation) into editing workers.** The adapter is built+tested; the wiring is deferred because it touches VS Code-bound file I/O that the in-memory harness can't exercise. Plan:
+   - Add `codeforge.workers.isolateEditors` (default false).
+   - When an editing worker (`implement`/custom with write tools) spawns under isolation, `GitWorktreeManager.create()` a worktree; thread its path as a per-worker filesystem root through `executeWorkerAction` → the diff service / `WorkspacePort` so the worker's `write_file`/`edit_file` land in the worktree.
+   - On worker completion, `captureDiff()` and surface it to the main tree as a **`propose_patch` approval** (never auto-apply); `remove()` the worktree in a `finally`.
+   - This requires the file-op path to accept a root override — currently everything resolves against the workspace root. That is the main work and the main risk. Verify manually against a real git workspace (the harness can't).
+2. **Embeddings retrieval (opt-in).** `learning.embeddings.enabled` is declared but unused. Add `src/adapters/openaiEmbeddings.ts` calling the configured profile's `/embeddings`, cache vectors beside `memories.json`, and blend cosine similarity into `rankLessonsForPrompt`. Keep lexical ranking the default (many local servers lack `/embeddings`).
+3. **User-global soul.** `loadLocalSoul` reads only the workspace `.codeforge/soul.md`. Add a cross-repo soul from extension global storage (needs the controller to reach `ExtensionContext`, like the memory store does), workspace winning on overlap.
+4. **Inject the persona into sub-agents too.** Soul currently only reaches the main loop's `systemMessage`; thread it into `WorkerManager.systemPrompt` for consistent voice.
+5. **Unify `pendingSkills` + `pendingAgents` into `pendingArtifacts`** (skill|agent) to remove duplication across the maps, accept/reject methods, state, events, and UI render functions.
+6. **`pendingContinuation` is a single slot** (`agentController.ts`). Two approvals approved while a run is active → the first parked continuation is overwritten/lost. Convert `pendingContinuation` to a FIFO queue and gate `emitRunCompleteIfIdle` on its length. (Pre-existing from the approval-fix session, not introduced here.)
+7. **#5 crons — deferred (poor fit).** A VS Code extension has no background daemon, so unattended cron runs don't map. If pursued: a session-scoped scheduler (`setInterval` while the editor is open) that re-runs a saved prompt, surfaced as a "scheduled prompts" list — low value relative to the above. Do not build a fake daemon.
 
-After release hardening, the next valuable features are:
+## Behavior notes / known limitations
+- With `learning.enabled` default **true**, every finished Agent task that used tools triggers one extra background LLM call (extraction). On slow local models this adds post-task latency. Toggle off, or consider defaulting `enabled` to false if users complain.
+- Lesson dedup is **exact-text** only; near-duplicates rely on the periodic audit to consolidate.
+- The extraction transcript is capped (~12000 chars of the recent slice); very large tasks are summarized by truncation.
+- Worker concurrency default is 3; raise `workers.maxConcurrent` cautiously for a single local endpoint.
 
-- incremental workspace index cache with file watcher updates
-- manual context picker for active/open/pinned/search-result/MCP/memory context
-- agent change review screen with diffs, commands, diagnostics, approvals, and changed files
-- undo/revert support from recorded checkpoints
-- configurable verification profiles such as `npm test`, `npm run lint`, `dotnet test`
-- model compatibility profiles for per-model quirks and preferred fallback behavior
-- UI for creating and editing `.codeforge/agents`
-- automated webview UI smoke tests for dropdowns, settings, slash commands, memory, inspector, and composer controls
+## Important files (quick map)
+- Orchestration / learning loop: `src/agent/agentController.ts`
+- Sub-agents: `src/agent/workerManager.ts`, `src/core/workerAgents.ts`
+- Learning core: `src/core/learning.ts`, `skillProposal.ts`, `agentProposal.ts`, `learningAudit.ts`
+- Worktree adapter: `src/adapters/worktree.ts`
+- Context assembly: `src/core/contextBuilder.ts`
+- Tools: `src/core/toolRegistry.ts`
+- Memory persistence: `src/adapters/vscodeMemoryStore.ts`
+- UI: `media/main.js`, `src/ui/codeForgeViewProvider.ts`
+- Roadmap design: `docs/hermes-roadmap.md`
 
-## Session Notes For Next Agent
+## Known local endpoint
+`http://127.0.0.1:1234`, model `google/gemma-4-e4b`. Use for live smoke testing when running.
 
-- Follow existing ports-and-adapters boundaries.
-- Keep core logic testable without VS Code imports.
-- Use typed tool/action boundaries instead of prompt-only behavior.
+## Session notes for next agent
+- Follow the ports-and-adapters boundaries; keep `src/core/*` testable without `vscode` imports (that is why `learning.ts`/`skillProposal.ts`/`agentProposal.ts`/`learningAudit.ts` are pure).
+- New `src/core` logic should ship with a focused unit test; controller behavior with a harness integration test (`test/harness/agentControllerHarness.ts`, `ScriptedLlmProvider`, `FakeMemoryStore`).
+- The harness defaults `learning.enabled` to **false** so existing tests are unaffected; opt in per-test via `learningSettings`.
+- Run `npm run compile && npm run compile:tests && node --test out-test/test/unit/*.test.js out-test/test/integration/*.test.js` before handoff.
 - Do not add public web tools, cloud presets, telemetry, CLI commands, or browser preview workflows.
-- Prefer small, focused tests for new behavior and run `npm test` before handoff.
