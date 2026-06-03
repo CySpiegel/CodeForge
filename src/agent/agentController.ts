@@ -21,7 +21,30 @@ import {
   renderLocalCommand,
   renderLocalSkillPrompt
 } from "../core/localExtensions";
+import {
+  buildLearningExtractionPrompt,
+  formatLearnedDigest,
+  LearnedLesson,
+  LearningSignals,
+  learnedLessonsFrom,
+  lessonScopeFor,
+  lessonStatusForAutonomy,
+  parseExtractionResult,
+  plainMemoriesFrom,
+  rankLessonsForPrompt,
+  serializeLessonText
+} from "../core/learning";
+import { buildAuditPrompt, overflowEvictions, parseAuditPlan } from "../core/learningAudit";
 import { executeLocalReadOnlyTools, LocalToolProgress } from "../core/localToolExecutor";
+import {
+  buildSkillProposalPrompt,
+  clusterProcedureLessons,
+  clusterSignature,
+  parseSkillProposal,
+  ProposedSkill,
+  renderSkillMarkdown,
+  skillRelativePath
+} from "../core/skillProposal";
 import { MemoryEntry, MemoryStore } from "../core/memory";
 import { NotebookPort, UnavailableNotebookPort } from "../core/notebooks";
 import {
@@ -93,7 +116,35 @@ export type AgentUiEvent =
   | { readonly type: "approvalRequested"; readonly approval: ApprovalRequest }
   | { readonly type: "approvalResolved"; readonly id: string; readonly accepted: boolean; readonly text: string }
   | { readonly type: "error"; readonly text: string }
+  | { readonly type: "learningProposed"; readonly lesson: AgentLearnedLessonSummary }
+  | { readonly type: "skillProposed"; readonly skill: AgentProposedSkillSummary }
   | { readonly type: "runComplete"; readonly reason: "idle" | "awaitingApproval" };
+
+export interface AgentLearnedLessonSummary {
+  readonly id: string;
+  readonly kind: LearnedLesson["kind"];
+  readonly status: LearnedLesson["status"];
+  readonly outcome: LearnedLesson["outcome"];
+  readonly scope: LearnedLesson["scope"];
+  readonly paths: readonly string[];
+  readonly body: string;
+  readonly createdAt: number;
+}
+
+export interface AgentProposedSkillSummary {
+  readonly id: string;
+  readonly name: string;
+  readonly description: string;
+  readonly path: string;
+  readonly status: "proposed" | "written";
+}
+
+interface PendingSkill {
+  readonly id: string;
+  readonly skill: ProposedSkill;
+  readonly path: string;
+  readonly content: string;
+}
 
 export interface AgentUiState {
   readonly profiles: readonly AgentProfileSummary[];
@@ -112,6 +163,8 @@ export interface AgentUiState {
   readonly workers: readonly AgentWorkerSummary[];
   readonly activeContext: AgentActiveContextSummary;
   readonly memories: readonly AgentMemorySummary[];
+  readonly learnedLessons: readonly AgentLearnedLessonSummary[];
+  readonly pendingSkills: readonly AgentProposedSkillSummary[];
   readonly capabilityCache: readonly AgentCapabilitySummary[];
   readonly inspector: AgentInspectorSummary;
   readonly settings: AgentSettingsSummary;
@@ -380,6 +433,11 @@ export class AgentController {
   private queuedWork: QueuedWork[] = [];
   private sessionId: string | undefined;
   private sessionStartPromise: Promise<string | undefined> | undefined;
+  private lastLearnedMessageCount = 0;
+  private learningInFlight = false;
+  private learningTaskCount = 0;
+  private readonly pendingSkills = new Map<string, PendingSkill>();
+  private readonly proposedSkillSignatures = new Set<string>();
 
   constructor(
     config: CodeForgeConfigService,
@@ -444,6 +502,10 @@ export class AgentController {
         this.lastTokenUsage = undefined;
         this.sessionId = undefined;
         this.sessionStartPromise = undefined;
+        this.lastLearnedMessageCount = 0;
+        this.learningInFlight = false;
+        this.pendingSkills.clear();
+        this.proposedSkillSignatures.clear();
         this.workers.clear();
         this.approvals.clear();
         this.workerApprovalWaiters.clear();
@@ -1087,6 +1149,11 @@ export class AgentController {
     this.continueAfterCurrentRun = false;
     this.pendingContinuation = undefined;
     this.queuedWork = [];
+    this.lastLearnedMessageCount = 0;
+    this.learningInFlight = false;
+    this.learningTaskCount = 0;
+    this.pendingSkills.clear();
+    this.proposedSkillSignatures.clear();
     this.emit({ type: "sessionReset" });
     this.emitInspector();
     this.emitContextUsage();
@@ -1169,8 +1236,10 @@ export class AgentController {
       const provider = await this.createProvider();
       const model = await this.resolveModel(provider, abort.signal);
       await this.autoCompactContextIfNeeded(provider, model, abort, "before request");
-      const memories = await this.memoryStore?.list() ?? [];
-      const context = new ContextBuilder(this.workspace, this.effectiveContextLimits(), { memories, mcpResources: this.mcpContextItems, pinnedFiles: [...this.pinnedFiles] });
+      const allMemories = await this.memoryStore?.list() ?? [];
+      const memories = plainMemoriesFrom(allMemories);
+      const learnedDigest = this.buildLearnedDigest(allMemories, modelPrompt);
+      const context = new ContextBuilder(this.workspace, this.effectiveContextLimits(), { memories, mcpResources: this.mcpContextItems, pinnedFiles: [...this.pinnedFiles], learnedDigest });
       const contextItems = await context.build(abort.signal);
       const contextText = context.format(contextItems);
       this.lastContextItems = contextItems;
@@ -2522,6 +2591,347 @@ export class AgentController {
     }
     const reason = this.approvals.list().length > 0 ? "awaitingApproval" : "idle";
     this.emit({ type: "runComplete", reason });
+    if (reason === "idle") {
+      void this.maybeLearnFromRun();
+    }
+  }
+
+  // Hermes-style learning loop: once a task finishes, distil durable lessons from the new
+  // transcript slice (corrective on failure, reusable on success) and persist them as memories
+  // for future retrieval. Fire-and-forget and fully guarded so it can never break a run.
+  private async maybeLearnFromRun(): Promise<void> {
+    if (this.learningInFlight || !this.memoryStore) {
+      return;
+    }
+    const settings = this.config.getLearningSettings();
+    if (!settings.enabled) {
+      return;
+    }
+    if (this.lastLearnedMessageCount > this.messages.length) {
+      this.lastLearnedMessageCount = this.messages.length;
+    }
+    const slice = this.messages.slice(this.lastLearnedMessageCount);
+    const didWork = slice.some((message) => message.role === "assistant" && (message.toolCalls?.length ?? 0) > 0);
+    if (!didWork) {
+      this.lastLearnedMessageCount = this.messages.length;
+      return;
+    }
+
+    this.learningInFlight = true;
+    try {
+      const signals = this.collectRunSignals(slice);
+      const transcript = slice.map((message) => `${message.role.toUpperCase()}:\n${message.content}`).join("\n\n").slice(-12000);
+      const { system, user } = buildLearningExtractionPrompt(signals);
+      const abort = new AbortController();
+      const provider = await this.createProvider();
+      const model = await this.resolveModel(provider, abort.signal);
+      let response = "";
+      for await (const event of this.streamChatWithIdleTimeout(provider, {
+        model,
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: `${user}\n\n--- Task transcript ---\n${transcript}` }
+        ],
+        temperature: 0,
+        signal: abort.signal
+      }, abort, "Learning extraction")) {
+        if (event.type === "content") {
+          response += event.text;
+        }
+      }
+
+      const proposals = parseExtractionResult(response);
+      // Update the baseline after a successful extraction so the same slice is not re-learned.
+      this.lastLearnedMessageCount = this.messages.length;
+      if (proposals.length === 0) {
+        return;
+      }
+
+      const status = lessonStatusForAutonomy(settings.autonomy);
+      const outcome = signals.hadFailure ? "failure" : "success";
+      for (const proposal of proposals) {
+        const scope = lessonScopeFor(proposal.kind, settings.scope);
+        const text = serializeLessonText({ kind: proposal.kind, outcome, status, paths: proposal.paths, body: proposal.text });
+        try {
+          const memory = await this.memoryStore.add(text, { scope });
+          this.persistSessionRecord((sessionId) => ({
+            type: "learning",
+            sessionId,
+            createdAt: Date.now(),
+            event: status === "accepted" ? "accepted" : "proposed",
+            kind: "lesson",
+            ref: memory.id,
+            summary: proposal.text.slice(0, 160)
+          }));
+          this.emit({
+            type: "learningProposed",
+            lesson: { id: memory.id, kind: proposal.kind, status, outcome, scope, paths: proposal.paths, body: proposal.text, createdAt: memory.createdAt }
+          });
+        } catch (error) {
+          this.recordInspector("warn", "learning", `Could not store a learned ${proposal.kind} lesson.`, errorMessage(error));
+        }
+      }
+      this.recordInspector(
+        "info",
+        "learning",
+        `Learned ${proposals.length} lesson(s) from the last task (${status}).`,
+        proposals.map((proposal) => `[${proposal.kind}] ${proposal.text}`).join("\n")
+      );
+      if (settings.skillsEnabled && proposals.some((proposal) => proposal.kind === "procedure")) {
+        await this.maybeProposeSkill(settings);
+      }
+      this.learningTaskCount += 1;
+      if (settings.auditCadence > 0 && this.learningTaskCount % settings.auditCadence === 0) {
+        await this.runLearningAudit(settings);
+      }
+      await this.publishState();
+    } catch (error) {
+      this.recordInspector("warn", "learning", "Learning from the last task failed.", errorMessage(error));
+    } finally {
+      this.learningInFlight = false;
+    }
+  }
+
+  private collectRunSignals(slice: readonly ChatMessage[]): LearningSignals {
+    const changedPaths = new Set<string>();
+    const diagnostics: string[] = [];
+    const failures: string[] = [];
+    for (const message of slice) {
+      if (message.role === "assistant" && message.toolCalls) {
+        for (const toolCall of message.toolCalls) {
+          if (toolCall.name === "write_file" || toolCall.name === "edit_file" || toolCall.name === "notebook_edit_cell") {
+            const path = pathFromToolArguments(toolCall.argumentsJson);
+            if (path) {
+              changedPaths.add(path);
+            }
+          }
+        }
+      }
+      const content = message.content;
+      if ((message.role === "tool" || message.role === "user") && content) {
+        if (content.includes("<tool_use_error>")) {
+          failures.push(firstLines(content.replace(/<\/?tool_use_error>/g, "").trim(), 2));
+        }
+        for (const line of content.split("\n")) {
+          const match = /^-\s+(error|warning)\s+(.+)$/.exec(line.trim());
+          if (match) {
+            diagnostics.push(`${match[1]} ${match[2]}`);
+          }
+        }
+      }
+    }
+    const auditFailure = this.auditEntries.some((entry) => entry.outcome === "failed" || entry.outcome === "rejected" || entry.outcome === "denied");
+    const hadFailure = failures.length > 0 || diagnostics.some((line) => line.startsWith("error")) || auditFailure;
+    return {
+      hadFailure,
+      changedPaths: [...changedPaths],
+      diagnostics: uniqueStrings(diagnostics).slice(0, 20),
+      commandFailures: uniqueStrings(failures).slice(0, 10),
+      outcomeSummary: hadFailure ? "the task hit errors before finishing" : "the task completed without reported errors"
+    };
+  }
+
+  // Periodic self-audit ("nudge"): the model prunes/sharpens the lesson corpus, then a hard count
+  // cap is enforced deterministically so the library stays bounded (forces prioritisation).
+  private async runLearningAudit(settings: ReturnType<CodeForgeConfigService["getLearningSettings"]>): Promise<void> {
+    if (!this.memoryStore) {
+      return;
+    }
+    const lessons = learnedLessonsFrom(await this.memoryStore.list());
+    if (lessons.length === 0) {
+      return;
+    }
+
+    const { system, user } = buildAuditPrompt(lessons, settings.maxLessons);
+    const abort = new AbortController();
+    const provider = await this.createProvider();
+    const model = await this.resolveModel(provider, abort.signal);
+    let response = "";
+    for await (const event of this.streamChatWithIdleTimeout(provider, {
+      model,
+      messages: [{ role: "system", content: system }, { role: "user", content: user }],
+      temperature: 0,
+      signal: abort.signal
+    }, abort, "Learning audit")) {
+      if (event.type === "content") {
+        response += event.text;
+      }
+    }
+
+    const plan = parseAuditPlan(response, lessons.length);
+    let removed = 0;
+    let rewritten = 0;
+    for (const change of plan.rewrite) {
+      const lesson = lessons[change.index - 1];
+      if (!lesson) {
+        continue;
+      }
+      const text = serializeLessonText({ kind: lesson.kind, outcome: lesson.outcome, status: lesson.status, paths: lesson.paths, body: change.text });
+      await this.memoryStore.update(lesson.id, text, { scope: lesson.scope }).catch(() => undefined);
+      rewritten += 1;
+    }
+    const dropped = new Set<string>();
+    for (const index of plan.drop) {
+      const lesson = lessons[index - 1];
+      if (lesson && await this.memoryStore.remove(lesson.id)) {
+        dropped.add(lesson.id);
+        removed += 1;
+      }
+    }
+    const survivors = lessons.filter((lesson) => !dropped.has(lesson.id));
+    for (const id of overflowEvictions(survivors, settings.maxLessons)) {
+      if (await this.memoryStore.remove(id)) {
+        removed += 1;
+      }
+    }
+
+    this.persistSessionRecord((sessionId) => ({
+      type: "learning",
+      sessionId,
+      createdAt: Date.now(),
+      event: "audited",
+      kind: "lesson",
+      ref: String(lessons.length),
+      summary: `Audited learned lessons: dropped ${removed}, rewrote ${rewritten}.`
+    }));
+    this.recordInspector("info", "learning", `Audited learned lessons (kept ${lessons.length - removed}, dropped ${removed}, rewrote ${rewritten}).`);
+    if (removed > 0 || rewritten > 0) {
+      await this.publishState();
+    }
+  }
+
+  // When the same successful procedure recurs, synthesise it into a reusable .codeforge skill.
+  private async maybeProposeSkill(settings: ReturnType<CodeForgeConfigService["getLearningSettings"]>): Promise<void> {
+    if (!this.memoryStore) {
+      return;
+    }
+    const procedures = learnedLessonsFrom(await this.memoryStore.list()).filter((lesson) => lesson.kind === "procedure");
+    const clusters = clusterProcedureLessons(procedures, settings.skillsMinRepeats);
+    for (const cluster of clusters) {
+      const signature = clusterSignature(cluster);
+      if (this.proposedSkillSignatures.has(signature)) {
+        continue;
+      }
+      this.proposedSkillSignatures.add(signature);
+
+      const { system, user } = buildSkillProposalPrompt(cluster);
+      const abort = new AbortController();
+      const provider = await this.createProvider();
+      const model = await this.resolveModel(provider, abort.signal);
+      let response = "";
+      for await (const event of this.streamChatWithIdleTimeout(provider, {
+        model,
+        messages: [{ role: "system", content: system }, { role: "user", content: user }],
+        temperature: 0,
+        signal: abort.signal
+      }, abort, "Skill proposal")) {
+        if (event.type === "content") {
+          response += event.text;
+        }
+      }
+
+      const skill = parseSkillProposal(response);
+      if (!skill) {
+        continue;
+      }
+      const existing = await loadLocalSkills(this.workspace).catch(() => []);
+      if (existing.some((item) => item.name === skill.name)) {
+        continue;
+      }
+      const path = skillRelativePath(skill.name);
+      const content = renderSkillMarkdown(skill);
+      if (settings.autonomy === "auto") {
+        await this.writeProposedSkill(skill, path, content);
+      } else {
+        const id = `skill-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        this.pendingSkills.set(id, { id, skill, path, content });
+        this.persistSessionRecord((sessionId) => ({
+          type: "learning",
+          sessionId,
+          createdAt: Date.now(),
+          event: "proposed",
+          kind: "skill",
+          ref: path,
+          summary: skill.description
+        }));
+        this.recordInspector("info", "learning", `Proposed a reusable skill: ${skill.name}.`, skill.description);
+        this.emit({ type: "skillProposed", skill: { id, name: skill.name, description: skill.description, path, status: "proposed" } });
+        await this.publishState();
+      }
+      return; // at most one skill proposal per finished task
+    }
+  }
+
+  async acceptSkill(id: string): Promise<void> {
+    const pending = this.pendingSkills.get(id);
+    if (!pending) {
+      this.emit({ type: "error", text: "That skill proposal is no longer pending." });
+      return;
+    }
+    this.pendingSkills.delete(id);
+    try {
+      await this.writeProposedSkill(pending.skill, pending.path, pending.content);
+      await this.publishState();
+    } catch (error) {
+      this.emit({ type: "error", text: `Could not write skill ${pending.skill.name}: ${errorMessage(error)}` });
+    }
+  }
+
+  rejectSkill(id: string): void {
+    const pending = this.pendingSkills.get(id);
+    if (!pending) {
+      return;
+    }
+    this.pendingSkills.delete(id);
+    this.persistSessionRecord((sessionId) => ({
+      type: "learning",
+      sessionId,
+      createdAt: Date.now(),
+      event: "rejected",
+      kind: "skill",
+      ref: pending.path,
+      summary: pending.skill.description
+    }));
+    this.recordInspector("info", "learning", `Rejected proposed skill: ${pending.skill.name}.`);
+    void this.publishState();
+  }
+
+  listPendingSkills(): readonly AgentProposedSkillSummary[] {
+    return [...this.pendingSkills.values()].map((pending) => ({
+      id: pending.id,
+      name: pending.skill.name,
+      description: pending.skill.description,
+      path: pending.path,
+      status: "proposed" as const
+    }));
+  }
+
+  private async writeProposedSkill(skill: ProposedSkill, path: string, content: string): Promise<void> {
+    await this.diff.applyWriteFile({ type: "write_file", path, content });
+    this.persistSessionRecord((sessionId) => ({
+      type: "learning",
+      sessionId,
+      createdAt: Date.now(),
+      event: "accepted",
+      kind: "skill",
+      ref: path,
+      summary: skill.description
+    }));
+    this.recordInspector("info", "learning", `Saved reusable skill: ${skill.name}.`, path);
+    this.emit({ type: "skillProposed", skill: { id: path, name: skill.name, description: skill.description, path, status: "written" } });
+  }
+
+  private buildLearnedDigest(allMemories: readonly MemoryEntry[], prompt: string): string | undefined {
+    const settings = this.config.getLearningSettings();
+    if (!settings.enabled) {
+      return undefined;
+    }
+    const accepted = learnedLessonsFrom(allMemories).filter((lesson) => lesson.status === "accepted");
+    if (accepted.length === 0) {
+      return undefined;
+    }
+    const ranked = rankLessonsForPrompt(accepted, { prompt, pinnedFiles: [...this.pinnedFiles] });
+    return formatLearnedDigest(ranked, settings.maxLessonBytes) || undefined;
   }
 
   private appendToolResult(toolCallId: string | undefined, toolName: string, content: string): void {
@@ -2850,6 +3260,8 @@ export class AgentController {
     this.sessionId = snapshot.id;
     this.sessionStartPromise = undefined;
     this.messages = [...snapshot.messages];
+    this.lastLearnedMessageCount = this.messages.length;
+    this.learningInFlight = false;
     this.restoreTasksFromSessionRecords(snapshot.records);
     this.lastContextItems = [];
     this.mcpContextItems = [];
@@ -3658,6 +4070,8 @@ export class AgentController {
       workers: this.workers.list(),
       activeContext: await this.activeContextSummary(),
       memories: await this.memorySummaries(),
+      learnedLessons: await this.learnedLessonSummaries(),
+      pendingSkills: this.listPendingSkills(),
       capabilityCache: await this.capabilitySummaries(activeProfile.id),
       inspector: this.inspectorSummary(),
       settings: {
@@ -3707,13 +4121,93 @@ export class AgentController {
       return [];
     }
     const memories = await this.memoryStore.list().catch(() => []);
-    return memories.map((memory) => ({
+    // Learned lessons are surfaced in the dedicated Learned panel, not the manual Memory list.
+    return plainMemoriesFrom(memories).map((memory) => ({
       id: memory.id,
       text: memory.text,
       createdAt: memory.createdAt,
       scope: memory.scope ?? "workspace",
       namespace: memory.namespace
     }));
+  }
+
+  private async learnedLessonSummaries(): Promise<readonly AgentLearnedLessonSummary[]> {
+    if (!this.memoryStore) {
+      return [];
+    }
+    const memories = await this.memoryStore.list().catch(() => []);
+    return [...learnedLessonsFrom(memories)]
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .map((lesson) => ({
+        id: lesson.id,
+        kind: lesson.kind,
+        status: lesson.status,
+        outcome: lesson.outcome,
+        scope: lesson.scope,
+        paths: lesson.paths,
+        body: lesson.body,
+        createdAt: lesson.createdAt
+      }));
+  }
+
+  async acceptLesson(id: string): Promise<void> {
+    await this.restatusLesson(id, "accepted");
+  }
+
+  async editLesson(id: string, body: string): Promise<void> {
+    if (!this.memoryStore || !body.trim()) {
+      return;
+    }
+    const lesson = learnedLessonsFrom(await this.memoryStore.list()).find((item) => item.id === id);
+    if (!lesson) {
+      return;
+    }
+    const text = serializeLessonText({ kind: lesson.kind, outcome: lesson.outcome, status: lesson.status, paths: lesson.paths, body });
+    await this.memoryStore.update(id, text, { scope: lesson.scope }).catch(() => undefined);
+    await this.publishState();
+  }
+
+  async rejectLesson(id: string): Promise<void> {
+    if (!this.memoryStore) {
+      return;
+    }
+    const lesson = learnedLessonsFrom(await this.memoryStore.list()).find((item) => item.id === id);
+    if (!lesson) {
+      return;
+    }
+    await this.memoryStore.remove(id);
+    this.persistSessionRecord((sessionId) => ({
+      type: "learning",
+      sessionId,
+      createdAt: Date.now(),
+      event: "rejected",
+      kind: "lesson",
+      ref: id,
+      summary: lesson.body.slice(0, 160)
+    }));
+    await this.publishState();
+  }
+
+  private async restatusLesson(id: string, status: LearnedLesson["status"]): Promise<void> {
+    if (!this.memoryStore) {
+      return;
+    }
+    const lesson = learnedLessonsFrom(await this.memoryStore.list()).find((item) => item.id === id);
+    if (!lesson || lesson.status === status) {
+      return;
+    }
+    const text = serializeLessonText({ kind: lesson.kind, outcome: lesson.outcome, status, paths: lesson.paths, body: lesson.body });
+    await this.memoryStore.update(id, text, { scope: lesson.scope }).catch(() => undefined);
+    this.persistSessionRecord((sessionId) => ({
+      type: "learning",
+      sessionId,
+      createdAt: Date.now(),
+      event: "accepted",
+      kind: "lesson",
+      ref: id,
+      summary: lesson.body.slice(0, 160)
+    }));
+    await this.publishState();
   }
 
   private async capabilitySummaries(profileId: string): Promise<readonly AgentCapabilitySummary[]> {
@@ -3940,6 +4434,15 @@ function firstLines(value: string, limit: number): string {
 
 function uniqueStrings(values: readonly string[] | undefined): readonly string[] {
   return [...new Set((values ?? []).map((value) => value.trim()).filter(Boolean))];
+}
+
+function pathFromToolArguments(argumentsJson: string): string | undefined {
+  try {
+    const parsed = JSON.parse(argumentsJson);
+    return parsed && typeof parsed.path === "string" && parsed.path.trim() ? parsed.path.trim() : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function formatTaskLine(task: CodeForgeTask): string {

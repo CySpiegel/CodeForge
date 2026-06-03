@@ -27,6 +27,8 @@
     addMemory: document.getElementById("addMemory"),
     clearMemories: document.getElementById("clearMemories"),
     memoryList: document.getElementById("memoryList"),
+    learnedList: document.getElementById("learnedList"),
+    learnedSkills: document.getElementById("learnedSkills"),
     endpointPickerButton: document.getElementById("endpointPickerButton"),
     endpointPickerMenu: document.getElementById("endpointPickerMenu"),
     endpointPickerLabel: document.getElementById("endpointPickerLabel"),
@@ -548,6 +550,7 @@
     renderWorkers(state.workers || []);
     renderActiveContext();
     renderMemoryList();
+    renderLearned();
     renderInspector(state.inspector);
     renderContextUsage(state.contextUsage);
     if (isSlashCommandMenuOpen()) {
@@ -759,6 +762,88 @@
       actions.append(edit, remove);
       row.append(meta, actions);
       elements.memoryList.append(row);
+    }
+  }
+
+  function renderLearned() {
+    renderLearnedSkills();
+    if (!elements.learnedList) {
+      return;
+    }
+    const lessons = Array.isArray(state?.learnedLessons) ? state.learnedLessons : [];
+    elements.learnedList.replaceChildren();
+    if (lessons.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "memory-empty";
+      empty.textContent = "No lessons learned yet.";
+      elements.learnedList.append(empty);
+      return;
+    }
+    for (const lesson of lessons) {
+      const row = document.createElement("div");
+      row.className = "memory-row";
+      const meta = document.createElement("div");
+      meta.className = "memory-meta";
+      const title = document.createElement("div");
+      title.className = "memory-title";
+      const files = Array.isArray(lesson.paths) && lesson.paths.length ? ` · ${lesson.paths.join(", ")}` : "";
+      title.textContent = `[${lesson.kind}] ${lesson.status} · ${lesson.outcome} · ${lesson.scope}${files}`;
+      const text = document.createElement("div");
+      text.className = "memory-text";
+      text.textContent = lesson.body || "";
+      meta.append(title, text);
+      const actions = document.createElement("div");
+      actions.className = "memory-row-actions";
+      if (lesson.status === "proposed") {
+        const accept = document.createElement("button");
+        accept.type = "button";
+        accept.textContent = "Accept";
+        accept.addEventListener("click", () => vscode.postMessage({ type: "acceptLesson", id: lesson.id }));
+        actions.append(accept);
+      }
+      const reject = document.createElement("button");
+      reject.type = "button";
+      reject.className = "secondary";
+      reject.textContent = "Reject";
+      reject.addEventListener("click", () => vscode.postMessage({ type: "rejectLesson", id: lesson.id }));
+      actions.append(reject);
+      row.append(meta, actions);
+      elements.learnedList.append(row);
+    }
+  }
+
+  function renderLearnedSkills() {
+    if (!elements.learnedSkills) {
+      return;
+    }
+    const skills = (Array.isArray(state?.pendingSkills) ? state.pendingSkills : []).filter((skill) => skill.status === "proposed");
+    elements.learnedSkills.replaceChildren();
+    for (const skill of skills) {
+      const row = document.createElement("div");
+      row.className = "memory-row";
+      const meta = document.createElement("div");
+      meta.className = "memory-meta";
+      const title = document.createElement("div");
+      title.className = "memory-title";
+      title.textContent = `Proposed skill: ${skill.name}`;
+      const text = document.createElement("div");
+      text.className = "memory-text";
+      text.textContent = `${skill.description || ""} (${skill.path})`;
+      meta.append(title, text);
+      const accept = document.createElement("button");
+      accept.type = "button";
+      accept.textContent = "Create skill";
+      accept.addEventListener("click", () => vscode.postMessage({ type: "acceptSkill", id: skill.id }));
+      const reject = document.createElement("button");
+      reject.type = "button";
+      reject.className = "secondary";
+      reject.textContent = "Reject";
+      reject.addEventListener("click", () => vscode.postMessage({ type: "rejectSkill", id: skill.id }));
+      const actions = document.createElement("div");
+      actions.className = "memory-row-actions";
+      actions.append(accept, reject);
+      row.append(meta, actions);
+      elements.learnedSkills.append(row);
     }
   }
 

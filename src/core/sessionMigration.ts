@@ -91,6 +91,18 @@ export function normalizeSessionRecord(value: unknown): SessionRecord | undefine
         }
         : undefined;
     }
+    case "learning":
+      return isLearningEvent(value.event) && (value.kind === "lesson" || value.kind === "skill") && typeof value.ref === "string" && typeof value.summary === "string"
+        ? {
+          type: "learning",
+          sessionId: value.sessionId,
+          createdAt: value.createdAt,
+          event: value.event,
+          kind: value.kind,
+          ref: value.ref,
+          summary: value.summary
+        }
+        : undefined;
     case "event":
       return isEventLevel(value.level) && typeof value.text === "string"
         ? { type: "event", sessionId: value.sessionId, createdAt: value.createdAt, level: value.level, text: value.text }
@@ -233,6 +245,10 @@ function isWorkerSessionEvent(value: unknown): value is WorkerSessionEvent {
 
 function isEventLevel(value: unknown): value is "status" | "error" {
   return value === "status" || value === "error";
+}
+
+function isLearningEvent(value: unknown): value is "proposed" | "accepted" | "rejected" | "audited" {
+  return value === "proposed" || value === "accepted" || value === "rejected" || value === "audited";
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

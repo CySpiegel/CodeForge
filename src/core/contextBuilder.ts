@@ -4,6 +4,7 @@ import { buildWorkspaceIndex } from "./workspaceIndex";
 
 export interface ContextBuilderSources {
   readonly memories?: readonly MemoryEntry[];
+  readonly learnedDigest?: string;
   readonly mcpResources?: readonly ContextItem[];
   readonly pinnedFiles?: readonly string[];
 }
@@ -35,6 +36,14 @@ export class ContextBuilder {
     if (memoryItem && budget > 0) {
       items.push(memoryItem);
       budget -= byteLength(memoryItem.content);
+    }
+
+    if (this.sources.learnedDigest && budget > 0) {
+      const trimmed = trimToBudget(this.sources.learnedDigest, Math.min(16000, budget));
+      if (trimmed) {
+        items.push({ kind: "memory", label: "Learned lessons", content: trimmed });
+        budget -= byteLength(trimmed);
+      }
     }
 
     for (const item of this.sources.mcpResources ?? []) {

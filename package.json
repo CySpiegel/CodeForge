@@ -2,7 +2,7 @@
   "name": "codeforge",
   "displayName": "CodeForge",
   "description": "A self-hosted-first coding harness extension for Visual Studio Code.",
-  "version": "0.0.10",
+  "version": "0.1.10",
   "publisher": "codeforge",
   "license": "UNLICENSED",
   "engines": {
@@ -348,6 +348,88 @@
           "minimum": 16000,
           "maximum": 2000000,
           "description": "Maximum stdout and stderr bytes retained per approved shell command stream."
+        },
+        "codeforge.learning.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "description": "Let CodeForge learn from finished tasks: distill durable lessons (and reusable skills) from the fixes and code it writes, then apply the relevant ones on future tasks."
+        },
+        "codeforge.learning.autonomy": {
+          "type": "string",
+          "enum": [
+            "review",
+            "hybrid",
+            "auto"
+          ],
+          "enumDescriptions": [
+            "Propose everything for review: learned lessons and skills are pending until you accept them in the Learned panel.",
+            "Hybrid: text lessons are saved automatically; skill files are proposed for approval.",
+            "Automatic: lessons are saved silently; skill-file writes follow the active approval policy."
+          ],
+          "default": "review",
+          "scope": "resource",
+          "description": "How CodeForge stores what it learns."
+        },
+        "codeforge.learning.scope": {
+          "type": "string",
+          "enum": [
+            "split",
+            "repo",
+            "global"
+          ],
+          "enumDescriptions": [
+            "Split: project/codebase lessons stay in this repo; your preferences follow you across repos.",
+            "Per-repo: everything learned stays scoped to this project.",
+            "Global: share all learned knowledge across every project."
+          ],
+          "default": "split",
+          "scope": "resource",
+          "description": "Where learned knowledge applies."
+        },
+        "codeforge.learning.auditCadence": {
+          "type": "number",
+          "default": 15,
+          "minimum": 1,
+          "maximum": 1000,
+          "scope": "resource",
+          "description": "Run a self-audit (dedup, prune, refresh learned lessons) after this many learned tasks."
+        },
+        "codeforge.learning.maxLessons": {
+          "type": "number",
+          "default": 60,
+          "minimum": 1,
+          "maximum": 1000,
+          "scope": "resource",
+          "description": "Maximum number of learned lessons retained per scope before the self-audit prunes the least useful."
+        },
+        "codeforge.learning.maxLessonBytes": {
+          "type": "number",
+          "default": 24000,
+          "minimum": 1000,
+          "maximum": 500000,
+          "scope": "resource",
+          "description": "Maximum bytes of learned lessons injected into a request's context."
+        },
+        "codeforge.learning.skills.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "description": "Allow CodeForge to propose reusable skills (.codeforge/skills) when it detects a repeated successful workflow."
+        },
+        "codeforge.learning.skills.minRepeats": {
+          "type": "number",
+          "default": 3,
+          "minimum": 2,
+          "maximum": 50,
+          "scope": "resource",
+          "description": "How many times a similar successful procedure must recur before CodeForge proposes a skill for it."
+        },
+        "codeforge.learning.embeddings.enabled": {
+          "type": "boolean",
+          "default": false,
+          "scope": "resource",
+          "description": "Use the configured OpenAI-compatible /embeddings endpoint to rank learned lessons by semantic similarity (opt-in; many local servers do not support embeddings)."
         }
       }
     },

@@ -366,7 +366,7 @@ function agentNameFromPath(path: string): string | undefined {
   return extensionNameFromPath(path);
 }
 
-function isSafeExtensionName(value: string): boolean {
+export function isSafeExtensionName(value: string): boolean {
   return /^[a-z][a-z0-9_-]{0,63}$/i.test(value);
 }
 

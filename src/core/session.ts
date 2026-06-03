@@ -25,6 +25,7 @@ export type SessionRecord =
   | SessionCheckpointRecord
   | SessionWorkerRecord
   | SessionTaskRecord
+  | SessionLearningRecord
   | SessionEventRecord;
 
 export interface SessionStartedRecord {
@@ -89,6 +90,16 @@ export interface SessionTaskRecord {
   readonly createdAt: number;
   readonly event: "created" | "updated";
   readonly task: CodeForgeTask;
+}
+
+export interface SessionLearningRecord {
+  readonly type: "learning";
+  readonly sessionId: string;
+  readonly createdAt: number;
+  readonly event: "proposed" | "accepted" | "rejected" | "audited";
+  readonly kind: "lesson" | "skill";
+  readonly ref: string;
+  readonly summary: string;
 }
 
 export interface SessionEventRecord {

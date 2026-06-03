@@ -84,13 +84,29 @@ export class VsCodeMemoryStore implements MemoryStore {
 
   private async updateNow(change: (memories: readonly MemoryEntry[]) => readonly MemoryEntry[]): Promise<void> {
     const next = change(await this.readAll());
-    await vscode.workspace.fs.createDirectory(this.storageRoot());
-    await vscode.workspace.fs.writeFile(this.storageUri(), Buffer.from(JSON.stringify(next, null, 2), "utf8"));
+    if (!this.isSplitStore()) {
+      await this.writeRoot(this.workspaceRoot(), next);
+      return;
+    }
+    // user-scoped memories are cross-repo: persist them under globalStorageUri so they follow the
+    // user across workspaces; workspace/agent-scoped memories stay in the per-folder storageUri.
+    await this.writeRoot(this.workspaceRoot(), next.filter((memory) => normalizeMemoryScope(memory.scope) !== "user"));
+    await this.writeRoot(this.globalRoot(), next.filter((memory) => normalizeMemoryScope(memory.scope) === "user"));
   }
 
   private async readAll(): Promise<readonly MemoryEntry[]> {
+    const workspaceMemories = await this.readRoot(this.workspaceRoot());
+    if (!this.isSplitStore()) {
+      return workspaceMemories;
+    }
+    const seen = new Set(workspaceMemories.map((memory) => memory.id));
+    const globalMemories = (await this.readRoot(this.globalRoot())).filter((memory) => !seen.has(memory.id));
+    return [...workspaceMemories, ...globalMemories];
+  }
+
+  private async readRoot(root: vscode.Uri): Promise<readonly MemoryEntry[]> {
     try {
-      const raw = JSON.parse(Buffer.from(await vscode.workspace.fs.readFile(this.storageUri())).toString("utf8"));
+      const raw = JSON.parse(Buffer.from(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(root, memoryFileName))).toString("utf8"));
       if (!Array.isArray(raw)) {
         return [];
       }
@@ -98,6 +114,11 @@ export class VsCodeMemoryStore implements MemoryStore {
     } catch {
       return [];
     }
+  }
+
+  private async writeRoot(root: vscode.Uri, memories: readonly MemoryEntry[]): Promise<void> {
+    await vscode.workspace.fs.createDirectory(root);
+    await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(root, memoryFileName), Buffer.from(JSON.stringify(memories, null, 2), "utf8"));
   }
 
   private async flushPendingWrites(): Promise<void> {
@@ -108,12 +129,17 @@ export class VsCodeMemoryStore implements MemoryStore {
     }
   }
 
-  private storageUri(): vscode.Uri {
-    return vscode.Uri.joinPath(this.storageRoot(), memoryFileName);
+  private workspaceRoot(): vscode.Uri {
+    return this.context.storageUri ?? this.context.globalStorageUri;
   }
 
-  private storageRoot(): vscode.Uri {
-    return this.context.storageUri ?? this.context.globalStorageUri;
+  private globalRoot(): vscode.Uri {
+    return this.context.globalStorageUri;
+  }
+
+  private isSplitStore(): boolean {
+    return this.context.storageUri !== undefined
+      && this.context.storageUri.toString() !== this.context.globalStorageUri.toString();
   }
 }
 

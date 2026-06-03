@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { allowlistEntryForUrl, assertUrlAllowed, isUrlAllowed } from "../core/networkPolicy";
 import { normalizePermissionPolicy, parsePermissionRules } from "../core/permissions";
+import { LearningSettings, normalizeLearningAutonomy, normalizeLearningScopeSetting } from "../core/learning";
 import { normalizeSettingsPermissionMode } from "../core/settingsMigration";
 import { AgentMode, ContextLimits, McpServerConfig, NetworkPolicy, PermissionMode, PermissionPolicy, PermissionRule, ProviderProfile } from "../core/types";
 
@@ -33,6 +34,20 @@ export class CodeForgeConfigService {
       maxFiles: clampNumber(this.config().get<number>("context.maxFiles", 24), 1, 200, 24),
       maxBytes: clampNumber(this.config().get<number>("context.maxBytes", 120000), 8000, 2_000_000, 120000),
       maxTokens: maxTokens > 0 ? maxTokens : undefined
+    };
+  }
+
+  getLearningSettings(): LearningSettings {
+    return {
+      enabled: this.config().get<boolean>("learning.enabled", true),
+      autonomy: normalizeLearningAutonomy(this.config().get<unknown>("learning.autonomy", "review")),
+      scope: normalizeLearningScopeSetting(this.config().get<unknown>("learning.scope", "split")),
+      auditCadence: clampNumber(this.config().get<number>("learning.auditCadence", 15), 1, 1000, 15),
+      maxLessons: clampNumber(this.config().get<number>("learning.maxLessons", 60), 1, 1000, 60),
+      maxLessonBytes: clampNumber(this.config().get<number>("learning.maxLessonBytes", 24000), 1000, 500000, 24000),
+      skillsEnabled: this.config().get<boolean>("learning.skills.enabled", true),
+      skillsMinRepeats: clampNumber(this.config().get<number>("learning.skills.minRepeats", 3), 2, 50, 3),
+      embeddingsEnabled: this.config().get<boolean>("learning.embeddings.enabled", false)
     };
   }
 

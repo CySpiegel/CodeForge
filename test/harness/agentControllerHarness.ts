@@ -3,6 +3,7 @@ import { CodeForgeConfigService } from "../../src/adapters/vscodeConfig";
 import { DiffService } from "../../src/adapters/diffService";
 import { TerminalRunner } from "../../src/adapters/terminalRunner";
 import { CodeIntelAction, CodeIntelPort } from "../../src/core/codeIntel";
+import { LearningSettings } from "../../src/core/learning";
 import { MemoryEntry, MemoryListFilter, MemoryStore, MemoryWriteOptions } from "../../src/core/memory";
 import { NotebookAction, NotebookPort } from "../../src/core/notebooks";
 import { applyFilePatch, parseUnifiedDiff, targetPath } from "../../src/core/unifiedDiff";
@@ -358,6 +359,7 @@ export interface ControllerHarnessOptions {
   readonly contextLimits?: ContextLimits;
   readonly maxInvalidToolCallRetries?: number;
   readonly streamCompletionGraceSeconds?: number;
+  readonly learningSettings?: Partial<LearningSettings>;
 }
 
 export function createControllerHarness(options: ControllerHarnessOptions): ControllerHarness {
@@ -370,6 +372,18 @@ export function createControllerHarness(options: ControllerHarnessOptions): Cont
   const memory = new FakeMemoryStore();
   const permissionPolicy: PermissionPolicy = { mode: options.permissionMode ?? "smart", rules: [] };
   const contextLimits = options.contextLimits ?? { maxFiles: 12, maxBytes: 64000 };
+  const learningSettings: LearningSettings = {
+    enabled: false,
+    autonomy: "review",
+    scope: "split",
+    auditCadence: 15,
+    maxLessons: 60,
+    maxLessonBytes: 24000,
+    skillsEnabled: true,
+    skillsMinRepeats: 3,
+    embeddingsEnabled: false,
+    ...options.learningSettings
+  };
   const config = {
     getActiveProfile: async () => fakeProfile,
     getNetworkPolicy: () => ({ allowlist: [] }),
@@ -378,6 +392,7 @@ export function createControllerHarness(options: ControllerHarnessOptions): Cont
     getMcpServers: () => options.mcpServers ?? [],
     getConfiguredModel: () => fakeProfile.defaultModel ?? "",
     getContextLimits: () => contextLimits,
+    getLearningSettings: () => learningSettings,
     getCommandTimeoutSeconds: () => 10,
     getModelIdleTimeoutSeconds: () => 300,
     getStreamCompletionGraceSeconds: () => options.streamCompletionGraceSeconds ?? 30,
