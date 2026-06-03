@@ -325,6 +325,49 @@ test("Manual approval pauses side effects, then approve resumes the model loop",
   assert.equal(harness.workspace.files.get("APPROVED.md"), "approved");
 });
 
+test("Post-approval continuation request ends in the tool result, never a trailing user turn", async () => {
+  // Regression guard for the "only auto mode continues after Accept" bug: the post-approval
+  // request must be byte-shape-identical to the full-auto continue path (ending in role:"tool").
+  // A `tool` -> `user` adjacency is mis-rendered by many local OpenAI-compatible chat templates,
+  // which return an empty turn and silently stall the loop after the user clicks Accept.
+  const harness = createControllerHarness({
+    mode: "agent",
+    permissionMode: "manual",
+    files: { "README.md": "# CodeForge\n" },
+    responses: [
+      { toolCalls: [toolCall("write_file", { path: "NEW.md", content: "hi" })] },
+      { content: "Done." }
+    ]
+  });
+
+  await harness.controller.sendPrompt("Create NEW.md.");
+  const approval = harness.events.find((event) => event.type === "approvalRequested");
+  assert.ok(approval && approval.type === "approvalRequested");
+
+  await harness.controller.approve(approval.approval.id);
+  await waitForEvent(harness.events, (event) => event.type === "message" && event.role === "assistant" && /Done\./.test(event.text));
+
+  // The approval continuation must have issued a second model request...
+  assert.equal(harness.provider.requests.length, 2);
+  const continuationMessages = harness.provider.requests[1].messages;
+
+  // ...which contains no `tool` -> `user` adjacency. The old code appended the continuation as a
+  // trailing user turn right after the tool result, which is exactly the shape that stalled.
+  const toolThenUser = continuationMessages.some(
+    (message, index) => message.role === "tool" && continuationMessages[index + 1]?.role === "user"
+  );
+  assert.equal(toolThenUser, false);
+
+  // ...and the "keep going" continuation guidance must survive, carried inside the tool result
+  // rather than as a separate user turn.
+  assert.ok(continuationMessages.some(
+    (message) => message.role === "tool" && /CodeForge continuation: The user approved/.test(message.content)
+  ));
+  assert.equal(continuationMessages.some(
+    (message) => message.role === "user" && /CodeForge continuation:/.test(message.content)
+  ), false);
+});
+
 test("Smart approval asks before applying file edits in Agent mode", async () => {
   const harness = createControllerHarness({
     mode: "agent",

@@ -1273,7 +1273,12 @@ export class AgentController {
         await this.publishState();
         return;
       }
-      this.appendToolResult(approval.toolCallId, approval.toolName ?? approval.action.type, transcriptResult);
+      // Fold the "keep going" guidance into the tool-result message rather than appending it as a
+      // separate trailing user turn. This preserves the continuation nudge for the model while
+      // keeping the next request ending in a `tool` message (a `tool` -> `user` adjacency stalls
+      // many local OpenAI-compatible chat templates).
+      const acceptedContinuation = approvalContinuationPrompt(approval.action, "accepted");
+      this.appendToolResult(approval.toolCallId, approval.toolName ?? approval.action.type, `${transcriptResult}\n\n${acceptedContinuation}`);
       this.emit({
         type: "approvalResolved",
         id,
@@ -1283,7 +1288,7 @@ export class AgentController {
       this.emit({ type: "toolResult", text: transcriptResult });
       this.emitContextUsage();
       await this.publishState();
-      void this.continueAfterToolResult(approvalContinuationPrompt(approval.action, "accepted"), "Continuing after approval.", remainingInvocations);
+      void this.continueAfterToolResult(acceptedContinuation, "Continuing after approval.", remainingInvocations);
     } catch (error) {
       const message = errorMessage(error);
       const text = toolError(message);
@@ -1299,13 +1304,14 @@ export class AgentController {
         await this.publishState();
         return;
       }
-      this.appendToolResult(approval.toolCallId, approval.toolName ?? approval.action.type, text);
+      const failedContinuation = approvalContinuationPrompt(approval.action, "failed");
+      this.appendToolResult(approval.toolCallId, approval.toolName ?? approval.action.type, `${text}\n\n${failedContinuation}`);
       this.appendCancelledToolResults(remainingInvocations, `Previous approved ${approval.action.type} failed: ${message}`);
       this.emit({ type: "approvalResolved", id, accepted: true, text: `Approved action failed: ${message}` });
       this.emit({ type: "toolResult", text });
       this.emitContextUsage();
       await this.publishState();
-      void this.continueAfterToolResult(approvalContinuationPrompt(approval.action, "failed"), "Continuing after failed action.");
+      void this.continueAfterToolResult(failedContinuation, "Continuing after failed action.");
     }
   }
 
@@ -1369,7 +1375,7 @@ export class AgentController {
     }
   }
 
-  private async runModelLoop(provider: LlmProvider, model: string, abort: AbortController, continuationPrompt?: string): Promise<void> {
+  private async runModelLoop(provider: LlmProvider, model: string, abort: AbortController): Promise<void> {
     const maxToolTurns = this.config.getAgentMode() === "agent" ? maxAgentToolTurns : maxReadOnlyToolTurns;
     const maxInvalidRetries = this.config.getMaxInvalidToolCallRetries();
     let consecutiveInvalidIterations = 0;
@@ -1389,12 +1395,13 @@ export class AgentController {
 
       this.lastTokenUsage = undefined;
       this.emitContextUsage();
-      const messagesForRequest = iteration === 0 && continuationPrompt
-        ? [...this.messages, { role: "user" as const, content: continuationPrompt }]
-        : this.messages;
+      // Always re-request the existing transcript (which ends in the tool result) rather than
+      // appending a trailing user turn. A `tool` -> `user` adjacency is mis-rendered by many local
+      // OpenAI-compatible chat templates, which return an empty turn and silently stall the loop.
+      // This keeps the post-approval request byte-shape-identical to the (working) full-auto path.
       for await (const event of this.streamChatWithIdleTimeout(provider, {
         model,
-        messages: messagesForRequest,
+        messages: this.messages,
         tools: requestTools,
         signal: abort.signal
       }, abort, "Model request")) {
@@ -2454,7 +2461,7 @@ export class AgentController {
       if (!completedPendingTools || abort.signal.aborted) {
         return;
       }
-      await this.runModelLoop(provider, model, abort, continuationPrompt);
+      await this.runModelLoop(provider, model, abort);
     } catch (error) {
       this.emit({ type: "error", text: error instanceof Error ? error.message : String(error) });
     } finally {
@@ -4504,12 +4511,12 @@ function approvalAcceptedText(action: AgentAction, transcriptResult: string): st
 function approvalContinuationPrompt(action: AgentAction, outcome: "accepted" | "failed" | "rejected"): string {
   const summary = toolSummary(action);
   if (outcome === "accepted") {
-    return `CodeForge continuation: The user approved ${summary}, and its tool result is now available above. Continue the original task from the existing plan. If more edits, commands, or tool calls are still needed, request the next one now. Do not stop until the user's task is complete.`;
+    return `CodeForge continuation: The user approved ${summary}. Continue the original task from the existing plan. If more edits, commands, or tool calls are still needed, request the next one now. Do not stop until the user's task is complete.`;
   }
   if (outcome === "rejected") {
-    return `CodeForge continuation: The user rejected ${summary}, and the rejection is now available above. Continue the original task by choosing an alternative allowed approach. Do not retry the same rejected action unchanged.`;
+    return `CodeForge continuation: The user rejected ${summary}. Continue the original task by choosing an alternative allowed approach. Do not retry the same rejected action unchanged.`;
   }
-  return `CodeForge continuation: ${summary} was approved but failed, and the failure is now available above. Continue the original task by inspecting the current state and trying a corrected approach. Do not repeat the same failed action unchanged.`;
+  return `CodeForge continuation: ${summary} was approved but failed. Continue the original task by inspecting the current state and trying a corrected approach. Do not repeat the same failed action unchanged.`;
 }
 
 function modelStreamIdleTimeoutMs(configuredSeconds: number): number {
