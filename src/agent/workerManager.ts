@@ -25,6 +25,8 @@ export interface WorkerManagerOptions {
   readonly workspace: WorkspacePort;
   readonly contextLimits: () => ContextLimits;
   readonly memories: (definition: WorkerDefinition) => Promise<readonly MemoryEntry[]>;
+  readonly learnedDigest?: (definition: WorkerDefinition, prompt: string) => Promise<string | undefined>;
+  readonly skillsDigest?: (definition: WorkerDefinition, prompt: string) => Promise<string | undefined>;
   readonly mcpResources: () => readonly ContextItem[];
   readonly createProvider: () => Promise<LlmProvider>;
   readonly resolveModel: (provider: LlmProvider, signal: AbortSignal) => Promise<string>;
@@ -378,6 +380,8 @@ export class WorkerManager {
 
       const context = new ContextBuilder(this.options.workspace, this.effectiveContextLimits(), {
         memories: await this.options.memories(task.definition),
+        learnedDigest: await this.options.learnedDigest?.(task.definition, task.prompt),
+        skillsDigest: await this.options.skillsDigest?.(task.definition, task.prompt),
         mcpResources: this.options.mcpResources()
       });
       const contextItems = await context.build(abort.signal);

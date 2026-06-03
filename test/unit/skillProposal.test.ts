@@ -5,6 +5,7 @@ import { LearnedLesson, parseLesson, serializeLessonText } from "../../src/core/
 import {
   buildSkillProposalPrompt,
   clusterProcedureLessons,
+  formatSkillsDigest,
   parseSkillProposal,
   renderSkillMarkdown,
   sanitizeSkillName,
@@ -68,4 +69,19 @@ test("buildSkillProposalPrompt lists the clustered procedures", () => {
   const { user } = buildSkillProposalPrompt(cluster);
   assert.match(user, /Edit toolRegistry then actionProtocol/);
   assert.match(user, /files: src\/core\/toolRegistry\.ts/);
+});
+
+test("formatSkillsDigest injects only relevant skill bodies, bounded by bytes", () => {
+  const skills = [
+    { name: "add-a-tool", description: "register a tool", body: "1. Edit toolRegistry\n2. Edit actionProtocol" },
+    { name: "unrelated", description: "something else", body: "do gardening" }
+  ];
+  const digest = formatSkillsDigest(skills, "I need to add a tool to the registry", 10_000);
+  assert.match(digest, /Relevant learned skills/);
+  assert.match(digest, /### add-a-tool/);
+  assert.match(digest, /Edit toolRegistry/);
+  assert.doesNotMatch(digest, /gardening/);
+
+  assert.equal(formatSkillsDigest(skills, "completely orthogonal request", 10_000), "");
+  assert.equal(formatSkillsDigest(skills, "add a tool", 10), "");
 });

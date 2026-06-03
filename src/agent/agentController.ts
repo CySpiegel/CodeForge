@@ -40,6 +40,7 @@ import {
   buildSkillProposalPrompt,
   clusterProcedureLessons,
   clusterSignature,
+  formatSkillsDigest,
   parseSkillProposal,
   ProposedSkill,
   renderSkillMarkdown,
@@ -465,6 +466,8 @@ export class AgentController {
       workspace: this.workspace,
       contextLimits: () => this.effectiveContextLimits(),
       memories: (definition) => this.memoriesForWorker(definition),
+      learnedDigest: (_definition, prompt) => this.workerLearnedDigest(prompt),
+      skillsDigest: (_definition, prompt) => this.workerSkillsDigest(prompt),
       mcpResources: () => this.mcpContextItems,
       createProvider: () => this.createProvider(),
       resolveModel: (provider, signal) => this.resolveModel(provider, signal),
@@ -2008,10 +2011,28 @@ export class AgentController {
     if (!this.memoryStore) {
       return [];
     }
+    // Learned lessons are injected separately as a ranked digest; keep the raw tagged rows out of
+    // the worker's plain memory list.
     if (definition.kind === "custom" && definition.name) {
-      return this.memoryStore.list({ scope: "agent", namespace: definition.name, includeShared: true });
+      return plainMemoriesFrom(await this.memoryStore.list({ scope: "agent", namespace: definition.name, includeShared: true }));
     }
-    return this.memoryStore.list();
+    return plainMemoriesFrom(await this.memoryStore.list());
+  }
+
+  private async workerLearnedDigest(prompt: string): Promise<string | undefined> {
+    if (!this.memoryStore) {
+      return undefined;
+    }
+    return this.buildLearnedDigest(await this.memoryStore.list().catch(() => []), prompt);
+  }
+
+  private async workerSkillsDigest(prompt: string): Promise<string | undefined> {
+    const settings = this.config.getLearningSettings();
+    if (!settings.enabled || !settings.skillsEnabled) {
+      return undefined;
+    }
+    const skills = await loadLocalSkills(this.workspace).catch(() => []);
+    return formatSkillsDigest(skills, prompt, settings.maxLessonBytes) || undefined;
   }
 
   private workerApprovalMetadata(worker: WorkerSummary, action: AgentAction, decision: PermissionDecision): { readonly detail?: string; readonly risk?: string; readonly origin: "worker" } {

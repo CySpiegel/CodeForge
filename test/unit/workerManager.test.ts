@@ -278,10 +278,12 @@ class FakeProvider implements LlmProvider {
     baseUrl: "http://127.0.0.1:1234"
   };
   private index = 0;
+  readonly requests: LlmRequest[] = [];
 
   constructor(private readonly responses: readonly FakeResponse[]) {}
 
-  async *streamChat(_request: LlmRequest): AsyncIterable<LlmStreamEvent> {
+  async *streamChat(request: LlmRequest): AsyncIterable<LlmStreamEvent> {
+    this.requests.push(request);
     const response = this.responses[Math.min(this.index, this.responses.length - 1)] ?? "";
     this.index++;
     if (typeof response === "string") {
@@ -350,3 +352,34 @@ function fakeWorkspace(): WorkspacePort {
     }
   };
 }
+
+test("workers receive a ranked learned-lesson digest and relevant skill bodies in context", async () => {
+  const provider = new FakeProvider([
+    "Scope: inspect\nResult: ok\nKey files: src/a.ts\nFiles changed: none\nIssues: none\nConfidence: high"
+  ]);
+  const manager = new WorkerManager({
+    workspace: fakeWorkspace(),
+    contextLimits: () => ({ maxFiles: 8, maxBytes: 32000 }),
+    memories: async () => [{ id: "p", text: "PLAIN-NOTE", createdAt: 1, scope: "workspace" }],
+    learnedDigest: async (_definition, prompt) => `Lessons CodeForge learned:\n- [fix] AVOID-DOUBLE-FREE relevant to ${prompt}`,
+    skillsDigest: async () => "Relevant learned skills:\n### add-a-tool\nEDIT-REGISTRY-THEN-PROTOCOL",
+    mcpResources: () => [],
+    createProvider: async () => provider,
+    resolveModel: async () => "local-model",
+    capabilities: async () => ({ streaming: true, modelListing: true, nativeToolCalls: false }),
+    selectedModelInfo: () => ({ id: "local-model", contextLength: 8192 }),
+    permissionPolicy: () => ({ mode: "smart", rules: [] }),
+    executeAction: async () => "ok",
+    record: () => undefined,
+    onDidChange: () => undefined,
+    onNotice: () => undefined
+  });
+
+  const worker = manager.spawn("explore", "inspect src/a.ts");
+  await waitForWorker(manager, worker.id, "completed");
+
+  const context = provider.requests[0].messages.map((message) => message.content).join("\n");
+  assert.match(context, /AVOID-DOUBLE-FREE/);
+  assert.match(context, /EDIT-REGISTRY-THEN-PROTOCOL/);
+  assert.match(context, /PLAIN-NOTE/);
+});
