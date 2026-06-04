@@ -1,6 +1,6 @@
 # CodeForge Handoff
 
-Last updated: 2026-06-03
+Last updated: 2026-06-04
 
 ## Project Direction
 
@@ -16,15 +16,17 @@ Keep these design constraints intact:
 - network access limited to localhost, private IP ranges, and explicitly allowlisted on-prem hosts
 - all file edits, commands, MCP service calls, and memory writes routed through typed tools and permission policy
 
-## Current State (v0.1.10)
+## Current State (v0.1.12)
 
-Core product (Phases 0–11) is unchanged and described in the git history. Two recent bodies of work sit on top:
+Core product (Phases 0–11) is unchanged and described in the git history. Three recent bodies of work sit on top:
 
 1. **Approval-continuation fix** (v0.0.10): after approving an edit/command in Smart/Manual modes the loop continues. Root cause was a `tool → user` adjacency injected into the post-approval request that local chat templates mis-render; the fix re-requests the transcript ending in the tool result (matching the working Full-Auto path) and folds the "keep going" guidance into the tool result. See `agentController.ts` `runModelLoop` / `approve`.
 
-2. **Hermes-style learning + multi sub-agent system** (this session) — described below.
+2. **Hermes-style learning + multi sub-agent system** (v0.1.11) — described below.
 
-**Tests: 174 pass / 0 fail.** `tsc` clean, extension compiles. Run:
+3. **Tool-call reliability + output-token control** (v0.1.12, this session) — described below.
+
+**Tests: 189 pass / 0 fail.** `tsc` clean, extension compiles. Run:
 ```bash
 npm run compile && npm run compile:tests && node --test out-test/test/unit/*.test.js out-test/test/integration/*.test.js
 ```
@@ -71,7 +73,47 @@ After a finished Agent-mode task, CodeForge distils durable **lessons** from its
 - **Agents are always review-only**, even under `autonomy: "auto"`. Proposed agent tools are validated against the real registry.
 - Skill/agent file writes go through `diff.applyWriteFile`; nothing is written without accept except skills under `autonomy: "auto"`.
 
-## Code review done this session (all fixed)
+## Learning visibility + Learned-panel fix (this session)
+
+Symptom reported: "I don't see it learning like Hermes" + "Accept/Reject in the Learned panel do nothing."
+
+Root causes found:
+1. **Inert by default.** `learning.autonomy` defaulted to `review`, so every lesson was stored `proposed`, and `buildLearnedDigest` only injects `accepted` lessons. Out of the box nothing was ever applied unless the user manually accepted each lesson.
+2. **Silent.** The only user-facing signal was the Inspector panel / a Learned-tab badge — nothing appeared in the conversation, so even a working learn→apply cycle was invisible.
+3. **Dead Accept/Reject buttons** (webview-only). The controller path (`acceptLesson`/`rejectLesson`/`restatusLesson` → `memoryStore.update/remove` → `publishState`) is correct and covered by a passing integration test (`agentPipeline.test.ts` "Learned panel accepts and rejects…"). The test calls the controller directly, bypassing the webview, so a webview-runtime refresh issue went uncaught.
+
+Changes:
+- **Default `learning.autonomy` → `hybrid`** (`package.json` + `vscodeConfig.ts`; contract test updated). Text lessons now apply immediately; skill/agent files stay review-only.
+- **Inline `🧠 Learned N…` chat message** in `maybeLearnFromRun` (lists the stored lessons; says "applied" vs "review in the Learned panel").
+- **`📎 Applied N learned lessons` provenance** in `runPrompt`. `buildLearnedDigest` now returns `{ text, count }`; `workerLearnedDigest` uses `?.text`.
+- **Webview hardening** (`media/main.js`): added incremental handlers for `learningProposed`/`skillProposed`/`agentProposed`; made Accept/Reject **optimistic** (mutate local state + re-render immediately, so the action is unmistakable even if a state publish lags); added a pending-count badge to the **Learned** tab (`Learned (N)`).
+- New integration test: "Learning surfaces inline chat messages when it learns and when it applies a lesson."
+
+**Tests: 190 pass / 0 fail.**
+
+Note: the exact dead-button cause could not be reproduced by static analysis (controller logic is correct + test-covered); the optimistic webview update both hardens the untested layer and gives instant feedback. If buttons still feel dead in the live extension, check the webview Developer Tools console for an exception thrown inside `renderState()` before `renderLearned()` runs.
+
+## Tool-call reliability + output-token control (v0.1.12)
+
+Local models (e.g. `gemma-4-31B-it` served via LiteLLM) truncate tool-call arguments mid-string. A multi-agent diagnosis (4 parallel investigators + adversarial verifiers + synthesis) traced **one root cause behind three reported symptoms**, plus a latent model-metadata bug. All fixed; **189 tests pass**. Shipped as v0.1.12 (commit `781616e`, tag `v0.1.12`).
+
+### Symptoms → fixes
+1. **LiteLLM HTTP 400 "Unterminated string"** — a truncated `argumentsJson` was replayed verbatim on the next request; LiteLLM `json.loads` the `arguments` field and rejected the whole body. **Fix:** `sanitizeToolArgumentsJson` (+ `repairTruncatedJsonObject` / `isJsonObjectString`) in `openaiAdapter.ts` sanitizes tool-call arguments to valid JSON **at the serialization boundary** (`toOpenAiMessage`). The raw malformed args stay in history so the parse failure still surfaces to the model and the retry loop recovers. **Do not** filter invalid calls out of history (the adversarial verifier rejected that — it hides the failure from the model).
+2. **Tool-call truncation at the source** — no `max_tokens` was sent, so some endpoints applied a tiny built-in default that cut the JSON. **Fix:** added `maxTokens` to `LlmRequest`, forwarded in `fetchChatStream`, and `resolveRequestMaxTokens(model, ctxLimit, preference)` feeds every model turn (6 `agentController` request sites + `workerManager`, centralized via `requestMaxTokens()` / the `WorkerManagerOptions.requestMaxTokens` accessor). See setting below.
+3. **"Full Auto keeps asking for approvals"** — **NOT a permissions regression.** `git diff <prev> HEAD -- src/core/permissions.ts` is empty; `ask_user_question` intentionally always prompts (Full Auto cannot answer for the user). The constant prompts were downstream **thrash from the truncation loop**; fixing 1–2 resolves it. Added a permissions invariant-lock test so it is not "fixed" by accident.
+4. **LiteLLM context length misread as the output limit** — LiteLLM reports each served model's context length under `max_tokens` in `/v1/models`. It sat in the `maxOutputTokens` key list. **Fix:** moved `max_tokens` / `max_input_tokens` into the `contextLength` key list (lowest priority, so a more specific `max_model_len`/`context_length` still wins; read **per-model**). The context window maximum is now detected automatically and flows into `contextWindowMaxTokens()` → context budget + auto-compaction.
+
+### New setting
+`codeforge.model.maxOutputTokens` (default **32000**):
+- `32000` (default) — cap output at ~32k (matches Claude Code), **bounded to half the context window and the model's reported output limit** so it stays safe on small-context models (e.g. a 32k-ctx model → 16384).
+- `0` — **no limit**: omit `max_tokens`; the endpoint/model decides (on vLLM, up to remaining context). Use for the largest single response.
+- `>= 1` — custom cap, same safe bounding.
+Logic lives in `resolveRequestMaxTokens` (`src/core/openaiAdapter.ts`); the package.json default and `DEFAULT_MAX_OUTPUT_TOKENS` must stay in sync (locked by a `packageContract` test).
+
+### Reference: how the real harness does it
+`/home/spiegel/Projects/Harnes` is a reverse-engineered Claude Code internals dump — search it for "how does the harness do X". Claude Code **always** sends `max_tokens` (the Anthropic Messages API requires it), defaulting to the model's max output (~32k), user-overridable via `CLAUDE_CODE_MAX_OUTPUT_TOKENS` clamped to the model's 64k upper limit, with **escalate-on-truncation retry** (cap low, retry once at 64k on `finish_reason: "length"`). Not ported: that escalation retry (see Next steps).
+
+## Code review — learning/multi-agent session (v0.1.11, all fixed)
 An adversarial multi-agent review confirmed 4 issues; all fixed + covered or reasoned:
 1. **[high]** `maybeLearnFromRun` advanced the learning baseline before persisting → a failed `memoryStore.add` lost the lesson. Fixed: advance baseline only when all persists succeed; added exact-text dedup so a retry pass doesn't duplicate. Regression test: "Re-extracting an identical lesson does not duplicate it".
 2. **[med]** `maybeProposeSkill` recorded the cluster signature before parse/validation → a transient parse failure permanently blocked retry. Fixed: record signature only after a valid parse.
@@ -80,6 +122,11 @@ An adversarial multi-agent review confirmed 4 issues; all fixed + covered or rea
 
 ## Next steps (ordered) — additional improvements discovered
 
+### Tool-call reliability follow-ups (from v0.1.12, optional)
+- **Escalate-on-truncation retry (Claude Code parity).** Surface `finish_reason: "length"` from `openaiAdapter` (currently any finish_reason just stops the stream) and, when a turn is truncated under a non-zero `maxOutputTokens`, retry once with a higher/`0` cap before giving up. This is the one piece of Claude Code's policy not ported. Lower priority now that the default is a generous 32k and `0` (no limit) is one setting away.
+- **Inbound tool-arg repair (deliberately skipped).** Repair is applied only at the *outbound* serialization boundary; the inbound parse (`parseToolActionDetailed`) still hard-fails a truncated call. Repairing inbound could let a recoverable read-only call run, but risks executing valid-but-wrong args (e.g. a truncated path) — gate to read-only tools + re-validate via `validateAction` if pursued. With `max_tokens` preventing truncation and the retry loop self-healing, it was left out.
+
+### Carried over from v0.1.11
 1. **Wire 1b (worktree isolation) into editing workers.** The adapter is built+tested; the wiring is deferred because it touches VS Code-bound file I/O that the in-memory harness can't exercise. Plan:
    - Add `codeforge.workers.isolateEditors` (default false).
    - When an editing worker (`implement`/custom with write tools) spawns under isolation, `GitWorktreeManager.create()` a worktree; thread its path as a per-worker filesystem root through `executeWorkerAction` → the diff service / `WorkspacePort` so the worker's `write_file`/`edit_file` land in the worktree.
@@ -105,12 +152,17 @@ An adversarial multi-agent review confirmed 4 issues; all fixed + covered or rea
 - Worktree adapter: `src/adapters/worktree.ts`
 - Context assembly: `src/core/contextBuilder.ts`
 - Tools: `src/core/toolRegistry.ts`
+- Endpoint / streaming / model discovery / `max_tokens` / tool-arg sanitize: `src/core/openaiAdapter.ts`
+- Tool-call argument parsing: `src/core/actionProtocol.ts`
+- Permissions / approval modes: `src/core/permissions.ts`, `src/core/approvals.ts`
 - Memory persistence: `src/adapters/vscodeMemoryStore.ts`
+- Settings (getters incl. `getMaxOutputTokensPreference`): `src/adapters/vscodeConfig.ts`, `package.json` `contributes.configuration`
 - UI: `media/main.js`, `src/ui/codeForgeViewProvider.ts`
 - Roadmap design: `docs/hermes-roadmap.md`
 
-## Known local endpoint
-`http://127.0.0.1:1234`, model `google/gemma-4-e4b`. Use for live smoke testing when running.
+## Known local endpoints
+- `http://127.0.0.1:1234`, model `google/gemma-4-e4b` (LM Studio-style). Use for live smoke testing when running.
+- LiteLLM proxy serving `gemma-4-31B-it` (and others) — the v0.1.12 truncation reports came from this setup. LiteLLM advertises each model's context length under `max_tokens` in `/v1/models` (now read as `contextLength`).
 
 ## Session notes for next agent
 - Follow the ports-and-adapters boundaries; keep `src/core/*` testable without `vscode` imports (that is why `learning.ts`/`skillProposal.ts`/`agentProposal.ts`/`learningAudit.ts` are pure).
@@ -118,3 +170,5 @@ An adversarial multi-agent review confirmed 4 issues; all fixed + covered or rea
 - The harness defaults `learning.enabled` to **false** so existing tests are unaffected; opt in per-test via `learningSettings`.
 - Run `npm run compile && npm run compile:tests && node --test out-test/test/unit/*.test.js out-test/test/integration/*.test.js` before handoff.
 - Do not add public web tools, cloud presets, telemetry, CLI commands, or browser preview workflows.
+- **v0.1.12 invariants — do not regress:** (a) keep raw malformed tool-call args in history and sanitize only at the outbound boundary (`toOpenAiMessage`) — never drop invalid calls from history; (b) `ask_user_question` always prompting in Full Auto is intentional, not a bug; (c) `max_tokens` is per-turn via `resolveRequestMaxTokens` — if you add a new `streamChat` call site, pass `maxTokens`; (d) LiteLLM `max_tokens` = context length, not output limit.
+- Release flow: bump `package.json` + both `package-lock.json` entries, commit, then push an annotated `vX.Y.Z` tag (`CodeForge X.Y.Z — <summary>`). The `release-vsix.yml` workflow packages the VSIX and `gh release create`s on the tag push. Tags/commits are authored by Matthew Stroble only — no Co-Authored-By trailers.

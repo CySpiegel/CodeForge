@@ -1221,6 +1221,33 @@ test("Learned panel accepts and rejects proposed lessons, gating what gets injec
   assert.equal(harness.provider.requests.some((request) => request.messages.some((message) => /REJECT-ME/.test(message.content))), false);
 });
 
+test("Learning surfaces inline chat messages when it learns and when it applies a lesson", async () => {
+  const harness = createControllerHarness({
+    mode: "agent",
+    permissionMode: "fullAuto",
+    learningSettings: { enabled: true, autonomy: "auto", skillsEnabled: false },
+    files: { "README.md": "# CodeForge\n" },
+    responses: [
+      { toolCalls: [toolCall("write_file", { path: "N.md", content: "hi" })] },
+      { content: "done" },
+      { content: "[{\"kind\":\"fact\",\"text\":\"REMEMBER-THIS\",\"paths\":[]}]" },
+      { content: "next" }
+    ]
+  });
+
+  await harness.controller.sendPrompt("Task.");
+  // "🧠 Learned" shows in the conversation, not just the inspector.
+  const learned = await waitForEventValue(harness.events, (event) =>
+    event.type === "message" && event.role === "system" && /Learned 1 lesson/.test(event.text) ? event : undefined);
+  assert.match(learned.text, /REMEMBER-THIS/);
+
+  const beforeApplied = harness.events.length;
+  await harness.controller.sendPrompt("Again.");
+  // "📎 Applied" provenance shows on the next prompt that injects the accepted lesson.
+  assert.ok(harness.events.slice(beforeApplied).some((event) =>
+    event.type === "message" && event.role === "system" && /Applied 1 learned lesson/.test(event.text)));
+});
+
 test("a .codeforge/soul.md persona is injected into the system prompt", async () => {
   const harness = createControllerHarness({
     mode: "agent",

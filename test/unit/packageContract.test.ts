@@ -33,7 +33,7 @@ test("learning settings are declared in configuration with safe defaults", () =>
   const properties = readPackageJson().contributes?.configuration?.properties ?? {};
   const expected: Record<string, { type: string; default: unknown }> = {
     "codeforge.learning.enabled": { type: "boolean", default: true },
-    "codeforge.learning.autonomy": { type: "string", default: "review" },
+    "codeforge.learning.autonomy": { type: "string", default: "hybrid" },
     "codeforge.learning.scope": { type: "string", default: "split" },
     "codeforge.learning.auditCadence": { type: "number", default: 15 },
     "codeforge.learning.maxLessons": { type: "number", default: 60 },

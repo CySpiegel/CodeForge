@@ -40,7 +40,7 @@ export class CodeForgeConfigService {
   getLearningSettings(): LearningSettings {
     return {
       enabled: this.config().get<boolean>("learning.enabled", true),
-      autonomy: normalizeLearningAutonomy(this.config().get<unknown>("learning.autonomy", "review")),
+      autonomy: normalizeLearningAutonomy(this.config().get<unknown>("learning.autonomy", "hybrid")),
       scope: normalizeLearningScopeSetting(this.config().get<unknown>("learning.scope", "split")),
       auditCadence: clampNumber(this.config().get<number>("learning.auditCadence", 15), 1, 1000, 15),
       maxLessons: clampNumber(this.config().get<number>("learning.maxLessons", 60), 1, 1000, 60),

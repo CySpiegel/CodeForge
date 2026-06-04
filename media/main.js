@@ -534,6 +534,39 @@
       } else {
         setRunStatus("Idle");
       }
+    } else if (message.type === "learningProposed" && message.lesson) {
+      state = state || {};
+      const lessons = Array.isArray(state.learnedLessons) ? state.learnedLessons.slice() : [];
+      const idx = lessons.findIndex((lesson) => lesson.id === message.lesson.id);
+      if (idx >= 0) {
+        lessons[idx] = message.lesson;
+      } else {
+        lessons.unshift(message.lesson);
+      }
+      state.learnedLessons = lessons;
+      renderLearned();
+    } else if (message.type === "skillProposed" && message.skill) {
+      state = state || {};
+      const skills = Array.isArray(state.pendingSkills) ? state.pendingSkills.slice() : [];
+      const idx = skills.findIndex((skill) => skill.id === message.skill.id);
+      if (idx >= 0) {
+        skills[idx] = message.skill;
+      } else {
+        skills.unshift(message.skill);
+      }
+      state.pendingSkills = skills;
+      renderLearned();
+    } else if (message.type === "agentProposed" && message.agent) {
+      state = state || {};
+      const agents = Array.isArray(state.pendingAgents) ? state.pendingAgents.slice() : [];
+      const idx = agents.findIndex((agent) => agent.id === message.agent.id);
+      if (idx >= 0) {
+        agents[idx] = message.agent;
+      } else {
+        agents.unshift(message.agent);
+      }
+      state.pendingAgents = agents;
+      renderLearned();
     }
   });
 
@@ -769,6 +802,7 @@
   function renderLearned() {
     renderLearnedAgents();
     renderLearnedSkills();
+    updateLearnedTabBadge();
     if (!elements.learnedList) {
       return;
     }
@@ -800,18 +834,38 @@
         const accept = document.createElement("button");
         accept.type = "button";
         accept.textContent = "Accept";
-        accept.addEventListener("click", () => vscode.postMessage({ type: "acceptLesson", id: lesson.id }));
+        accept.addEventListener("click", () => {
+          vscode.postMessage({ type: "acceptLesson", id: lesson.id });
+          lesson.status = "accepted";
+          renderLearned();
+        });
         actions.append(accept);
       }
       const reject = document.createElement("button");
       reject.type = "button";
       reject.className = "secondary";
       reject.textContent = "Reject";
-      reject.addEventListener("click", () => vscode.postMessage({ type: "rejectLesson", id: lesson.id }));
+      reject.addEventListener("click", () => {
+        vscode.postMessage({ type: "rejectLesson", id: lesson.id });
+        state.learnedLessons = (Array.isArray(state.learnedLessons) ? state.learnedLessons : []).filter((item) => item.id !== lesson.id);
+        renderLearned();
+      });
       actions.append(reject);
       row.append(meta, actions);
       elements.learnedList.append(row);
     }
+  }
+
+  function updateLearnedTabBadge() {
+    const tab = document.getElementById("settingsTabLearned");
+    if (!tab) {
+      return;
+    }
+    const pendingLessons = (Array.isArray(state?.learnedLessons) ? state.learnedLessons : []).filter((lesson) => lesson.status === "proposed").length;
+    const pendingSkills = (Array.isArray(state?.pendingSkills) ? state.pendingSkills : []).filter((skill) => skill.status === "proposed").length;
+    const pendingAgents = (Array.isArray(state?.pendingAgents) ? state.pendingAgents : []).filter((agent) => agent.status === "proposed").length;
+    const pending = pendingLessons + pendingSkills + pendingAgents;
+    tab.textContent = pending > 0 ? `Learned (${pending})` : "Learned";
   }
 
   function renderLearnedAgents() {
@@ -836,12 +890,20 @@
       const accept = document.createElement("button");
       accept.type = "button";
       accept.textContent = "Create agent";
-      accept.addEventListener("click", () => vscode.postMessage({ type: "acceptAgent", id: agent.id }));
+      accept.addEventListener("click", () => {
+        vscode.postMessage({ type: "acceptAgent", id: agent.id });
+        state.pendingAgents = (Array.isArray(state.pendingAgents) ? state.pendingAgents : []).filter((item) => item.id !== agent.id);
+        renderLearned();
+      });
       const reject = document.createElement("button");
       reject.type = "button";
       reject.className = "secondary";
       reject.textContent = "Reject";
-      reject.addEventListener("click", () => vscode.postMessage({ type: "rejectAgent", id: agent.id }));
+      reject.addEventListener("click", () => {
+        vscode.postMessage({ type: "rejectAgent", id: agent.id });
+        state.pendingAgents = (Array.isArray(state.pendingAgents) ? state.pendingAgents : []).filter((item) => item.id !== agent.id);
+        renderLearned();
+      });
       const actions = document.createElement("div");
       actions.className = "memory-row-actions";
       actions.append(accept, reject);
@@ -871,12 +933,20 @@
       const accept = document.createElement("button");
       accept.type = "button";
       accept.textContent = "Create skill";
-      accept.addEventListener("click", () => vscode.postMessage({ type: "acceptSkill", id: skill.id }));
+      accept.addEventListener("click", () => {
+        vscode.postMessage({ type: "acceptSkill", id: skill.id });
+        state.pendingSkills = (Array.isArray(state.pendingSkills) ? state.pendingSkills : []).filter((item) => item.id !== skill.id);
+        renderLearned();
+      });
       const reject = document.createElement("button");
       reject.type = "button";
       reject.className = "secondary";
       reject.textContent = "Reject";
-      reject.addEventListener("click", () => vscode.postMessage({ type: "rejectSkill", id: skill.id }));
+      reject.addEventListener("click", () => {
+        vscode.postMessage({ type: "rejectSkill", id: skill.id });
+        state.pendingSkills = (Array.isArray(state.pendingSkills) ? state.pendingSkills : []).filter((item) => item.id !== skill.id);
+        renderLearned();
+      });
       const actions = document.createElement("div");
       actions.className = "memory-row-actions";
       actions.append(accept, reject);

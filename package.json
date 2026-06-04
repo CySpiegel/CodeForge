@@ -2,7 +2,7 @@
   "name": "codeforge",
   "displayName": "CodeForge",
   "description": "A self-hosted-first coding harness extension for Visual Studio Code.",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "publisher": "codeforge",
   "license": "UNLICENSED",
   "engines": {
@@ -383,9 +383,9 @@
             "Hybrid: text lessons are saved automatically; skill files are proposed for approval.",
             "Automatic: lessons are saved silently; skill-file writes follow the active approval policy."
           ],
-          "default": "review",
+          "default": "hybrid",
           "scope": "resource",
-          "description": "How CodeForge stores what it learns."
+          "description": "How CodeForge stores what it learns. Hybrid (default) applies text lessons automatically and proposes skill files for review; review keeps everything pending until you accept it in the Learned panel."
         },
         "codeforge.learning.scope": {
           "type": "string",

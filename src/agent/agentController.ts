@@ -32,6 +32,7 @@ import {
   lessonStatusForAutonomy,
   parseExtractionResult,
   plainMemoriesFrom,
+  ProposedLesson,
   rankLessonsForPrompt,
   serializeLessonText
 } from "../core/learning";
@@ -1272,7 +1273,8 @@ export class AgentController {
       await this.autoCompactContextIfNeeded(provider, model, abort, "before request");
       const allMemories = await this.memoryStore?.list() ?? [];
       const memories = plainMemoriesFrom(allMemories);
-      const learnedDigest = this.buildLearnedDigest(allMemories, modelPrompt);
+      const learned = this.buildLearnedDigest(allMemories, modelPrompt);
+      const learnedDigest = learned?.text;
       const context = new ContextBuilder(this.workspace, this.effectiveContextLimits(), { memories, mcpResources: this.mcpContextItems, pinnedFiles: [...this.pinnedFiles], learnedDigest });
       const contextItems = await context.build(abort.signal);
       const contextText = context.format(contextItems);
@@ -1288,6 +1290,13 @@ export class AgentController {
         role: "user",
         content: `CodeForge workspace context:\n\n${contextText}`
       });
+      if (learned && learned.count > 0) {
+        this.emit({
+          type: "message",
+          role: "system",
+          text: `📎 Applied ${learned.count} learned lesson${learned.count === 1 ? "" : "s"} from past work to this task.`
+        });
+      }
       this.emitContextUsage();
 
       await this.runModelLoop(provider, model, abort);
@@ -2056,7 +2065,7 @@ export class AgentController {
     if (!this.memoryStore) {
       return undefined;
     }
-    return this.buildLearnedDigest(await this.memoryStore.list().catch(() => []), prompt);
+    return this.buildLearnedDigest(await this.memoryStore.list().catch(() => []), prompt)?.text;
   }
 
   private async workerSkillsDigest(prompt: string): Promise<string | undefined> {
@@ -2712,6 +2721,7 @@ export class AgentController {
       const existingTexts = new Set((await this.memoryStore.list().catch(() => [])).map((memory) => memory.text));
       let stored = 0;
       let persistFailed = false;
+      const storedProposals: ProposedLesson[] = [];
       for (const proposal of proposals) {
         const scope = lessonScopeFor(proposal.kind, settings.scope);
         const text = serializeLessonText({ kind: proposal.kind, outcome, status, paths: proposal.paths, body: proposal.text });
@@ -2722,6 +2732,7 @@ export class AgentController {
           const memory = await this.memoryStore.add(text, { scope });
           existingTexts.add(text);
           stored += 1;
+          storedProposals.push(proposal);
           this.persistSessionRecord((sessionId) => ({
             type: "learning",
             sessionId,
@@ -2751,6 +2762,13 @@ export class AgentController {
         `Learned ${stored} lesson(s) from the last task (${status}).`,
         proposals.map((proposal) => `[${proposal.kind}] ${proposal.text}`).join("\n")
       );
+      if (storedProposals.length > 0) {
+        const applied = status === "accepted";
+        const heading = `🧠 Learned ${storedProposals.length} lesson${storedProposals.length === 1 ? "" : "s"} from this task` +
+          (applied ? " — applied to future tasks." : " — review them in the Learned panel.");
+        const body = storedProposals.map((proposal) => `• [${proposal.kind}] ${proposal.text}`).join("\n");
+        this.emit({ type: "message", role: "system", text: `${heading}\n${body}` });
+      }
       if (settings.skillsEnabled && proposals.some((proposal) => proposal.kind === "procedure")) {
         await this.maybeProposeSkill(settings);
       }
@@ -3116,7 +3134,7 @@ export class AgentController {
     return { id, name: agent.name, label: agent.label, description: agent.description, tools: agent.tools, path, status };
   }
 
-  private buildLearnedDigest(allMemories: readonly MemoryEntry[], prompt: string): string | undefined {
+  private buildLearnedDigest(allMemories: readonly MemoryEntry[], prompt: string): { readonly text: string; readonly count: number } | undefined {
     const settings = this.config.getLearningSettings();
     if (!settings.enabled) {
       return undefined;
@@ -3126,7 +3144,13 @@ export class AgentController {
       return undefined;
     }
     const ranked = rankLessonsForPrompt(accepted, { prompt, pinnedFiles: [...this.pinnedFiles] });
-    return formatLearnedDigest(ranked, settings.maxLessonBytes) || undefined;
+    const text = formatLearnedDigest(ranked, settings.maxLessonBytes);
+    if (!text) {
+      return undefined;
+    }
+    // Each rendered lesson is a "- " bullet; count them so callers can surface provenance.
+    const count = (text.match(/^- /gm) ?? []).length;
+    return { text, count: count > 0 ? count : ranked.length };
   }
 
   private appendToolResult(toolCallId: string | undefined, toolName: string, content: string): void {
