@@ -359,6 +359,7 @@ export interface ControllerHarnessOptions {
   readonly contextLimits?: ContextLimits;
   readonly maxInvalidToolCallRetries?: number;
   readonly streamCompletionGraceSeconds?: number;
+  readonly maxOutputTokensPreference?: number;
   readonly learningSettings?: Partial<LearningSettings>;
 }
 
@@ -399,6 +400,7 @@ export function createControllerHarness(options: ControllerHarnessOptions): Cont
     getModelIdleTimeoutSeconds: () => 300,
     getStreamCompletionGraceSeconds: () => options.streamCompletionGraceSeconds ?? 30,
     getMaxInvalidToolCallRetries: () => options.maxInvalidToolCallRetries ?? 3,
+    getMaxOutputTokensPreference: () => options.maxOutputTokensPreference ?? 32000,
     getCommandOutputLimitBytes: () => 12000,
     getActiveProfileId: () => fakeProfile.id,
     getProfiles: () => [fakeProfile]

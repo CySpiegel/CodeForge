@@ -25,6 +25,9 @@ export interface LlmRequest {
   readonly messages: readonly ChatMessage[];
   readonly temperature?: number;
   readonly tools?: readonly ToolDefinition[];
+  // Upper bound on generated tokens. Omitted leaves the endpoint's own default, which on some
+  // vLLM/LiteLLM deployments is small enough to truncate tool-call arguments mid-string.
+  readonly maxTokens?: number;
   readonly signal?: AbortSignal;
 }
 

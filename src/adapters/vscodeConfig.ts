@@ -72,6 +72,12 @@ export class CodeForgeConfigService {
     return clampNumber(this.config().get<number>("agent.maxInvalidToolCallRetries", 3), 0, 20, 3);
   }
 
+  // Output-token preference: 0 = no limit (omit max_tokens), >= 1 = cap (defaults to 32k, bounded
+  // safely). Interpreted by resolveRequestMaxTokens.
+  getMaxOutputTokensPreference(): number {
+    return clampNumber(this.config().get<number>("model.maxOutputTokens", 32_000), 0, 10_000_000, 32_000);
+  }
+
   getCommandOutputLimitBytes(): number {
     return clampNumber(this.config().get<number>("commands.outputLimitBytes", 200000), 16000, 2_000_000, 200000);
   }

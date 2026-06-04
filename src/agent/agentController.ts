@@ -61,7 +61,7 @@ import {
   readConfiguredMcpResource
 } from "../core/mcpClient";
 import { isUrlAllowed } from "../core/networkPolicy";
-import { OpenAiCompatibleProvider } from "../core/openaiAdapter";
+import { OpenAiCompatibleProvider, resolveRequestMaxTokens } from "../core/openaiAdapter";
 import { evaluateActionPermission, permissionModeLabel } from "../core/permissions";
 import { SessionRecord, SessionSnapshot, SessionStore, SessionSummary } from "../core/session";
 import { classifyShellCommand } from "../core/shellSemantics";
@@ -499,6 +499,7 @@ export class AgentController {
       resolveModel: (provider, signal) => this.resolveModel(provider, signal),
       capabilities: (provider, model, signal) => this.capabilities(provider, model, signal),
       selectedModelInfo: () => this.selectedModelInfo(),
+      requestMaxTokens: () => this.requestMaxTokens(),
       permissionPolicy: () => this.config.getPermissionPolicy(),
       executeAction: (action, toolCallId, worker) => this.executeWorkerAction(action, toolCallId, worker),
       onReadFile: (path, content, maxBytes) => this.rememberReadFile(path, content, maxBytes, "worker"),
@@ -763,7 +764,7 @@ export class AgentController {
       detail: selectedModelInfo?.contextLength
         ? `${selectedModel} reports ${selectedModelInfo.contextLength.toLocaleString("en-US")} context tokens${selectedModelInfo.supportsReasoning ? " and thinking/reasoning support" : ""}.`
         : `${selectedModel} did not expose context length metadata in /v1/models.`,
-      recommendation: selectedModelInfo?.contextLength ? undefined : "Expose context_length, max_context_length, or equivalent metadata from the OpenAI API compatible endpoint when possible."
+      recommendation: selectedModelInfo?.contextLength ? undefined : "Expose context_length, max_model_len, max_input_tokens, max_tokens (LiteLLM), or equivalent metadata from the OpenAI API compatible endpoint when possible."
     });
 
     try {
@@ -1080,7 +1081,7 @@ export class AgentController {
     ];
 
     let summary = "";
-    for await (const event of this.streamChatWithIdleTimeout(provider, { model, messages: compactMessages, temperature: 0, signal: abort.signal }, abort, "Context compaction")) {
+    for await (const event of this.streamChatWithIdleTimeout(provider, { model, messages: compactMessages, temperature: 0, maxTokens: this.requestMaxTokens(), signal: abort.signal }, abort, "Context compaction")) {
       if (event.type === "content") {
         summary += event.text;
       }
@@ -1506,6 +1507,7 @@ export class AgentController {
         model,
         messages: this.messages,
         tools: requestTools,
+        maxTokens: this.requestMaxTokens(),
         signal: abort.signal
       }, abort, "Model request")) {
         if (event.type === "content") {
@@ -2688,6 +2690,7 @@ export class AgentController {
           { role: "user", content: `${user}\n\n--- Task transcript ---\n${transcript}` }
         ],
         temperature: 0,
+        maxTokens: this.requestMaxTokens(),
         signal: abort.signal
       }, abort, "Learning extraction")) {
         if (event.type === "content") {
@@ -2825,6 +2828,7 @@ export class AgentController {
       model,
       messages: [{ role: "system", content: system }, { role: "user", content: user }],
       temperature: 0,
+      maxTokens: this.requestMaxTokens(),
       signal: abort.signal
     }, abort, "Learning audit")) {
       if (event.type === "content") {
@@ -2896,6 +2900,7 @@ export class AgentController {
         model,
         messages: [{ role: "system", content: system }, { role: "user", content: user }],
         temperature: 0,
+        maxTokens: this.requestMaxTokens(),
         signal: abort.signal
       }, abort, "Skill proposal")) {
         if (event.type === "content") {
@@ -3020,6 +3025,7 @@ export class AgentController {
         model,
         messages: [{ role: "system", content: system }, { role: "user", content: user }],
         temperature: 0,
+        maxTokens: this.requestMaxTokens(),
         signal: abort.signal
       }, abort, "Agent proposal")) {
         if (event.type === "content") {
@@ -4446,6 +4452,17 @@ export class AgentController {
 
   private contextWindowMaxTokens(): number | undefined {
     return this.config.getContextLimits().maxTokens ?? this.selectedModelInfo()?.contextLength;
+  }
+
+  // Bound on generated tokens for every model turn, honoring codeforge.model.maxOutputTokens
+  // (0 = no limit, >=1 = cap; defaults to 32k, safely bounded). Returns undefined when no limit, so
+  // no max_tokens is sent and the endpoint decides (on vLLM, up to the remaining context window).
+  private requestMaxTokens(): number | undefined {
+    return resolveRequestMaxTokens(
+      this.selectedModelInfo(),
+      this.config.getContextLimits().maxTokens,
+      this.config.getMaxOutputTokensPreference()
+    );
   }
 
   private contextWindowMaxBytes(): number {

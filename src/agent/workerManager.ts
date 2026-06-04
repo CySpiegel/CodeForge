@@ -33,6 +33,7 @@ export interface WorkerManagerOptions {
   readonly resolveModel: (provider: LlmProvider, signal: AbortSignal) => Promise<string>;
   readonly capabilities: (provider: LlmProvider, model: string, signal: AbortSignal) => Promise<ProviderCapabilities>;
   readonly selectedModelInfo: () => ModelInfo | undefined;
+  readonly requestMaxTokens: () => number | undefined;
   readonly permissionPolicy: () => PermissionPolicy;
   readonly executeAction: (action: AgentAction, toolCallId: string | undefined, worker: WorkerSummary) => Promise<string>;
   readonly onReadFile?: (path: string, content: string, maxBytes: number) => void;
@@ -436,6 +437,7 @@ export class WorkerManager {
           model,
           messages: task.messages,
           tools: capabilities.nativeToolCalls ? allowedTools : undefined,
+          maxTokens: this.options.requestMaxTokens(),
           signal: abort.signal
         })) {
           if (event.type === "content") {

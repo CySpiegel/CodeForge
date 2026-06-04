@@ -350,6 +350,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
         messages: messages.map(toOpenAiMessage),
         temperature: request.temperature ?? 0.2,
         stream: true,
+        ...(request.maxTokens && request.maxTokens > 0 ? { max_tokens: Math.floor(request.maxTokens) } : {}),
         ...(includeUsage ? { stream_options: { include_usage: true } } : {}),
         ...(request.tools && request.tools.length > 0 ? { tools: request.tools.map(toOpenAiTool) } : {})
       }),
@@ -379,12 +380,85 @@ function toOpenAiMessage(message: ChatMessage): Record<string, unknown> {
       type: "function",
       function: {
         name: toolCall.name,
-        arguments: toolCall.argumentsJson
+        arguments: sanitizeToolArgumentsJson(toolCall.argumentsJson)
       }
     }));
   }
 
   return result;
+}
+
+// Local models frequently truncate tool-call arguments mid-string (server-side max_tokens
+// cutoff or a quiet-stream timeout). The raw, malformed `argumentsJson` is still recorded on the
+// assistant turn so the parse failure surfaces to the model, but it must never be replayed verbatim:
+// OpenAI-compatible backends (e.g. LiteLLM) `json.loads` the `arguments` string and reject the whole
+// request with HTTP 400 "Unterminated string". Sanitize to valid JSON at the serialization boundary
+// so every outbound request is well-formed regardless of how the tool call entered history.
+export function sanitizeToolArgumentsJson(raw: string | undefined): string {
+  const text = (raw ?? "").trim();
+  if (!text) {
+    return "{}";
+  }
+  if (isJsonObjectString(text)) {
+    return text;
+  }
+  const repaired = repairTruncatedJsonObject(text);
+  if (repaired && isJsonObjectString(repaired)) {
+    return repaired;
+  }
+  return "{}";
+}
+
+function isJsonObjectString(text: string): boolean {
+  try {
+    const parsed = JSON.parse(text);
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed);
+  } catch {
+    return false;
+  }
+}
+
+// Best-effort completion of a truncated JSON object: close an open string, drop a dangling escape or
+// trailing separator, and balance the remaining brackets. Returns undefined when there is nothing to
+// repair. Callers must re-validate the result; on failure they fall back to "{}".
+function repairTruncatedJsonObject(text: string): string | undefined {
+  const closers: string[] = [];
+  let inString = false;
+  let escaped = false;
+
+  for (const ch of text) {
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === "\"") {
+      inString = true;
+    } else if (ch === "{") {
+      closers.push("}");
+    } else if (ch === "[") {
+      closers.push("]");
+    } else if (ch === "}" || ch === "]") {
+      closers.pop();
+    }
+  }
+
+  let result = escaped ? text.slice(0, -1) : text;
+  if (inString) {
+    result += "\"";
+  }
+  // A trailing object/array separator or dangling key (e.g. `{"a":1,` or `{"a":1,"b"`) cannot be
+  // completed into a valid value, so trim it back to the last complete entry before balancing.
+  result = result.replace(/,\s*$/, "").replace(/(:\s*|,\s*"[^"]*"\s*)$/, "");
+  for (let i = closers.length - 1; i >= 0; i--) {
+    result += closers[i];
+  }
+  return result === text ? undefined : result;
 }
 
 export function ensureOpenAiToolResultPairing(messages: readonly ChatMessage[]): readonly ChatMessage[] {
@@ -460,6 +534,39 @@ export function ensureOpenAiToolResultPairing(messages: readonly ChatMessage[]):
   return repaired;
 }
 
+// Default per-turn output cap (tokens), matching Claude Code's ~32k generous default. Used when
+// codeforge.model.maxOutputTokens is left at its default. Must stay in sync with the package.json
+// default for that setting.
+const DEFAULT_MAX_OUTPUT_TOKENS = 32_000;
+const MIN_OUTPUT_TOKENS = 512;
+
+// Decide the max_tokens to send for a model turn from the user's preference:
+//   preference <= 0 -> no limit: return undefined so no max_tokens is sent and the endpoint/model
+//                      decides (on vLLM, up to the remaining context window).
+//   preference > 0  -> cap output at that many tokens, but never above half the context window (so
+//                      the prompt always has room) nor above the model's reported output limit.
+//                      The default (DEFAULT_MAX_OUTPUT_TOKENS) flows through this same safe bounding,
+//                      which keeps it sane on small-context models and overrides the tiny built-in
+//                      defaults of some vLLM/LiteLLM deployments that truncate tool-call JSON.
+export function resolveRequestMaxTokens(
+  model: ModelInfo | undefined,
+  contextLimitMaxTokens?: number,
+  preference = DEFAULT_MAX_OUTPUT_TOKENS
+): number | undefined {
+  if (preference <= 0) {
+    return undefined;
+  }
+  const bounds = [Math.floor(preference)];
+  const context = model?.contextLength ?? contextLimitMaxTokens;
+  if (context && context > 0) {
+    bounds.push(Math.floor(context / 2));
+  }
+  if (model?.maxOutputTokens && model.maxOutputTokens > 0) {
+    bounds.push(model.maxOutputTokens);
+  }
+  return Math.max(MIN_OUTPUT_TOKENS, Math.min(...bounds));
+}
+
 function toOpenAiTool(tool: ToolDefinition): Record<string, unknown> {
   return {
     type: "function",
@@ -519,15 +626,23 @@ function modelsFromBody(body: unknown): readonly ModelInfo[] {
           "n_ctx",
           "num_ctx",
           "ctx_size",
-          "max_position_embeddings"
+          "max_position_embeddings",
+          // LiteLLM reports each served model's own context length. `max_input_tokens` is the
+          // precise input-window field; `max_tokens` is LiteLLM's configured context length for
+          // that model. Read per-model (no shared default); kept lowest priority so a more specific
+          // server field above still wins when both are present.
+          "max_input_tokens",
+          "maxInputTokens",
+          "max_tokens",
+          "maxTokens"
         ]),
+        // Note: `max_tokens` is intentionally NOT treated as an output limit — on LiteLLM it is the
+        // context length (above). Only genuine output fields populate maxOutputTokens here.
         maxOutputTokens: findPositiveInteger(model, [
           "max_output_tokens",
           "maxOutputTokens",
           "max_completion_tokens",
-          "maxCompletionTokens",
-          "max_tokens",
-          "maxTokens"
+          "maxCompletionTokens"
         ]),
         supportsReasoning: detectsReasoning(model, model.id)
       };

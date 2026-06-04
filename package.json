@@ -2,7 +2,7 @@
   "name": "codeforge",
   "displayName": "CodeForge",
   "description": "A self-hosted-first coding harness extension for Visual Studio Code.",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "publisher": "codeforge",
   "license": "UNLICENSED",
   "engines": {
@@ -157,6 +157,14 @@
           "default": "",
           "scope": "resource",
           "description": "Model ID to send to the active endpoint. If empty, the active profile defaultModel is used."
+        },
+        "codeforge.model.maxOutputTokens": {
+          "type": "number",
+          "default": 32000,
+          "minimum": 0,
+          "maximum": 10000000,
+          "scope": "resource",
+          "markdownDescription": "Maximum tokens the model may generate per turn (`max_tokens` sent to the endpoint).\n\n- `32000` (default) — cap output at ~32k, matching Claude Code's default. Automatically bounded to half the context window (so the prompt always has room) and to the model's reported output limit, so it stays safe on small-context models.\n- `0` — **No limit**: send no `max_tokens`. The endpoint/model decides; on vLLM this generates up to the remaining context window. Use this for the largest possible single response.\n- `>= 1` — your own cap, bounded the same way as the default."
         },
         "codeforge.agent.mode": {
           "type": "string",

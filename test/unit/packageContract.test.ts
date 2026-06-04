@@ -52,6 +52,13 @@ test("learning settings are declared in configuration with safe defaults", () =>
   assert.deepEqual(properties["codeforge.learning.scope"].enum, ["split", "repo", "global"]);
 });
 
+test("model max output tokens defaults to 32k", () => {
+  const property = readPackageJson().contributes?.configuration?.properties?.["codeforge.model.maxOutputTokens"];
+  assert.ok(property, "codeforge.model.maxOutputTokens should be declared");
+  assert.equal(property.type, "number");
+  assert.equal(property.default, 32000);
+});
+
 test("internal tool registry does not expose public web tools", () => {
   const forbiddenTools = new Set(["web_search", "fetch_url", "http_request", "browser_open"]);
   for (const tool of codeForgeTools) {

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { ensureOpenAiToolResultPairing, OpenAiCompatibleProvider } from "../../src/core/openaiAdapter";
+import { ensureOpenAiToolResultPairing, OpenAiCompatibleProvider, resolveRequestMaxTokens, sanitizeToolArgumentsJson } from "../../src/core/openaiAdapter";
 
 test("streams OpenAI-compatible chat completion chunks", async () => {
   const originalFetch = globalThis.fetch;
@@ -541,6 +541,39 @@ test("reads context metadata from OpenAI API model discovery", async () => {
   }
 });
 
+test("reads LiteLLM max_tokens as the served context length, not the output limit", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input: string | URL | Request) => {
+    const url = input instanceof Request ? input.url : String(input);
+    if (url.endsWith("/v1/models")) {
+      return new Response(JSON.stringify({
+        data: [
+          // LiteLLM advertises the configured context length under `max_tokens`.
+          { id: "gemma-4-31b-it", object: "model", max_tokens: 262144, max_output_tokens: 8192 },
+          // When a more specific context field is present it still wins over max_tokens.
+          { id: "qwen3", object: "model", max_model_len: 40960, max_tokens: 32768 }
+        ]
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response("not found", { status: 404 });
+  };
+
+  try {
+    const provider = new OpenAiCompatibleProvider(
+      { id: "test", label: "Test", baseUrl: "http://127.0.0.1:4000" },
+      { allowlist: [] }
+    );
+    const inspection = await provider.inspectEndpoint();
+    const gemma = inspection.models.find((model) => model.id === "gemma-4-31b-it");
+    const qwen = inspection.models.find((model) => model.id === "qwen3");
+    assert.equal(gemma?.contextLength, 262144);
+    assert.equal(gemma?.maxOutputTokens, 8192);
+    assert.equal(qwen?.contextLength, 40960);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("treats accepted OpenAI tool schemas as native tool support", async () => {
   const originalFetch = globalThis.fetch;
   const postedBodies: unknown[] = [];
@@ -609,6 +642,166 @@ test("retries tool support probe without tool_choice when an endpoint rejects it
     assert.equal(capabilities.nativeToolCalls, true);
     assert.equal(postedBodies.length, 2);
     assert.equal((postedBodies[1] as { readonly tool_choice?: string }).tool_choice, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("sanitizeToolArgumentsJson passes valid JSON objects through unchanged", () => {
+  const valid = "{\"path\":\"src/index.ts\",\"reason\":\"read it\"}";
+  assert.equal(sanitizeToolArgumentsJson(valid), valid);
+});
+
+test("sanitizeToolArgumentsJson defaults empty or whitespace arguments to an object", () => {
+  assert.equal(sanitizeToolArgumentsJson(undefined), "{}");
+  assert.equal(sanitizeToolArgumentsJson(""), "{}");
+  assert.equal(sanitizeToolArgumentsJson("   "), "{}");
+});
+
+test("sanitizeToolArgumentsJson repairs a value truncated mid-string", () => {
+  // The exact failure shape: a local model cut the arguments off inside the path string.
+  const repaired = sanitizeToolArgumentsJson("{\"path\":\"src/core/openaiAd");
+  const parsed = JSON.parse(repaired);
+  assert.equal(typeof parsed, "object");
+  assert.equal((parsed as { readonly path?: string }).path, "src/core/openaiAd");
+});
+
+test("sanitizeToolArgumentsJson drops a dangling key with no value", () => {
+  const repaired = sanitizeToolArgumentsJson("{\"path\":\"src\",\"reason\"");
+  const parsed = JSON.parse(repaired) as { readonly path?: string; readonly reason?: unknown };
+  assert.equal(parsed.path, "src");
+  assert.equal("reason" in parsed, false);
+});
+
+test("sanitizeToolArgumentsJson falls back to an empty object when repair is impossible", () => {
+  assert.equal(sanitizeToolArgumentsJson("not json at all"), "{}");
+  assert.equal(sanitizeToolArgumentsJson("{\"path\":\"src\",\"reason\":"), "{}");
+});
+
+test("resolveRequestMaxTokens returns undefined (no limit) for preference 0", () => {
+  assert.equal(resolveRequestMaxTokens({ id: "m", contextLength: 131072 }, undefined, 0), undefined);
+  assert.equal(resolveRequestMaxTokens(undefined, undefined, 0), undefined);
+});
+
+test("resolveRequestMaxTokens defaults to ~32k, bounded by half the context window", () => {
+  // Large context -> the full 32k default.
+  assert.equal(resolveRequestMaxTokens({ id: "m", contextLength: 262144 }), 32000);
+  // Small context -> bounded so the prompt always has room.
+  assert.equal(resolveRequestMaxTokens({ id: "m", contextLength: 32768 }), 16384);
+  assert.equal(resolveRequestMaxTokens({ id: "m", contextLength: 8192 }), 4096);
+});
+
+test("resolveRequestMaxTokens never exceeds the model's reported output limit", () => {
+  assert.equal(resolveRequestMaxTokens({ id: "m", maxOutputTokens: 8192, contextLength: 262144 }), 8192);
+});
+
+test("resolveRequestMaxTokens honors an explicit cap, bounded by half the context window", () => {
+  assert.equal(resolveRequestMaxTokens({ id: "m", contextLength: 262144 }, undefined, 16000), 16000);
+  // A cap that would leave no room for the prompt is bounded to half the window.
+  assert.equal(resolveRequestMaxTokens({ id: "m", contextLength: 32768 }, undefined, 30000), 16384);
+  // No known context window -> the explicit value is used verbatim.
+  assert.equal(resolveRequestMaxTokens(undefined, undefined, 12000), 12000);
+});
+
+test("resolveRequestMaxTokens uses the configured context limit when the model omits one", () => {
+  assert.equal(resolveRequestMaxTokens(undefined, 8000, 32000), 4000);
+});
+
+test("streamChat forwards max_tokens to the endpoint when provided", async () => {
+  const originalFetch = globalThis.fetch;
+  let postedBody: string | undefined;
+  globalThis.fetch = async (_input: string | URL | Request, init?: RequestInit) => {
+    postedBody = String(init?.body ?? "");
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("data: [DONE]\n\n"));
+        controller.close();
+      }
+    });
+    return new Response(stream, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+  };
+
+  try {
+    const provider = new OpenAiCompatibleProvider(
+      { id: "test", label: "Test", baseUrl: "http://127.0.0.1:4000/v1" },
+      { allowlist: [] }
+    );
+    for await (const _event of provider.streamChat({
+      model: "local-model",
+      messages: [{ role: "user", content: "hi" }],
+      maxTokens: 4096
+    })) {
+      // Drain.
+    }
+    const withLimit = JSON.parse(String(postedBody ?? "{}")) as { readonly max_tokens?: number };
+    assert.equal(withLimit.max_tokens, 4096);
+
+    for await (const _event of provider.streamChat({
+      model: "local-model",
+      messages: [{ role: "user", content: "hi" }]
+    })) {
+      // Drain.
+    }
+    const withoutLimit = JSON.parse(String(postedBody ?? "{}")) as { readonly max_tokens?: number };
+    assert.equal("max_tokens" in withoutLimit, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("streamChat never replays a malformed historical tool call to the endpoint", async () => {
+  // Regression for the LiteLLM 400 "Unterminated string": a prior assistant turn recorded a
+  // truncated tool-call arguments string. It must be sanitized to valid JSON on the next request
+  // instead of being serialized verbatim (which made LiteLLM reject the whole request body).
+  const originalFetch = globalThis.fetch;
+  let postedBody: string | undefined;
+  globalThis.fetch = async (_input: string | URL | Request, init?: RequestInit) => {
+    postedBody = String(init?.body ?? "");
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const encoder = new TextEncoder();
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      }
+    });
+    return new Response(stream, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+  };
+
+  try {
+    const provider = new OpenAiCompatibleProvider(
+      { id: "test", label: "Test", baseUrl: "http://127.0.0.1:4000/v1" },
+      { allowlist: [] }
+    );
+    for await (const _event of provider.streamChat({
+      model: "local-model",
+      messages: [
+        { role: "user", content: "read the adapter" },
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "call_1", name: "read_file", argumentsJson: "{\"path\":\"src/core/openaiAd" }]
+        },
+        {
+          role: "tool",
+          name: "read_file",
+          toolCallId: "call_1",
+          content: "<tool_use_error>Error: Arguments for read_file must be valid JSON.</tool_use_error>"
+        }
+      ]
+    })) {
+      // Drain the stream.
+    }
+
+    const body = JSON.parse(String(postedBody ?? "{}")) as {
+      readonly messages: ReadonlyArray<{
+        readonly role: string;
+        readonly tool_calls?: ReadonlyArray<{ readonly function: { readonly arguments: string } }>;
+      }>;
+    };
+    const assistant = body.messages.find((message) => message.role === "assistant" && message.tool_calls);
+    assert.ok(assistant, "expected the assistant tool-call turn to be present in the request");
+    const rawArguments = assistant!.tool_calls![0].function.arguments;
+    assert.doesNotThrow(() => JSON.parse(rawArguments), "outgoing tool-call arguments must be valid JSON");
   } finally {
     globalThis.fetch = originalFetch;
   }

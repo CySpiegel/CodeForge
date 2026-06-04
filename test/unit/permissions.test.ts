@@ -67,6 +67,22 @@ test("full auto mode allows edits and commands", () => {
   assert.equal(evaluateActionPermission({ type: "mcp_call_tool", serverId: "local", toolName: "tools.echo" }, policy).behavior, "allow");
 });
 
+test("full auto mode still asks for ask_user_question by design", () => {
+  // Regression lock: a model asking the user a question always needs a human answer; Full Auto
+  // cannot fabricate one. This intentionally bypasses auto-approval and must NOT be "fixed" into an
+  // auto-allow. See the 0.1.11 truncation investigation (symptom 3 was misdiagnosed as a regression).
+  const policy: PermissionPolicy = { mode: "fullAuto", rules: [] };
+  const question: AgentAction = {
+    type: "ask_user_question",
+    questions: [{ question: "Which approach?", header: "Approach", options: [{ label: "A", description: "a" }] }]
+  };
+  assert.equal(evaluateActionPermission(question, policy).behavior, "ask");
+  // Every genuine side effect remains auto-allowed in Full Auto.
+  assert.equal(evaluateActionPermission({ type: "memory_write", text: "fact" }, policy).behavior, "allow");
+  assert.equal(evaluateActionPermission({ type: "spawn_agent", prompt: "explore" }, policy).behavior, "allow");
+  assert.equal(evaluateActionPermission({ type: "edit_file", path: "src/a.ts", oldText: "a", newText: "b" }, policy).behavior, "allow");
+});
+
 test("applies endpoint rules to MCP server ids", () => {
   const decision = evaluateActionPermission(
     { type: "mcp_call_tool", serverId: "prod-local", toolName: "tools.echo" },
