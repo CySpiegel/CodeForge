@@ -65,6 +65,7 @@ function toCachedModelCapability(value: unknown): CachedModelCapability | undefi
       ? {
         id: value.modelInfo.id,
         type: typeof value.modelInfo.type === "string" ? value.modelInfo.type : undefined,
+        aliases: Array.isArray(value.modelInfo.aliases) ? value.modelInfo.aliases.filter((item): item is string => typeof item === "string") : undefined,
         contextLength: typeof value.modelInfo.contextLength === "number" ? value.modelInfo.contextLength : undefined,
         maxOutputTokens: typeof value.modelInfo.maxOutputTokens === "number" ? value.modelInfo.maxOutputTokens : undefined,
         supportsReasoning: typeof value.modelInfo.supportsReasoning === "boolean" ? value.modelInfo.supportsReasoning : undefined

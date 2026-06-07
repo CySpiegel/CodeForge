@@ -55,6 +55,9 @@ export type OpenAiBackendKind = "openai-api" | "litellm" | "vllm";
 export interface ModelInfo {
   readonly id: string;
   readonly type?: string;
+  // Alternate ids the endpoint accepts for this model (e.g. llama.cpp `aliases`). Used to match a
+  // configured/persisted model selection back to its canonical id when the exact string differs.
+  readonly aliases?: readonly string[];
   readonly contextLength?: number;
   readonly maxOutputTokens?: number;
   readonly supportsReasoning?: boolean;

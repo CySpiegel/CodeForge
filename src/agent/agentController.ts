@@ -441,6 +441,8 @@ export class AgentController {
   private readonly capabilityCache = new Map<string, ProviderCapabilities>();
   private readonly endpointCache = new Map<string, OpenAiEndpointInspection>();
   private readonly selectedModelByProfile = new Map<string, string>();
+  // Dedup keys (`${profileId}:${configuredId}`) for the one-time "configured model not in list" warning.
+  private readonly warnedUnmatchedModels = new Set<string>();
   private readonly readFileState = new Map<string, ReadFileSnapshot>();
   private readonly notebookReadState = new Set<string>();
   private messages: ChatMessage[] = [];
@@ -621,6 +623,12 @@ export class AgentController {
       this.endpointCache.set(provider.profile.id, inspection);
       const models = inspection.models.map((model) => model.id);
       const selectedModel = this.selectedModelFor(provider.profile, inspection);
+      // Seed the per-profile selection from the resolved id (canonical when matched, configured id
+      // when not) so that every later selectedModelFor/resolveModel call short-circuits to the same
+      // value the dropdown is showing — no dropdown toggle required to make display and request agree.
+      if (selectedModel && !this.selectedModelByProfile.has(provider.profile.id)) {
+        this.selectedModelByProfile.set(provider.profile.id, selectedModel);
+      }
       this.emit({
         type: "models",
         models,
@@ -765,7 +773,7 @@ export class AgentController {
       detail: selectedModelInfo?.contextLength
         ? `${selectedModel} reports ${selectedModelInfo.contextLength.toLocaleString("en-US")} context tokens${selectedModelInfo.supportsReasoning ? " and thinking/reasoning support" : ""}.`
         : `${selectedModel} did not expose context length metadata in /v1/models.`,
-      recommendation: selectedModelInfo?.contextLength ? undefined : "Expose context_length, max_model_len, max_input_tokens, max_tokens (LiteLLM), or equivalent metadata from the OpenAI API compatible endpoint when possible."
+      recommendation: selectedModelInfo?.contextLength ? undefined : "Expose a context-length field from the OpenAI API compatible endpoint when possible — e.g. max_model_len (vLLM), n_ctx or n_ctx_train (llama.cpp, under meta), context_length (OpenRouter/Together), context_window (Groq), max_context_length (LM Studio/Mistral), or max_input_tokens/max_tokens (LiteLLM). CodeForge detects any of these, at the top level or nested."
     });
 
     try {
@@ -4513,14 +4521,68 @@ export class AgentController {
     }
 
     const configured = this.config.getConfiguredModel() || profile.defaultModel || "";
-    if (!configured || !inspection || inspection.models.length === 0) {
-      return configured || inspection?.models[0]?.id || "";
+    const resolution = resolveConfiguredModelId(configured, inspection?.models ?? []);
+    if (resolution.unmatched) {
+      this.warnUnmatchedConfiguredModel(profile, resolution.id);
     }
-
-    return inspection.models.some((model) => model.id === configured)
-      ? configured
-      : inspection.models[0].id;
+    return resolution.id;
   }
+
+  // Surfaces a single, deduplicated warning when a non-empty configured model id is not present in
+  // the endpoint's model list. We deliberately keep the configured id (see resolveConfiguredModelId)
+  // rather than silently swapping to models[0], so the model the user intends is the model sent.
+  private warnUnmatchedConfiguredModel(profile: ProviderProfile, configured: string): void {
+    const key = `${profile.id}:${configured}`;
+    if (this.warnedUnmatchedModels.has(key)) {
+      return;
+    }
+    this.warnedUnmatchedModels.add(key);
+    this.recordInspector(
+      "warn",
+      "endpoint",
+      `Configured model "${configured}" was not found in the endpoint's model list.`,
+      "Sending the configured id anyway. Single-model servers (e.g. llama.cpp) ignore the requested id and serve their loaded model. If this is wrong, pick a model from the dropdown."
+    );
+  }
+}
+
+interface ModelIdResolution {
+  readonly id: string;
+  // True when a NON-EMPTY configured id was provided but matched no returned model id/alias.
+  readonly unmatched: boolean;
+}
+
+// Pure, dependency-free resolution of a configured/persisted model id against the endpoint's
+// returned models. Exported for unit testing.
+//
+// Rules:
+// 1. Empty configured id with a model list -> fall back to models[0] (preserves prior behavior;
+//    lets single-model servers "just work" when nothing is configured).
+// 2. Non-empty configured id -> match tolerantly against each model's canonical id AND its aliases,
+//    trimmed and case-insensitively, returning the CANONICAL returned id on a match.
+// 3. Non-empty configured id that matches nothing -> KEEP the configured id (do NOT swap to
+//    models[0]) and flag it unmatched so the caller can warn once. This guarantees the model the
+//    user intends is the model actually sent, deterministically, from the first turn after startup.
+export function resolveConfiguredModelId(
+  configured: string,
+  models: readonly ModelInfo[]
+): ModelIdResolution {
+  const trimmed = configured.trim();
+  if (!trimmed) {
+    return { id: models[0]?.id ?? "", unmatched: false };
+  }
+  const needle = trimmed.toLowerCase();
+  for (const model of models) {
+    if (model.id.trim().toLowerCase() === needle) {
+      return { id: model.id, unmatched: false };
+    }
+    for (const alias of model.aliases ?? []) {
+      if (alias.trim().toLowerCase() === needle) {
+        return { id: model.id, unmatched: false };
+      }
+    }
+  }
+  return { id: trimmed, unmatched: models.length > 0 };
 }
 
 function toAgentModelSummary(model: ModelInfo): AgentModelSummary {

@@ -540,6 +540,12 @@ export function ensureOpenAiToolResultPairing(messages: readonly ChatMessage[]):
 const DEFAULT_MAX_OUTPUT_TOKENS = 32_000;
 const MIN_OUTPUT_TOKENS = 512;
 
+// Plausibility bounds for an auto-detected context window. The floor rejects stray small integers
+// (a permission `max_tokens: 1`, `n_parallel`, batch sizes) that share a key name; the ceiling
+// rejects the HuggingFace ~1e30 "unbounded" sentinel that `model_max_length` can carry.
+const MIN_CONTEXT_LENGTH = 256;
+const MAX_CONTEXT_LENGTH = 100_000_000;
+
 // Decide the max_tokens to send for a model turn from the user's preference:
 //   preference <= 0 -> no limit: return undefined so no max_tokens is sent and the endpoint/model
 //                      decides (on vLLM, up to the remaining context window).
@@ -610,32 +616,49 @@ function modelsFromBody(body: unknown): readonly ModelInfo[] {
       return {
         id: model.id,
         type: typeof model.type === "string" ? model.type : undefined,
+        aliases: toStringArray(model.aliases),
+        // Field names are tried in PRIORITY order (not document order): the runtime/loaded window
+        // first — the size the server will actually accept — then the model's trained maximum, and
+        // finally LiteLLM's input/context fields. findPositiveInteger searches the whole model
+        // object (including nested objects like `meta`/`model_info`/`parameters`) for each key in
+        // turn, so a higher-priority field anywhere wins over a lower-priority one. The bounds reject
+        // implausible values (stray small ints like a permission `max_tokens: 1`, or the HF ~1e30
+        // "unbounded" sentinel) so they can't be mistaken for a context window.
         contextLength: findPositiveInteger(model, [
-          "context_length",
-          "contextLength",
-          "max_context_length",
-          "maxContextLength",
-          "max_model_len",
+          // Runtime / loaded window — what the server enforces right now.
+          "loaded_context_length", // LM Studio: actual allocated window of the loaded model
+          "loadedContextLength",
+          "max_model_len",         // vLLM / SGLang / DeepInfra: enforced runtime window
           "maxModelLen",
+          "n_ctx",                 // llama.cpp: runtime per-slot context (meta.n_ctx)
+          "num_ctx",               // Ollama-style runtime context
+          // Model-max window — the model's trained/architectural maximum.
+          "max_context_length",    // LM Studio (max) / Mistral hosted
+          "maxContextLength",
+          "context_length",        // OpenRouter / Together AI
+          "contextLength",
+          "context_window",        // Groq
+          "contextWindow",
+          "n_ctx_train",           // llama.cpp: trained max (meta.n_ctx_train). On older llama-server
+                                   // builds this is the ONLY context signal; ranked below runtime
+                                   // n_ctx so the smaller live window wins when both are present.
           "max_sequence_length",
           "maxSequenceLength",
-          "max_seq_len",
+          "max_seq_len",           // TabbyAPI / ExLlamaV2 (parameters.max_seq_len)
           "maxSeqLen",
-          "context_window",
-          "contextWindow",
-          "n_ctx",
-          "num_ctx",
           "ctx_size",
-          "max_position_embeddings",
+          "max_position_embeddings", // HF architecture max
+          "n_positions",           // older HF architectures (GPT-2 family)
+          "model_max_length",      // HF tokenizer/transformers config (may carry an ~1e30 sentinel)
           // LiteLLM reports each served model's own context length. `max_input_tokens` is the
           // precise input-window field; `max_tokens` is LiteLLM's configured context length for
-          // that model. Read per-model (no shared default); kept lowest priority so a more specific
-          // server field above still wins when both are present.
+          // that model. Kept lowest because on most other backends `max_tokens` is an OUTPUT cap, so
+          // any more specific field above must win first.
           "max_input_tokens",
           "maxInputTokens",
           "max_tokens",
           "maxTokens"
-        ]),
+        ], { minValue: MIN_CONTEXT_LENGTH, maxValue: MAX_CONTEXT_LENGTH }),
         // Note: `max_tokens` is intentionally NOT treated as an output limit — on LiteLLM it is the
         // context length (above). Only genuine output fields populate maxOutputTokens here.
         maxOutputTokens: findPositiveInteger(model, [
@@ -746,22 +769,40 @@ function hasIncompleteToolCallArgs(toolCalls: ReadonlyMap<number, OpenAiToolCall
   return false;
 }
 
-function findPositiveInteger(value: unknown, keys: readonly string[], depth = 0): number | undefined {
-  if (depth > 4 || !isRecord(value)) {
+interface IntegerSearchBounds {
+  readonly minValue?: number;
+  readonly maxValue?: number;
+}
+
+// Find the first key (in priority order) that carries a positive integer within `bounds`, searching
+// the whole object tree. PRIORITY DOMINATES NESTING DEPTH: each key is searched across every nested
+// object before the next key is tried, so a higher-priority field nested under e.g. `meta` or
+// `model_info` still beats a lower-priority field sitting at the top level. Arrays are never
+// descended into, so a stray integer inside a `permission`/limits list can't be picked up.
+function findPositiveInteger(value: unknown, keys: readonly string[], bounds: IntegerSearchBounds = {}): number | undefined {
+  for (const key of keys) {
+    const found = deepFindInteger(value, key, bounds, 0);
+    if (found !== undefined) {
+      return found;
+    }
+  }
+  return undefined;
+}
+
+function deepFindInteger(value: unknown, key: string, bounds: IntegerSearchBounds, depth: number): number | undefined {
+  if (depth > 4 || !isPlainObject(value)) {
     return undefined;
   }
 
-  for (const key of keys) {
-    const parsed = toPositiveInteger(value[key]);
-    if (parsed !== undefined) {
-      return parsed;
-    }
+  const direct = toBoundedInteger(value[key], bounds);
+  if (direct !== undefined) {
+    return direct;
   }
 
   for (const nested of Object.values(value)) {
-    const parsed = findPositiveInteger(nested, keys, depth + 1);
-    if (parsed !== undefined) {
-      return parsed;
+    const found = deepFindInteger(nested, key, bounds, depth + 1);
+    if (found !== undefined) {
+      return found;
     }
   }
   return undefined;
@@ -822,6 +863,28 @@ function toPositiveInteger(value: unknown): number | undefined {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
 
+function toStringArray(value: unknown): readonly string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const items = value.filter((item): item is string => typeof item === "string" && item.length > 0);
+  return items.length > 0 ? items : undefined;
+}
+
+function toBoundedInteger(value: unknown, bounds: IntegerSearchBounds): number | undefined {
+  const parsed = toPositiveInteger(value);
+  if (parsed === undefined) {
+    return undefined;
+  }
+  if (bounds.minValue !== undefined && parsed < bounds.minValue) {
+    return undefined;
+  }
+  if (bounds.maxValue !== undefined && parsed > bounds.maxValue) {
+    return undefined;
+  }
+  return parsed;
+}
+
 function toBoolean(value: unknown): boolean | undefined {
   if (typeof value === "boolean") {
     return value;
@@ -839,4 +902,9 @@ function toBoolean(value: unknown): boolean | undefined {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+// Like isRecord but excludes arrays, so deep integer search descends only into plain objects.
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

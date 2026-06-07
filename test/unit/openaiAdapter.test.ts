@@ -529,6 +529,7 @@ test("reads context metadata from OpenAI API model discovery", async () => {
       {
         id: "google/gemma-4-e4b",
         type: "vlm",
+        aliases: undefined,
         contextLength: 131072,
         maxOutputTokens: undefined,
         supportsReasoning: undefined
@@ -572,6 +573,111 @@ test("reads LiteLLM max_tokens as the served context length, not the output limi
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+async function detectContextLength(model: Record<string, unknown>): Promise<number | undefined> {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input: string | URL | Request) => {
+    const url = input instanceof Request ? input.url : String(input);
+    if (url.endsWith("/v1/models")) {
+      return new Response(JSON.stringify({ data: [model] }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response("not found", { status: 404 });
+  };
+  try {
+    const provider = new OpenAiCompatibleProvider(
+      { id: "test", label: "Test", baseUrl: "http://127.0.0.1:1234" },
+      { allowlist: [] }
+    );
+    const inspection = await provider.inspectEndpoint();
+    return inspection.models.find((entry) => entry.id === model.id)?.contextLength;
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+test("reads llama.cpp runtime context from nested meta.n_ctx, preferring it over n_ctx_train", async () => {
+  // Real llama-server /v1/models payload shape: context lives under `meta`, with the live per-slot
+  // window (n_ctx) smaller than the model's trained maximum (n_ctx_train). The runtime window wins.
+  const contextLength = await detectContextLength({
+    id: "unsloth/gemma-4-12b-it-GGUF",
+    aliases: ["unsloth/gemma-4-12b-it-GGUF"],
+    object: "model",
+    created: 1780844598,
+    owned_by: "llamacpp",
+    meta: { vocab_type: 2, n_vocab: 262144, n_ctx: 196608, n_ctx_train: 262144, n_embd: 3840, n_params: 11907350576, size: 7106035904 }
+  });
+  assert.equal(contextLength, 196608);
+});
+
+test("falls back to llama.cpp meta.n_ctx_train when the runtime n_ctx is absent (older builds)", async () => {
+  const contextLength = await detectContextLength({
+    id: "llama-3.1-8b",
+    object: "model",
+    owned_by: "llamacpp",
+    meta: { vocab_type: 2, n_vocab: 128256, n_ctx_train: 131072, n_embd: 4096, n_params: 8030261248, size: 4920733696 }
+  });
+  assert.equal(contextLength, 131072);
+});
+
+test("prefers a higher-priority context field nested under model_info over a top-level max_tokens", async () => {
+  // LiteLLM /model/info-derived shape: the real input window is nested while a small max_tokens sits
+  // at the top level. Priority must dominate nesting depth, so max_input_tokens wins.
+  const contextLength = await detectContextLength({
+    id: "gpt-4o-proxy",
+    object: "model",
+    owned_by: "openai",
+    max_tokens: 4096,
+    model_info: { max_input_tokens: 128000, max_output_tokens: 16384, max_tokens: 16384 }
+  });
+  assert.equal(contextLength, 128000);
+});
+
+test("prefers loaded_context_length over max_context_length for an LM Studio loaded model", async () => {
+  const contextLength = await detectContextLength({
+    id: "google/gemma-4-26b",
+    object: "model",
+    state: "loaded",
+    max_context_length: 262144,
+    loaded_context_length: 200000
+  });
+  assert.equal(contextLength, 200000);
+});
+
+test("reads a nested TabbyAPI parameters.max_seq_len context window", async () => {
+  const contextLength = await detectContextLength({
+    id: "turboderp_Llama-3.1-8B-exl2",
+    object: "model",
+    parameters: { max_seq_len: 32768, cache_size: 32768, rope_scale: 1.0 }
+  });
+  assert.equal(contextLength, 32768);
+});
+
+test("does not mistake a stray integer inside an array for a context window", async () => {
+  // vLLM exposes max_model_len plus a permission[] array carrying max_tokens: 1; arrays are never
+  // descended into, and the small value would be rejected by the sanity floor regardless.
+  const contextLength = await detectContextLength({
+    id: "meta-llama/Llama-3.1-8B-Instruct",
+    object: "model",
+    owned_by: "vllm",
+    max_model_len: 131072,
+    permission: [{ id: "modelperm-abc", object: "model_permission", max_tokens: 1 }]
+  });
+  assert.equal(contextLength, 131072);
+});
+
+test("reports no context length when only an implausibly small value is present", async () => {
+  const contextLength = await detectContextLength({
+    id: "no-ctx-model",
+    object: "model",
+    permission: [{ id: "p1", object: "model_permission", max_tokens: 1 }]
+  });
+  assert.equal(contextLength, undefined);
+});
+
+test("accepts a string-typed numeric context length", async () => {
+  const contextLength = await detectContextLength({ id: "string-ctx", object: "model", max_model_len: "131072" });
+  assert.equal(contextLength, 131072);
 });
 
 test("treats accepted OpenAI tool schemas as native tool support", async () => {
