@@ -1,6 +1,6 @@
 # CodeForge Handoff
 
-Last updated: 2026-06-04
+Last updated: 2026-06-08
 
 ## Project Direction
 
@@ -16,17 +16,21 @@ Keep these design constraints intact:
 - network access limited to localhost, private IP ranges, and explicitly allowlisted on-prem hosts
 - all file edits, commands, MCP service calls, and memory writes routed through typed tools and permission policy
 
-## Current State (v0.1.12)
+## Current State (v0.1.14)
 
-Core product (Phases 0–11) is unchanged and described in the git history. Three recent bodies of work sit on top:
+Core product (Phases 0–11) is unchanged and described in the git history. Several recent bodies of work sit on top:
 
 1. **Approval-continuation fix** (v0.0.10): after approving an edit/command in Smart/Manual modes the loop continues. Root cause was a `tool → user` adjacency injected into the post-approval request that local chat templates mis-render; the fix re-requests the transcript ending in the tool result (matching the working Full-Auto path) and folds the "keep going" guidance into the tool result. See `agentController.ts` `runModelLoop` / `approve`.
 
 2. **Hermes-style learning + multi sub-agent system** (v0.1.11) — described below.
 
-3. **Tool-call reliability + output-token control** (v0.1.12, this session) — described below.
+3. **Tool-call reliability + output-token control** (v0.1.12) — described below.
 
-**Tests: 189 pass / 0 fail.** `tsc` clean, extension compiles. Run:
+4. **Visible learning + Learned-panel fix** (v0.1.13) — described below.
+
+5. **Context-length detection + startup model selection** (v0.1.14, this session) — described below.
+
+**Tests: 206 pass / 0 fail.** `tsc` clean, extension compiles. Run:
 ```bash
 npm run compile && npm run compile:tests && node --test out-test/test/unit/*.test.js out-test/test/integration/*.test.js
 ```
@@ -60,7 +64,7 @@ After a finished Agent-mode task, CodeForge distils durable **lessons** from its
 - `media/main.js` + `src/ui/codeForgeViewProvider.ts` — **Learned** settings tab (accept/reject lessons, skills, agents).
 
 ### Configuration (`codeforge.*`)
-- `learning.enabled` (true), `learning.autonomy` (review|hybrid|auto, default review), `learning.scope` (split|repo|global, default split)
+- `learning.enabled` (true), `learning.autonomy` (review|hybrid|auto, default hybrid), `learning.scope` (split|repo|global, default split)
 - `learning.auditCadence` (15), `learning.maxLessons` (60), `learning.maxLessonBytes` (24000)
 - `learning.skills.enabled` (true), `learning.skills.minRepeats` (3)
 - `learning.agents.enabled` (**false** — opt-in; agents are review-only)
@@ -73,7 +77,7 @@ After a finished Agent-mode task, CodeForge distils durable **lessons** from its
 - **Agents are always review-only**, even under `autonomy: "auto"`. Proposed agent tools are validated against the real registry.
 - Skill/agent file writes go through `diff.applyWriteFile`; nothing is written without accept except skills under `autonomy: "auto"`.
 
-## Learning visibility + Learned-panel fix (this session)
+## Learning visibility + Learned-panel fix (v0.1.13, shipped)
 
 Symptom reported: "I don't see it learning like Hermes" + "Accept/Reject in the Learned panel do nothing."
 
@@ -89,13 +93,32 @@ Changes:
 - **Webview hardening** (`media/main.js`): added incremental handlers for `learningProposed`/`skillProposed`/`agentProposed`; made Accept/Reject **optimistic** (mutate local state + re-render immediately, so the action is unmistakable even if a state publish lags); added a pending-count badge to the **Learned** tab (`Learned (N)`).
 - New integration test: "Learning surfaces inline chat messages when it learns and when it applies a lesson."
 
-**Tests: 190 pass / 0 fail.**
-
 Note: the exact dead-button cause could not be reproduced by static analysis (controller logic is correct + test-covered); the optimistic webview update both hardens the untested layer and gives instant feedback. If buttons still feel dead in the live extension, check the webview Developer Tools console for an exception thrown inside `renderState()` before `renderLearned()` runs.
+
+## Context-length detection + startup model selection (v0.1.14)
+
+Two robustness fixes in endpoint inspection + model selection, both in `src/core/openaiAdapter.ts` and `src/agent/agentController.ts`. Shipped as v0.1.14 (commit `b2d1d73`, tag `v0.1.14`).
+
+### Robust context-length detection (`/v1/models`)
+`modelsFromBody` → `findPositiveInteger` now detects a model's context window across many more backend-specific fields and ignores junk values:
+- **More fields recognized:** added `n_ctx_train` (llama.cpp trained max, often the only signal on older `llama-server` builds), `loaded_context_length`/`loadedContextLength` (LM Studio runtime allocated window), `n_positions` (older HF / GPT-2 family), and `model_max_length` (HF tokenizer config). These join the existing `max_model_len`, `n_ctx`, `context_length`, `context_window`, `max_seq_len`, `max_position_embeddings`, LiteLLM's `max_input_tokens`/`max_tokens`, etc.
+- **Runtime window ranked ahead of model-max:** keys are tried in priority order so the *loaded/runtime* window (what the server will actually accept right now) beats the model's trained/architectural maximum when both are present. `n_ctx_train` sits below the live `n_ctx` for the same reason.
+- **Priority-first nested search:** `findPositiveInteger` searches the whole model object (incl. nested `meta`/`model_info`/`parameters`) for each key in turn — so a higher-priority field nested anywhere beats a lower-priority field at the top level (e.g. a nested context field beats a top-level LiteLLM `max_tokens`). PRIORITY DOMINATES NESTING DEPTH.
+- **Array-descent stop:** `deepFindInteger` descends only into plain objects (`isPlainObject`), never into arrays — so a stray integer inside a `permissions`/limits list can't be mistaken for a context window. Depth is capped at 4.
+- **Sanity bounds:** detected values must satisfy `MIN_CONTEXT_LENGTH = 256` ≤ v ≤ `MAX_CONTEXT_LENGTH = 100_000_000` (`{ minValue, maxValue }` passed to `findPositiveInteger`). This rejects stray small ints (a permission `max_tokens: 1`, `n_parallel`, batch sizes) and the HuggingFace ~1e30 "unbounded" sentinel that `model_max_length` can carry.
+
+### Alias-aware startup model selection
+`resolveConfiguredModelId(configured, models)` (exported from `agentController.ts`, unit-tested) deterministically resolves the persisted/configured model id against the endpoint's returned models:
+- **Alias-aware, tolerant match:** matches the configured id against each model's canonical `id` **and** its `aliases`, trimmed and case-insensitively, and returns the **canonical** returned id on a match.
+- **Unmatched id is kept, not swapped:** a non-empty configured id that matches nothing is **kept** (flagged `unmatched`, surfacing one deduplicated inspector warning via `warnUnmatchedConfiguredModel`) instead of being silently swapped to `models[0]`. This guarantees the model the user intends is the model actually sent — important for single-model servers (llama.cpp) that ignore the requested id and serve their loaded model anyway. An empty configured id still falls back to `models[0]` (prior behavior).
+- **Aliases captured into `ModelInfo`:** `modelsFromBody` reads `data[].aliases` (via `toStringArray`) into `ModelInfo.aliases` and the capability cache, so the dropdown and the matcher see them.
+- **Per-profile seeding:** `selectedModelFor` resolves and seeds `selectedModelByProfile` after the first inspection, so the model shown in the UI and the model actually sent agree from turn one.
+
+New test: `test/unit/modelSelection.test.ts` (exact match, case/whitespace-insensitive match, alias match, empty→`models[0]`, whitespace-only→`models[0]`, unmatched non-empty kept+flagged, empty model list cases).
 
 ## Tool-call reliability + output-token control (v0.1.12)
 
-Local models (e.g. `gemma-4-31B-it` served via LiteLLM) truncate tool-call arguments mid-string. A multi-agent diagnosis (4 parallel investigators + adversarial verifiers + synthesis) traced **one root cause behind three reported symptoms**, plus a latent model-metadata bug. All fixed; **189 tests pass**. Shipped as v0.1.12 (commit `781616e`, tag `v0.1.12`).
+Local models (e.g. `gemma-4-31B-it` served via LiteLLM) truncate tool-call arguments mid-string. A multi-agent diagnosis (4 parallel investigators + adversarial verifiers + synthesis) traced **one root cause behind three reported symptoms**, plus a latent model-metadata bug. All fixed and shipped as v0.1.12 (commit `781616e`, tag `v0.1.12`).
 
 ### Symptoms → fixes
 1. **LiteLLM HTTP 400 "Unterminated string"** — a truncated `argumentsJson` was replayed verbatim on the next request; LiteLLM `json.loads` the `arguments` field and rejected the whole body. **Fix:** `sanitizeToolArgumentsJson` (+ `repairTruncatedJsonObject` / `isJsonObjectString`) in `openaiAdapter.ts` sanitizes tool-call arguments to valid JSON **at the serialization boundary** (`toOpenAiMessage`). The raw malformed args stay in history so the parse failure still surfaces to the model and the retry loop recovers. **Do not** filter invalid calls out of history (the adversarial verifier rejected that — it hides the failure from the model).
@@ -152,7 +175,8 @@ An adversarial multi-agent review confirmed 4 issues; all fixed + covered or rea
 - Worktree adapter: `src/adapters/worktree.ts`
 - Context assembly: `src/core/contextBuilder.ts`
 - Tools: `src/core/toolRegistry.ts`
-- Endpoint / streaming / model discovery / `max_tokens` / tool-arg sanitize: `src/core/openaiAdapter.ts`
+- Endpoint / streaming / model discovery / context-length detection (`findPositiveInteger`) / `max_tokens` / tool-arg sanitize: `src/core/openaiAdapter.ts`
+- Startup model selection (`resolveConfiguredModelId`, alias-aware): `src/agent/agentController.ts`; covered by `test/unit/modelSelection.test.ts`
 - Tool-call argument parsing: `src/core/actionProtocol.ts`
 - Permissions / approval modes: `src/core/permissions.ts`, `src/core/approvals.ts`
 - Memory persistence: `src/adapters/vscodeMemoryStore.ts`
@@ -171,4 +195,5 @@ An adversarial multi-agent review confirmed 4 issues; all fixed + covered or rea
 - Run `npm run compile && npm run compile:tests && node --test out-test/test/unit/*.test.js out-test/test/integration/*.test.js` before handoff.
 - Do not add public web tools, cloud presets, telemetry, CLI commands, or browser preview workflows.
 - **v0.1.12 invariants — do not regress:** (a) keep raw malformed tool-call args in history and sanitize only at the outbound boundary (`toOpenAiMessage`) — never drop invalid calls from history; (b) `ask_user_question` always prompting in Full Auto is intentional, not a bug; (c) `max_tokens` is per-turn via `resolveRequestMaxTokens` — if you add a new `streamChat` call site, pass `maxTokens`; (d) LiteLLM `max_tokens` = context length, not output limit.
+- **v0.1.14 invariants — do not regress:** (a) context-length detection is priority-first across nesting with sanity bounds `256 ≤ v ≤ 1e8` — keep arrays out of the deep search (`isPlainObject`) so stray ints / the HF ~1e30 sentinel can't slip in, and keep runtime/loaded fields ranked ahead of model-max; (b) `resolveConfiguredModelId` keeps a non-empty unmatched configured id (warn once) and never silently swaps it to `models[0]`; only an empty id falls back to `models[0]`.
 - Release flow: bump `package.json` + both `package-lock.json` entries, commit, then push an annotated `vX.Y.Z` tag (`CodeForge X.Y.Z — <summary>`). The `release-vsix.yml` workflow packages the VSIX and `gh release create`s on the tag push. Tags/commits are authored by Matthew Stroble only — no Co-Authored-By trailers.

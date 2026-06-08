@@ -3,7 +3,7 @@
 CodeForge is a VS Code extension only. There will be no CLI edition and no browser or website workflow. The goal is to bring the strongest harness techniques from Harnes into a local-first editor workflow while preserving the original CodeForge principles:
 
 - user-configured OpenAI-compatible endpoints only
-- supported endpoint targets are vLLM and LiteLLM-compatible `/v1` servers
+- supported endpoint targets are any OpenAI-compatible `/v1` server, such as LM Studio, llama.cpp, vLLM, and LiteLLM (plus on-prem/corporate gateways)
 - no telemetry
 - offline and private workspace posture first
 - custom endpoint origins are allowed only after they are explicitly saved in settings
@@ -58,12 +58,10 @@ Scope:
 - Add a core permission engine with explicit `deny -> ask -> allow` precedence.
 - Support session, workspace, and user scopes.
 - Add rule types for tools, workspace paths, shell command prefixes, and configured endpoint access.
-- Add permission modes suitable for an extension:
-  - `default`: reads allowed, writes and commands ask.
-  - `review`: all writes and commands ask, even if allowlisted.
-  - `acceptEdits`: file edits may apply after preview, commands still ask.
-  - `readOnly`: deny writes and commands.
-  - `workspaceTrusted`: permit configured low-risk commands only.
+- Add permission modes suitable for an extension. The shipped engine has three modes, with the original named modes kept as slash-command aliases that map onto them:
+  - `manual`: reads allowed, writes and commands ask. (alias: `/readonly`)
+  - `smart` (default): reads and searches allowed; edits, commands, memory writes, notebooks, and service calls ask. (aliases: `/default`, `/acceptedits`)
+  - `fullAuto`: proceeds without most prompts. (alias: `/workspacetrusted`)
 - Add settings UI for viewing and removing persisted rules.
 - Add tests for rule matching, precedence, and path normalization.
 
@@ -332,6 +330,46 @@ Scope:
 - Post-edit diagnostics checks for changed files.
 - In-app memory management.
 - Persisted model capability cache for native tools, streaming, context length, and reasoning metadata.
+
+## Phase 12: Self-Improving Learning Loop
+
+Purpose: let CodeForge get better at a codebase the more it is used, by learning durable lessons from its own finished work — without ever blocking, breaking, or silently mutating a run. This brings the Hermes-style learning, multi-agent, and persona pillars into the extension.
+
+Status: implemented across v0.1.11..v0.1.14. After a finished Agent-mode task, CodeForge distils durable lessons from its own work (corrective lessons on failure, reusable lessons on success), stores them as scoped local `MemoryEntry` rows, then ranks and injects the relevant ones into future prompts for both the main loop and sub-agents. The whole loop is fire-and-forget and fully guarded so it can never block or break a run. A periodic self-audit dedups and prunes the lesson library, repeated successful procedures are proposed as reusable skills, and recurring task types are proposed as review-only sub-agents. The Learned settings panel accepts or rejects proposed lessons, skills, and agents, and inline chat surfaces "Learned N…" and "Applied N learned lessons" provenance.
+
+Core modules (pure, no VS Code imports): `src/core/learning.ts` (lesson extraction prompt, tolerant parser, ranked prompt injection), `src/core/skillProposal.ts` (repeated-procedure skill proposals), `src/core/agentProposal.ts` (recurring-task-type agent proposals), `src/core/learningAudit.ts` (periodic dedup/prune). Persona is loaded by `src/core/localExtensions.ts` `loadLocalSoul`. Multi-agent concurrency lives in `src/agent/workerManager.ts` (concurrency cap `codeforge.workers.maxConcurrent`, default 3, with a queue, and lesson/skill-aware workers) over the built-in worker kinds in `src/core/workerAgents.ts` (explore, plan, review, verify, implement).
+
+Scope:
+- Distil durable lessons from each finished Agent-mode task and store them as scoped local memory entries (`split`, `repo`, or `global`).
+- Rank and inject the most relevant lessons into both the main agent loop and sub-agent prompts, bounded by `codeforge.learning.maxLessonBytes`.
+- Run a periodic self-audit (cadence `codeforge.learning.auditCadence`, retention `codeforge.learning.maxLessons`) that dedups and prunes the lesson library.
+- Propose reusable skills (`.codeforge/skills`) when a successful procedure recurs at least `codeforge.learning.skills.minRepeats` times.
+- Propose specialized sub-agents (`.codeforge/agents`) when a kind of task recurs — opt-in via `codeforge.learning.agents.enabled` and always review-only.
+- Load a workspace and user-global persona/voice from `.codeforge/soul.md` and inject a bounded slice into the system prompt; persona shapes tone only, never permissions or task behavior.
+- Cap concurrent sub-agents and queue overflow spawns so a single local endpoint is not overwhelmed.
+- Provide the `GitWorktreeManager` worktree adapter (`src/adapters/worktree.ts`) so a future slice can isolate parallel editing workers and surface their diffs back through the existing approval path.
+- Surface accept/reject controls in the Learned panel (`media/main.js` + `codeForgeViewProvider.ts`) and learned/applied provenance inline in chat.
+
+Learning settings (`codeforge.learning.*`):
+- `enabled` (default `true`): turn the learning loop on or off.
+- `autonomy` (`review` | `hybrid` | `auto`, default `hybrid`): in hybrid, text lessons are saved automatically while skill and agent files stay proposed for review.
+- `scope` (`split` | `repo` | `global`, default `split`): where learned knowledge applies.
+- `auditCadence` (default `15`), `maxLessons` (default `60`), `maxLessonBytes` (default `24000`).
+- `skills.enabled` (default `true`), `skills.minRepeats` (default `3`).
+- `agents.enabled` (default `false`): opt-in and always review-only, even under `autonomy:auto`.
+- `embeddings.enabled` (default `false`): declared but not yet wired.
+
+Exit criteria:
+- The learning loop never blocks or breaks a run; extraction, audit, and proposals are fire-and-forget and fully guarded.
+- Learned text lessons are scoped, ranked, and injected into both the main loop and sub-agents, with bounded byte budgets.
+- Learned skill and agent FILE writes go through `diff.applyWriteFile`; agent definitions are never auto-written and are always review-only.
+- Persona is additive to the system prompt, bounded, and can never alter permissions or task behavior.
+- Concurrent sub-agents stay capped, with overflow queued.
+
+Remaining work (cross-referenced):
+- Worktree isolation for parallel editing workers: the `GitWorktreeManager` adapter is built and tested but is not yet wired into the worker path (merge-back is planned through a `propose_patch` approval, never auto-applied).
+- Embedding-ranked lesson retrieval (`codeforge.learning.embeddings.enabled`) is declared but not yet wired.
+- See `docs/hermes-roadmap.md` for the original Hermes pillar designs and `HANDOFF.md` for current status and next steps.
 
 ## Implementation Rules For Every Phase
 

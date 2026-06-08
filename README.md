@@ -18,6 +18,8 @@ CodeForge gives your local model a VS Code-native coding workflow:
 - run approved terminal commands
 - maintain workspace chat history
 - keep and manage explicit local memories
+- learn durable lessons from finished tasks and apply them later
+- delegate to background sub-agents (workers)
 - use local slash commands, skills, and custom agents
 - connect to explicitly configured MCP servers
 
@@ -51,7 +53,7 @@ CodeForge is local-first by default:
 Approval modes:
 
 - **Manual**: asks before meaningful actions such as edits, commands, and service calls.
-- **Smart**: allows routine reads and low-risk edits, asks before commands and risky changes.
+- **Smart**: allows reads and searches without prompting; asks before edits, commands, memory writes, notebook edits, and service calls.
 - **Full Auto**: allows most actions without interruption; best used in disposable branches or containers.
 
 ## Agent Modes
@@ -92,33 +94,73 @@ Specialized tool schemas are loaded on demand with `tool_search`, keeping the ac
 
 After file edits, CodeForge checks current VS Code diagnostics for changed files and returns those results to the model so Agent mode can continue from real feedback.
 
+## Learning & Memory
+
+When an Agent-mode task finishes, CodeForge distils durable **lessons** from its own work — corrective ones from failures, reusable ones from successes — and stores them as scoped memory entries. On later tasks it ranks the relevant lessons and injects them back into both the main loop and sub-agents. This is fire-and-forget and fully guarded: learning never blocks or breaks a run.
+
+CodeForge can also propose extension files from what it learns:
+
+- repeated successful procedures may be proposed as reusable **skills** (`.codeforge/skills`)
+- recurring task *types* may be proposed as **review-only sub-agents** (`.codeforge/agents`)
+
+A periodic self-audit dedups and prunes the lesson library. The **Learned** panel in the settings view lets you accept or reject proposed lessons, skills, and agents, and shows a pending-count badge. Inline chat surfaces provenance such as "Learned N…" and "Applied N learned lessons".
+
+Learning is controlled by `codeforge.learning.*` settings and can be fully disabled with `codeforge.learning.enabled`:
+
+- **autonomy** (`review` | `hybrid` | `auto`, default `hybrid`): hybrid applies text lessons automatically and proposes skill files for review; review keeps everything pending in the Learned panel; auto saves lessons silently. Proposed agent files are **always review-only** and are never written without approval, even under `auto`.
+- **scope** (`split` | `repo` | `global`, default `split`): split keeps project lessons in the repo while preferences follow you across repos; repo keeps everything per-project; global shares across every project.
+- skill proposals (`skills.enabled`, default on) trigger after a procedure recurs (`skills.minRepeats`, default 3); agent proposals (`agents.enabled`) are opt-in and off by default.
+
 ## Chat Commands
 
-Useful built-in slash commands:
+CodeForge ships a large set of slash commands. The list below is a useful selection; type `/` in the chat input to see the rest.
 
 ```text
-/doctor      Check endpoint, model, workspace, permissions, MCP, and persistence status
-/new         Start a clean workspace chat
-/history     Show saved local chats
-/resume      Resume a saved chat
-/context     Show current context usage
-/compact     Compact the current chat context
-/index       Show the offline workspace index
-/pin         Pin the active file or a path into future context
-/inspect     Show recent model/tool/verification events
-/audit       Show permission and approval audit history
-/model       Show or set the active model
-/models      Pick from models returned by the active endpoint
-/capabilities Show cached endpoint model capabilities
-/memory      Manage explicit local memories
-/mcp         Inspect configured MCP servers
-/workers     Show background workers
-/worker      Show, attach, or stop worker output
-/agents      List workspace-local agent definitions
-/review      Run a read-only code review prompt
-/commands    List workspace-local slash commands
-/skills      List workspace-local skills
-/settings    Open CodeForge settings
+Modes
+/ask /plan /agent          Switch working mode
+
+Permission/approval modes
+/smart /default            Smart approval (reads/search allowed, asks before edits & commands)
+/manual /readonly          Ask before edits, commands, and service calls
+/fullauto /workspacetrusted Proceed without most prompts
+/acceptedits               Alias for Smart mode (legacy name; still asks before edits)
+
+Session control
+/new                       Start a clean workspace chat
+/history /chats /sessions  Show saved local chats
+/resume                    Resume a saved chat
+/fork                      Branch the current chat into a new one
+/diff                      Show pending edits as a diff
+/export                    Export the current chat
+/clear /reset              Clear the conversation
+/stop /cancel              Stop the active operation
+
+Context
+/context                   Show current context usage
+/compact                   Compact the current chat context
+/pin /unpin /pins          Manage files pinned into future context
+/index                     Show the offline workspace index
+
+Inspection & diagnostics
+/doctor                    Check endpoint, model, workspace, permissions, MCP, persistence
+/inspect /inspector        Show recent model/tool/verification events
+/audit                     Show permission and approval audit history
+/capabilities              Show cached endpoint model capabilities
+
+Model & configuration
+/model                     Show or set the active model
+/models                    Pick from models returned by the active endpoint
+/settings /config          Open CodeForge settings
+
+Sub-agents & extension points
+/workers                   Show background workers
+/worker                    Show, attach, or stop worker output
+/agents                    List agent definitions (built-in kinds + workspace-local)
+/review                    Run a read-only code review prompt
+/commands                  List workspace-local slash commands
+/skills /skill             List or run workspace-local skills
+/memory                    Manage explicit local memories
+/mcp                       Inspect configured MCP servers
 ```
 
 ## Workspace Extensions
@@ -129,8 +171,9 @@ Projects can add local CodeForge behavior under `.codeforge/`:
 - `.codeforge/skills/*.md` or `.codeforge/skills/<name>/SKILL.md` for reusable skills
 - `.codeforge/agents/*.md` or `.codeforge/agents/<name>/AGENT.md` for custom worker agents
 - `.codeforge/hooks.json` for permission-gated local hooks
+- `.codeforge/soul.md` for a bounded persona ("soul") that shapes the agent's voice and tone only — never its tools, permissions, or task behavior
 
-Project instructions can be placed in `CODEFORGE.md`.
+Project instructions can be placed in `CODEFORGE.md` (with optional `CLAUDE.md` compatibility).
 
 ## Setup
 
@@ -169,13 +212,13 @@ node --check media/main.js
 
 ## Project Layout
 
-- `src/core`: provider contracts, network policy, tool validation, context, sessions, memory, and pure logic
-- `src/adapters`: VS Code, terminal, diff, config, session, memory, code-intel, and notebook adapters
-- `src/agent`: model loop, tool orchestration, permissions, workers, and diagnostics
+- `src/core`: provider contracts, network policy, tool validation, context, sessions, memory, learning, and pure logic
+- `src/adapters`: VS Code, terminal, diff, config, session, memory, code-intel, notebook, and worktree adapters
+- `src/agent`: model loop, tool orchestration, permissions, sub-agent workers, learning hooks, and diagnostics
 - `src/ui`: VS Code webview provider and message bridge
 - `media`: chat UI script, styles, and extension icon
 - `docs`: roadmap, testing notes, and local extension formats
 
 See `ARCHITECTURE.md` for implementation boundaries and design patterns.
 See `docs/testing.md` for verification steps.
-See `docs/local-extensions.md` for local commands, skills, agents, and hooks.
+See `docs/local-extensions.md` for local commands, skills, agents, hooks, and the `soul.md` persona.

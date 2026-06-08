@@ -1,14 +1,15 @@
 # Hermes-likeness roadmap: multi sub-agents, learned agents, persona
 
-Status of the learning work so far:
+Status of the learning work so far (shipping as of **v0.1.14**):
 - **Done** — memory + skills learning loop (extraction, ranked injection, periodic audit, review UI), and **#2 sub-agent learning**: workers receive the same prompt-ranked learned-lesson digest plus the bodies of the most relevant skills.
 - **Done — #1a** parallel fan-out: `WorkerManager` concurrency cap (`codeforge.workers.maxConcurrent`, default 3) + queue; `worker_output` gained a `wait` flag so the model can spawn several agents then join their results.
 - **Done — #4** soul/persona: `.codeforge/soul.md` loaded and injected (bounded) into the system prompt.
 - **Done — #3** learned agent proposals: recurring task types proposed as review-only `.codeforge/agents/*.md` (tools validated against the registry), surfaced in the Learned tab.
-- **Partial — #1b** worktree isolation: `src/adapters/worktree.ts` (`GitWorktreeManager`) shipped + real-git tested. The WorkerManager wiring + merge-back via approvals is the documented next step (see HANDOFF).
+- **Done — learning is now VISIBLE (v0.1.13).** The default `codeforge.learning.autonomy` moved `review` → **`hybrid`**, so text lessons apply automatically out of the box (skill/agent files stay review-only). The agent loop surfaces provenance inline in chat: `🧠 Learned N…` after a task ("applied to future tasks" vs "review them in the Learned panel") and `📎 Applied N learned lessons` when ranked lessons are injected into a prompt. The **Learned** settings panel (`media/main.js` + `codeForgeViewProvider.ts`) accept/reject for lessons, skills, and agents was hardened with optimistic webview updates and a pending-count badge (`Learned (N)`).
+- **Partial — #1b** worktree isolation: `src/adapters/worktree.ts` (`GitWorktreeManager`) shipped + real-git tested (`test/unit/worktree.test.ts`). The WorkerManager wiring + merge-back via approvals is the documented next step (see HANDOFF).
 - **Deferred — #5** crons: poor fit for a daemon-less VS Code extension; see below.
 
-The sections below are the original designs; consult the HANDOFF file for current status and next steps.
+The sections below are the original designs; consult `HANDOFF.md` for current status and next steps.
 
 ---
 
