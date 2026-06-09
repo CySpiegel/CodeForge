@@ -4,6 +4,10 @@ import * as path from "path";
 import * as vscode from "vscode";
 import { DiffPreviewProvider, DiffService } from "../../src/adapters/diffService";
 import { CodeForgeConfigService } from "../../src/adapters/vscodeConfig";
+import { VsCodeSkillIo } from "../../src/adapters/vscodeSkillIo";
+import { SkillManager } from "../../src/core/skillManager";
+import { SkillUsageTracker } from "../../src/core/skillUsage";
+import { archivedSkillDirPath, skillMdPath } from "../../src/core/skillIo";
 
 export async function run(): Promise<void> {
   const extension = vscode.extensions.getExtension("codeforge.codeforge");
@@ -27,6 +31,37 @@ export async function run(): Promise<void> {
 
   await assertVsCodeEditPipelineAppliesChanges();
   await assertCodeForgeConfigWritesRepoSettings();
+  await assertSkillPipelineWorksInHost();
+}
+
+// Exercises the new agent-built-skills subsystem against the real VS Code filesystem (the unit tests
+// use an in-memory fake): create → view → list → archive, and confirm the files land on disk.
+async function assertSkillPipelineWorksInHost(): Promise<void> {
+  const io = new VsCodeSkillIo();
+  const manager = new SkillManager(io, new SkillUsageTracker(io));
+  const name = "smoke-skill";
+
+  const created = JSON.parse(
+    await manager.handleManage(
+      { action: "create", name, content: `---\nname: ${name}\ndescription: smoke test skill\n---\n# ${name}\n\n1. first step\n` },
+      { markAgentCreated: true }
+    )
+  );
+  assert.equal(created.success, true, `skill create should succeed in host: ${created.error ?? ""}`);
+  assert.match(await readWorkspaceText(skillMdPath(name)), /first step/);
+
+  const viewed = JSON.parse(await manager.handleView({ name }));
+  assert.match(viewed.content, /first step/);
+
+  const listed = JSON.parse(await manager.handleList());
+  assert.ok(listed.skills.some((skill: { name: string }) => skill.name === name), "skills_list should include the new skill");
+
+  const archived = JSON.parse(await manager.handleManage({ action: "delete", name, absorbed_into: "" }));
+  assert.equal(archived.success, true, "archiving the skill should succeed");
+  const folder = vscode.workspace.workspaceFolders?.[0]?.uri;
+  assert.ok(folder, "Expected a workspace folder.");
+  // Throws if the archived SKILL.md is missing — confirms the move landed on disk.
+  await vscode.workspace.fs.stat(vscode.Uri.joinPath(folder, ...archivedSkillDirPath(name).split("/"), "SKILL.md"));
 }
 
 interface PackageJson {

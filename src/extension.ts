@@ -7,8 +7,11 @@ import { VsCodeCodeIntelPort } from "./adapters/vscodeCodeIntel";
 import { VsCodeEndpointCapabilityStore } from "./adapters/vscodeEndpointCapabilityStore";
 import { VsCodeMemoryStore } from "./adapters/vscodeMemoryStore";
 import { VsCodeNotebookPort } from "./adapters/vscodeNotebookPort";
+import { VsCodeBlobStore } from "./adapters/vscodeBlobStore";
 import { VsCodeSessionStore } from "./adapters/vscodeSessionStore";
+import { VsCodeSkillIo } from "./adapters/vscodeSkillIo";
 import { VsCodeWorkspacePort } from "./adapters/vscodeWorkspace";
+import { createExternalMemoryProvider } from "./core/memoryProviderRegistry";
 import { CodeForgeViewProvider } from "./ui/codeForgeViewProvider";
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -22,7 +25,11 @@ export function activate(context: vscode.ExtensionContext): void {
   const endpointCapabilities = new VsCodeEndpointCapabilityStore(context);
   const codeIntel = new VsCodeCodeIntelPort();
   const notebooks = new VsCodeNotebookPort();
-  const controller = new AgentController(config, workspace, terminal, diff, sessions, memories, codeIntel, notebooks, undefined, endpointCapabilities);
+  const skills = new VsCodeSkillIo();
+  const externalMemory = createExternalMemoryProvider(config.getMemoryProviderName(), {
+    holographicPersistence: new VsCodeBlobStore(context, "holographic.sqlite")
+  });
+  const controller = new AgentController(config, workspace, terminal, diff, sessions, memories, codeIntel, notebooks, undefined, endpointCapabilities, skills, externalMemory);
   const viewProvider = new CodeForgeViewProvider(context.extensionUri, controller);
   const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   statusBar.name = "CodeForge";

@@ -365,93 +365,131 @@
           "scope": "resource",
           "description": "Maximum number of CodeForge sub-agents (workers) that run at once. Additional spawns queue and start as running workers finish."
         },
-        "codeforge.learning.enabled": {
+        "codeforge.memory.enabled": {
           "type": "boolean",
           "default": true,
           "scope": "resource",
-          "description": "Let CodeForge learn from finished tasks: distill durable lessons (and reusable skills) from the fixes and code it writes, then apply the relevant ones on future tasks."
+          "description": "Inject CodeForge's curated memory (your agent notes and user profile) into the system prompt, and expose the memory tool so the agent can save durable facts and preferences across sessions."
         },
-        "codeforge.learning.autonomy": {
-          "type": "string",
-          "enum": [
-            "review",
-            "hybrid",
-            "auto"
-          ],
-          "enumDescriptions": [
-            "Propose everything for review: learned lessons and skills are pending until you accept them in the Learned panel.",
-            "Hybrid: text lessons are saved automatically; skill files are proposed for approval.",
-            "Automatic: lessons are saved silently; skill-file writes follow the active approval policy."
-          ],
-          "default": "hybrid",
-          "scope": "resource",
-          "description": "How CodeForge stores what it learns. Hybrid (default) applies text lessons automatically and proposes skill files for review; review keeps everything pending until you accept it in the Learned panel."
-        },
-        "codeforge.learning.scope": {
-          "type": "string",
-          "enum": [
-            "split",
-            "repo",
-            "global"
-          ],
-          "enumDescriptions": [
-            "Split: project/codebase lessons stay in this repo; your preferences follow you across repos.",
-            "Per-repo: everything learned stays scoped to this project.",
-            "Global: share all learned knowledge across every project."
-          ],
-          "default": "split",
-          "scope": "resource",
-          "description": "Where learned knowledge applies."
-        },
-        "codeforge.learning.auditCadence": {
+        "codeforge.memory.charLimit": {
           "type": "number",
-          "default": 15,
-          "minimum": 1,
+          "default": 2200,
+          "minimum": 200,
+          "maximum": 100000,
+          "scope": "resource",
+          "description": "Character budget for the agent's MEMORY notes (environment facts, project conventions, tool quirks). The agent consolidates entries when it reaches the limit."
+        },
+        "codeforge.memory.userCharLimit": {
+          "type": "number",
+          "default": 1375,
+          "minimum": 200,
+          "maximum": 100000,
+          "scope": "resource",
+          "description": "Character budget for the USER profile notes (who the user is — preferences, communication style, expectations)."
+        },
+        "codeforge.memory.nudgeInterval": {
+          "type": "number",
+          "default": 10,
+          "minimum": 0,
           "maximum": 1000,
           "scope": "resource",
-          "description": "Run a self-audit (dedup, prune, refresh learned lessons) after this many learned tasks."
+          "description": "Run a background memory review every N user turns to consider saving new durable facts or preferences. 0 disables the nudge."
         },
-        "codeforge.learning.maxLessons": {
+        "codeforge.memory.provider": {
+          "type": "string",
+          "enum": [
+            "none",
+            "holographic"
+          ],
+          "enumDescriptions": [
+            "Curated notes only (the always-on built-in memory).",
+            "Also keep a durable, searchable fact store with holographic (compositional) recall; saved memories are mirrored into it and relevant facts are recalled into each task's context."
+          ],
+          "default": "none",
+          "scope": "resource",
+          "description": "Optional durable memory backend layered on top of the curated notes. Fully local; no external services."
+        },
+        "codeforge.skills.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "description": "Surface relevant local skills (.codeforge/skills) to the agent and let it author and refine them."
+        },
+        "codeforge.skills.creationNudgeInterval": {
           "type": "number",
-          "default": 60,
-          "minimum": 1,
+          "default": 10,
+          "minimum": 0,
           "maximum": 1000,
           "scope": "resource",
-          "description": "Maximum number of learned lessons retained per scope before the self-audit prunes the least useful."
+          "description": "Run a background skill review every N tool iterations to build or patch a reusable skill. 0 disables the nudge."
         },
-        "codeforge.learning.maxLessonBytes": {
+        "codeforge.skills.digestBytes": {
           "type": "number",
           "default": 24000,
           "minimum": 1000,
           "maximum": 500000,
           "scope": "resource",
-          "description": "Maximum bytes of learned lessons injected into a request's context."
+          "description": "Maximum bytes of relevant skill bodies injected into a request's context."
         },
-        "codeforge.learning.skills.enabled": {
+        "codeforge.review.minTurns": {
+          "type": "number",
+          "default": 2,
+          "minimum": 0,
+          "maximum": 1000,
+          "scope": "resource",
+          "description": "Minimum user turns in a session before the background self-improvement review can run."
+        },
+        "codeforge.curator.enabled": {
           "type": "boolean",
           "default": true,
           "scope": "resource",
-          "description": "Allow CodeForge to propose reusable skills (.codeforge/skills) when it detects a repeated successful workflow."
+          "description": "Let the curator periodically consolidate and archive agent-created skills (.codeforge/skills). Never deletes — archives are recoverable; pinned skills are exempt."
         },
-        "codeforge.learning.skills.minRepeats": {
+        "codeforge.curator.intervalHours": {
           "type": "number",
-          "default": 3,
-          "minimum": 2,
-          "maximum": 50,
+          "default": 168,
+          "minimum": 1,
+          "maximum": 100000,
           "scope": "resource",
-          "description": "How many times a similar successful procedure must recur before CodeForge proposes a skill for it."
+          "description": "Minimum hours between automatic curator runs (default 1 week)."
         },
-        "codeforge.learning.agents.enabled": {
-          "type": "boolean",
-          "default": false,
+        "codeforge.curator.minIdleHours": {
+          "type": "number",
+          "default": 2,
+          "minimum": 0,
+          "maximum": 100000,
           "scope": "resource",
-          "description": "Allow CodeForge to propose specialized sub-agents (.codeforge/agents) when a kind of task recurs. Proposals are always review-only — they are never written without your approval, even in automatic autonomy."
+          "description": "Minimum idle time before an automatic curator run, when idleness is measured."
         },
-        "codeforge.learning.embeddings.enabled": {
-          "type": "boolean",
-          "default": false,
+        "codeforge.curator.staleAfterDays": {
+          "type": "number",
+          "default": 30,
+          "minimum": 1,
+          "maximum": 100000,
           "scope": "resource",
-          "description": "Use the configured OpenAI-compatible /embeddings endpoint to rank learned lessons by semantic similarity (opt-in; many local servers do not support embeddings)."
+          "description": "Days of inactivity before an agent-created skill is marked stale."
+        },
+        "codeforge.curator.archiveAfterDays": {
+          "type": "number",
+          "default": 90,
+          "minimum": 1,
+          "maximum": 100000,
+          "scope": "resource",
+          "description": "Days of inactivity before an agent-created skill is archived (recoverable)."
+        },
+        "codeforge.curator.backup.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "description": "Take a recoverable snapshot of the skill library before each curator run."
+        },
+        "codeforge.curator.backup.keep": {
+          "type": "number",
+          "default": 5,
+          "minimum": 1,
+          "maximum": 100,
+          "scope": "resource",
+          "description": "Number of curator backups to retain."
         }
       }
     },
@@ -508,13 +546,16 @@
     "compile:tests": "tsc -p ./tsconfig.test.json",
     "test": "npm run compile:tests && node --test out-test/test/unit/*.test.js out-test/test/integration/*.test.js",
     "vscode:test": "npm run compile && npm run compile:tests && node ./out-test/test/runTest.js",
-    "package": "npm run compile && vsce package --allow-missing-repository --no-dependencies"
+    "package": "npm run compile && vsce package --allow-missing-repository --no-dependencies",
+    "postcompile": "node scripts/copyHolographicWasm.js"
   },
   "devDependencies": {
     "@types/node": "^20.17.10",
+    "@types/sql.js": "^1.4.11",
     "@types/vscode": "^1.90.0",
     "@vscode/test-electron": "^2.4.1",
     "@vscode/vsce": "^2.15.0",
+    "sql.js": "^1.14.1",
     "typescript": "^5.7.2"
   }
 }

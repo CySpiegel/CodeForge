@@ -245,7 +245,6 @@ function createWorkerManager(
   return new WorkerManager({
     workspace: fakeWorkspace(),
     contextLimits: () => ({ maxFiles: 8, maxBytes: 32000 }),
-    memories: async () => [],
     mcpResources: () => [],
     createProvider: async () => provider,
     resolveModel: async () => "local-model",
@@ -354,16 +353,14 @@ function fakeWorkspace(): WorkspacePort {
   };
 }
 
-test("workers receive a ranked learned-lesson digest and relevant skill bodies in context", async () => {
+test("workers receive relevant skill bodies in context", async () => {
   const provider = new FakeProvider([
     "Scope: inspect\nResult: ok\nKey files: src/a.ts\nFiles changed: none\nIssues: none\nConfidence: high"
   ]);
   const manager = new WorkerManager({
     workspace: fakeWorkspace(),
     contextLimits: () => ({ maxFiles: 8, maxBytes: 32000 }),
-    memories: async () => [{ id: "p", text: "PLAIN-NOTE", createdAt: 1, scope: "workspace" }],
-    learnedDigest: async (_definition, prompt) => `Lessons CodeForge learned:\n- [fix] AVOID-DOUBLE-FREE relevant to ${prompt}`,
-    skillsDigest: async () => "Relevant learned skills:\n### add-a-tool\nEDIT-REGISTRY-THEN-PROTOCOL",
+    skillsDigest: async () => "Relevant skills:\n### add-a-tool\nEDIT-REGISTRY-THEN-PROTOCOL",
     mcpResources: () => [],
     createProvider: async () => provider,
     resolveModel: async () => "local-model",
@@ -381,9 +378,7 @@ test("workers receive a ranked learned-lesson digest and relevant skill bodies i
   await waitForWorker(manager, worker.id, "completed");
 
   const context = provider.requests[0].messages.map((message) => message.content).join("\n");
-  assert.match(context, /AVOID-DOUBLE-FREE/);
   assert.match(context, /EDIT-REGISTRY-THEN-PROTOCOL/);
-  assert.match(context, /PLAIN-NOTE/);
 });
 
 test("worker manager bounds concurrency to maxConcurrentWorkers", async () => {
@@ -409,7 +404,6 @@ test("worker manager bounds concurrency to maxConcurrentWorkers", async () => {
     workspace: fakeWorkspace(),
     contextLimits: () => ({ maxFiles: 8, maxBytes: 32000 }),
     maxConcurrentWorkers: () => 2,
-    memories: async () => [],
     mcpResources: () => [],
     createProvider: async () => provider,
     resolveModel: async () => "local-model",

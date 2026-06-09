@@ -198,7 +198,12 @@ export type AgentAction =
   | McpReadResourceAction
   | NotebookReadAction
   | NotebookEditCellAction
-  | MemoryWriteAction
+  | MemoryToolAction
+  | SkillManageAction
+  | SkillViewAction
+  | SkillsListAction
+  | FactStoreAction
+  | FactFeedbackAction
   | ProposePatchAction
   | WriteFileAction
   | EditFileAction
@@ -263,11 +268,59 @@ export interface WorkerOutputAction {
   readonly reason?: string;
 }
 
-export interface MemoryWriteAction {
-  readonly type: "memory_write";
-  readonly text: string;
-  readonly scope?: "workspace" | "user" | "agent";
-  readonly agent?: string;
+export interface MemoryToolAction {
+  readonly type: "memory";
+  readonly action: "add" | "replace" | "remove";
+  readonly target: "memory" | "user";
+  readonly content?: string;
+  readonly oldText?: string;
+  readonly reason?: string;
+}
+
+export interface SkillManageAction {
+  readonly type: "skill_manage";
+  readonly action: "create" | "patch" | "edit" | "delete" | "write_file" | "remove_file";
+  readonly name: string;
+  readonly content?: string;
+  readonly oldString?: string;
+  readonly newString?: string;
+  readonly replaceAll?: boolean;
+  readonly filePath?: string;
+  readonly fileContent?: string;
+  readonly absorbedInto?: string;
+  readonly reason?: string;
+}
+
+export interface SkillViewAction {
+  readonly type: "skill_view";
+  readonly name: string;
+  readonly filePath?: string;
+  readonly reason?: string;
+}
+
+export interface SkillsListAction {
+  readonly type: "skills_list";
+  readonly reason?: string;
+}
+
+export interface FactStoreAction {
+  readonly type: "fact_store";
+  readonly action: "save" | "search" | "probe" | "related" | "reason" | "contradict" | "delete" | "list";
+  readonly content?: string;
+  readonly category?: string;
+  readonly tags?: readonly string[];
+  readonly query?: string;
+  readonly entity?: string;
+  readonly entities?: readonly string[];
+  readonly id?: number;
+  readonly limit?: number;
+  readonly reason?: string;
+}
+
+export interface FactFeedbackAction {
+  readonly type: "fact_feedback";
+  readonly id: number;
+  readonly helpful: boolean;
   readonly reason?: string;
 }
 

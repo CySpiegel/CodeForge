@@ -1,10 +1,11 @@
 import { AgentController, AgentUiEvent } from "../../src/agent/agentController";
-import { CodeForgeConfigService } from "../../src/adapters/vscodeConfig";
+import { CodeForgeConfigService, MemorySettings } from "../../src/adapters/vscodeConfig";
 import { DiffService } from "../../src/adapters/diffService";
 import { TerminalRunner } from "../../src/adapters/terminalRunner";
 import { CodeIntelAction, CodeIntelPort } from "../../src/core/codeIntel";
-import { LearningSettings } from "../../src/core/learning";
-import { MemoryEntry, MemoryListFilter, MemoryStore, MemoryWriteOptions } from "../../src/core/memory";
+import { memoryMatchesFilter, MemoryEntry, MemoryListFilter, MemoryStore, MemoryWriteOptions } from "../../src/core/memory";
+import { SkillIo } from "../../src/core/skillIo";
+import { MemoryProvider } from "../../src/core/memoryProvider";
 import { NotebookAction, NotebookPort } from "../../src/core/notebooks";
 import { applyFilePatch, parseUnifiedDiff, targetPath } from "../../src/core/unifiedDiff";
 import {
@@ -334,8 +335,10 @@ export class FakeMemoryStore implements MemoryStore {
     return true;
   }
 
-  async clear(): Promise<void> {
-    this.memories.splice(0, this.memories.length);
+  async clear(filter?: MemoryListFilter): Promise<void> {
+    // Mirror VsCodeMemoryStore: a scoped clear only removes matching entries.
+    const kept = filter ? this.memories.filter((memory) => !memoryMatchesFilter(memory, filter)) : [];
+    this.memories.splice(0, this.memories.length, ...kept);
   }
 }
 
@@ -360,11 +363,16 @@ export interface ControllerHarnessOptions {
   readonly maxInvalidToolCallRetries?: number;
   readonly streamCompletionGraceSeconds?: number;
   readonly maxOutputTokensPreference?: number;
-  readonly learningSettings?: Partial<LearningSettings>;
+  readonly memorySettings?: Partial<MemorySettings>;
+  // Live-test hooks: drive the controller with a real LLM provider and a (fake) skill store so the
+  // full memory/skills/review loop runs end-to-end against a real endpoint.
+  readonly liveProvider?: LlmProvider;
+  readonly skillIo?: SkillIo;
+  readonly externalMemoryProvider?: MemoryProvider;
 }
 
 export function createControllerHarness(options: ControllerHarnessOptions): ControllerHarness {
-  const provider = new ScriptedLlmProvider(options.responses);
+  const provider = (options.liveProvider as ScriptedLlmProvider | undefined) ?? new ScriptedLlmProvider(options.responses);
   const workspace = new FakeWorkspace(options.files);
   const diff = new FakeDiffService(workspace);
   const terminal = new FakeTerminalRunner();
@@ -373,18 +381,18 @@ export function createControllerHarness(options: ControllerHarnessOptions): Cont
   const memory = new FakeMemoryStore();
   const permissionPolicy: PermissionPolicy = { mode: options.permissionMode ?? "smart", rules: [] };
   const contextLimits = options.contextLimits ?? { maxFiles: 12, maxBytes: 64000 };
-  const learningSettings: LearningSettings = {
-    enabled: false,
-    autonomy: "review",
-    scope: "split",
-    auditCadence: 15,
-    maxLessons: 60,
-    maxLessonBytes: 24000,
+  const memorySettings: MemorySettings = {
+    enabled: true,
+    memoryCharLimit: 2200,
+    userCharLimit: 1375,
+    // Background reviews are off by default in the harness so they don't consume scripted responses;
+    // tests that exercise the review opt in by overriding the nudge intervals.
+    nudgeInterval: 0,
+    skillNudgeInterval: 0,
     skillsEnabled: true,
-    skillsMinRepeats: 3,
-    agentsEnabled: false,
-    embeddingsEnabled: false,
-    ...options.learningSettings
+    skillsDigestBytes: 24000,
+    reviewMinTurns: 2,
+    ...options.memorySettings
   };
   const config = {
     getActiveProfile: async () => fakeProfile,
@@ -394,7 +402,8 @@ export function createControllerHarness(options: ControllerHarnessOptions): Cont
     getMcpServers: () => options.mcpServers ?? [],
     getConfiguredModel: () => fakeProfile.defaultModel ?? "",
     getContextLimits: () => contextLimits,
-    getLearningSettings: () => learningSettings,
+    getMemorySettings: () => memorySettings,
+    getCuratorSettings: () => ({ enabled: false, intervalHours: 168, minIdleHours: 2, staleAfterDays: 30, archiveAfterDays: 90, backupEnabled: true, backupKeep: 5 }),
     getWorkersMaxConcurrent: () => 3,
     getCommandTimeoutSeconds: () => 10,
     getModelIdleTimeoutSeconds: () => 300,
@@ -415,7 +424,10 @@ export function createControllerHarness(options: ControllerHarnessOptions): Cont
     memory,
     codeIntel,
     notebooks,
-    () => provider
+    () => provider,
+    undefined,
+    options.skillIo,
+    options.externalMemoryProvider
   );
   controller.onEvent((event) => events.push(event));
   return { controller, provider, workspace, diff, terminal, codeIntel, memory, events };

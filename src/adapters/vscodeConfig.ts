@@ -1,11 +1,22 @@
 import * as vscode from "vscode";
 import { allowlistEntryForUrl, assertUrlAllowed, isUrlAllowed } from "../core/networkPolicy";
 import { normalizePermissionPolicy, parsePermissionRules } from "../core/permissions";
-import { LearningSettings, normalizeLearningAutonomy, normalizeLearningScopeSetting } from "../core/learning";
+import { CuratorSettings } from "../core/curator";
 import { normalizeSettingsPermissionMode } from "../core/settingsMigration";
 import { AgentMode, ContextLimits, McpServerConfig, NetworkPolicy, PermissionMode, PermissionPolicy, PermissionRule, ProviderProfile } from "../core/types";
 
 const sectionName = "codeforge";
+
+export interface MemorySettings {
+  readonly enabled: boolean;
+  readonly memoryCharLimit: number;
+  readonly userCharLimit: number;
+  readonly nudgeInterval: number;
+  readonly skillNudgeInterval: number;
+  readonly skillsEnabled: boolean;
+  readonly skillsDigestBytes: number;
+  readonly reviewMinTurns: number;
+}
 
 export class CodeForgeConfigService {
   private readonly secrets: vscode.SecretStorage;
@@ -37,18 +48,33 @@ export class CodeForgeConfigService {
     };
   }
 
-  getLearningSettings(): LearningSettings {
+  getMemorySettings(): MemorySettings {
     return {
-      enabled: this.config().get<boolean>("learning.enabled", true),
-      autonomy: normalizeLearningAutonomy(this.config().get<unknown>("learning.autonomy", "hybrid")),
-      scope: normalizeLearningScopeSetting(this.config().get<unknown>("learning.scope", "split")),
-      auditCadence: clampNumber(this.config().get<number>("learning.auditCadence", 15), 1, 1000, 15),
-      maxLessons: clampNumber(this.config().get<number>("learning.maxLessons", 60), 1, 1000, 60),
-      maxLessonBytes: clampNumber(this.config().get<number>("learning.maxLessonBytes", 24000), 1000, 500000, 24000),
-      skillsEnabled: this.config().get<boolean>("learning.skills.enabled", true),
-      skillsMinRepeats: clampNumber(this.config().get<number>("learning.skills.minRepeats", 3), 2, 50, 3),
-      agentsEnabled: this.config().get<boolean>("learning.agents.enabled", false),
-      embeddingsEnabled: this.config().get<boolean>("learning.embeddings.enabled", false)
+      enabled: this.config().get<boolean>("memory.enabled", true),
+      memoryCharLimit: clampNumber(this.config().get<number>("memory.charLimit", 2200), 200, 100000, 2200),
+      userCharLimit: clampNumber(this.config().get<number>("memory.userCharLimit", 1375), 200, 100000, 1375),
+      nudgeInterval: clampNumber(this.config().get<number>("memory.nudgeInterval", 10), 0, 1000, 10),
+      skillNudgeInterval: clampNumber(this.config().get<number>("skills.creationNudgeInterval", 10), 0, 1000, 10),
+      skillsEnabled: this.config().get<boolean>("skills.enabled", true),
+      skillsDigestBytes: clampNumber(this.config().get<number>("skills.digestBytes", 24000), 1000, 500000, 24000),
+      reviewMinTurns: clampNumber(this.config().get<number>("review.minTurns", 2), 0, 1000, 2)
+    };
+  }
+
+  getMemoryProviderName(): string {
+    const value = this.config().get<string>("memory.provider", "none");
+    return typeof value === "string" && value.trim() ? value.trim() : "none";
+  }
+
+  getCuratorSettings(): CuratorSettings {
+    return {
+      enabled: this.config().get<boolean>("curator.enabled", true),
+      intervalHours: clampNumber(this.config().get<number>("curator.intervalHours", 168), 1, 100000, 168),
+      minIdleHours: clampNumber(this.config().get<number>("curator.minIdleHours", 2), 0, 100000, 2),
+      staleAfterDays: clampNumber(this.config().get<number>("curator.staleAfterDays", 30), 1, 100000, 30),
+      archiveAfterDays: clampNumber(this.config().get<number>("curator.archiveAfterDays", 90), 1, 100000, 90),
+      backupEnabled: this.config().get<boolean>("curator.backup.enabled", true),
+      backupKeep: clampNumber(this.config().get<number>("curator.backup.keep", 5), 1, 100, 5)
     };
   }
 

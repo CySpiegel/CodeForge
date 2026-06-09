@@ -78,7 +78,7 @@ test("full auto mode still asks for ask_user_question by design", () => {
   };
   assert.equal(evaluateActionPermission(question, policy).behavior, "ask");
   // Every genuine side effect remains auto-allowed in Full Auto.
-  assert.equal(evaluateActionPermission({ type: "memory_write", text: "fact" }, policy).behavior, "allow");
+  assert.equal(evaluateActionPermission({ type: "memory", action: "add", target: "memory", content: "fact" }, policy).behavior, "allow");
   assert.equal(evaluateActionPermission({ type: "spawn_agent", prompt: "explore" }, policy).behavior, "allow");
   assert.equal(evaluateActionPermission({ type: "edit_file", path: "src/a.ts", oldText: "a", newText: "b" }, policy).behavior, "allow");
 });
@@ -158,7 +158,7 @@ test("permission mode matrix covers each side-effect family", () => {
     },
     {
       name: "memory write",
-      action: { type: "memory_write", text: "Prefer local models." },
+      action: { type: "memory", action: "add", target: "memory", content: "Prefer local models." },
       manual: "ask",
       smart: "ask",
       fullAuto: "allow"

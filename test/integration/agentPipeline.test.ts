@@ -1,8 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { AgentUiEvent } from "../../src/agent/agentController";
-import { isLearnedEntry, parseLesson } from "../../src/core/learning";
-import { loadLocalAgents, loadLocalSkills } from "../../src/core/localExtensions";
 import { createControllerHarness, toolCall, waitForEvent } from "../harness/agentControllerHarness";
 
 test("/doctor runs diagnostics without consuming a chat completion", async () => {
@@ -992,262 +990,6 @@ function jsonRpc(id: string, result: unknown): Response {
   });
 }
 
-test("Learning extracts a lesson from a finished task and injects it on the next task", async () => {
-  const harness = createControllerHarness({
-    mode: "agent",
-    permissionMode: "fullAuto",
-    learningSettings: { enabled: true, autonomy: "auto" },
-    files: { "README.md": "# CodeForge\n" },
-    responses: [
-      { toolCalls: [toolCall("write_file", { path: "NEW.md", content: "hi" })] },
-      { content: "Done." },
-      { content: "[{\"kind\":\"fact\",\"text\":\"CodeForge stores sessions as JSONL\",\"paths\":[\"NEW.md\"]}]" },
-      { content: "Acknowledged." }
-    ]
-  });
-
-  await harness.controller.sendPrompt("Create NEW.md.");
-  await waitForEvent(harness.events, (event) => event.type === "learningProposed");
-
-  const learned = harness.memory.memories.filter((memory) => isLearnedEntry(memory));
-  assert.equal(learned.length, 1);
-  const lesson = parseLesson(learned[0]);
-  assert.ok(lesson);
-  assert.equal(lesson.kind, "fact");
-  assert.equal(lesson.status, "accepted");
-  assert.equal(lesson.outcome, "success");
-
-  await harness.controller.sendPrompt("Do the next thing.");
-  const injected = harness.provider.requests.some((request) =>
-    request.messages.some((message) => /CodeForge stores sessions as JSONL/.test(message.content))
-  );
-  assert.equal(injected, true);
-});
-
-test("Learning turns a failed task into a corrective lesson", async () => {
-  const harness = createControllerHarness({
-    mode: "agent",
-    permissionMode: "fullAuto",
-    learningSettings: { enabled: true, autonomy: "auto" },
-    files: { "BAD.md": "x\n" },
-    responses: [
-      { toolCalls: [toolCall("write_file", { path: "BAD.md", content: "y" })] },
-      { content: "Done." },
-      { content: "[{\"kind\":\"fix\",\"text\":\"Validate BAD.md before writing; it lints with an error\",\"paths\":[\"BAD.md\"]}]" }
-    ]
-  });
-  harness.workspace.addDiagnostic("BAD.md", "Unexpected token", "error");
-
-  await harness.controller.sendPrompt("Edit BAD.md.");
-  await waitForEvent(harness.events, (event) => event.type === "learningProposed");
-
-  const lesson = parseLesson(harness.memory.memories.find((memory) => isLearnedEntry(memory))!);
-  assert.ok(lesson);
-  assert.equal(lesson.outcome, "failure");
-
-  const extractionRequest = harness.provider.requests.find((request) =>
-    request.messages.some((message) => /Task transcript/.test(message.content))
-  );
-  assert.ok(extractionRequest);
-  assert.ok(extractionRequest.messages.some((message) => /CORRECTIVE/.test(message.content)));
-});
-
-test("Review autonomy keeps lessons proposed and out of injected context", async () => {
-  const harness = createControllerHarness({
-    mode: "agent",
-    permissionMode: "fullAuto",
-    learningSettings: { enabled: true, autonomy: "review" },
-    files: { "README.md": "# CodeForge\n" },
-    responses: [
-      { toolCalls: [toolCall("write_file", { path: "N.md", content: "hi" })] },
-      { content: "Done." },
-      { content: "[{\"kind\":\"fact\",\"text\":\"SECRET-LESSON-XYZ\",\"paths\":[]}]" },
-      { content: "Next." }
-    ]
-  });
-
-  await harness.controller.sendPrompt("Create N.md.");
-  await waitForEvent(harness.events, (event) => event.type === "learningProposed");
-  const lesson = parseLesson(harness.memory.memories.find((memory) => isLearnedEntry(memory))!);
-  assert.equal(lesson?.status, "proposed");
-
-  await harness.controller.sendPrompt("Again.");
-  const injected = harness.provider.requests.some((request) =>
-    request.messages.some((message) => /SECRET-LESSON-XYZ/.test(message.content))
-  );
-  assert.equal(injected, false);
-});
-
-test("Learning proposes and writes a reusable skill after a repeated procedure (auto)", async () => {
-  const harness = createControllerHarness({
-    mode: "agent",
-    permissionMode: "fullAuto",
-    learningSettings: { enabled: true, autonomy: "auto", skillsEnabled: true, skillsMinRepeats: 2 },
-    files: { "src/core/toolRegistry.ts": "export const tools = [];\n" },
-    responses: [
-      { toolCalls: [toolCall("write_file", { path: "src/core/toolRegistry.ts", content: "a" })] },
-      { content: "done" },
-      { content: "[{\"kind\":\"procedure\",\"text\":\"To add a tool edit toolRegistry then actionProtocol\",\"paths\":[\"src/core/toolRegistry.ts\"]}]" },
-      { toolCalls: [toolCall("write_file", { path: "src/core/toolRegistry.ts", content: "b" })] },
-      { content: "done" },
-      { content: "[{\"kind\":\"procedure\",\"text\":\"Adding another tool also edits toolRegistry and actionProtocol\",\"paths\":[\"src/core/toolRegistry.ts\"]}]" },
-      { content: "{\"name\":\"add-a-tool\",\"description\":\"How to add a tool\",\"body\":\"1. Edit toolRegistry\\n2. Edit actionProtocol\"}" }
-    ]
-  });
-
-  await harness.controller.sendPrompt("Add a tool.");
-  await waitForEvent(harness.events, (event) => event.type === "learningProposed");
-
-  await harness.controller.sendPrompt("Add another tool.");
-  await waitForEvent(harness.events, (event) => event.type === "skillProposed" && event.skill.status === "written");
-
-  const skillPath = ".codeforge/skills/add-a-tool/SKILL.md";
-  assert.equal(harness.workspace.files.has(skillPath), true);
-  const skills = await loadLocalSkills(harness.workspace);
-  const learned = skills.find((skill) => skill.name === "add-a-tool");
-  assert.ok(learned);
-  assert.match(learned.body, /Edit toolRegistry/);
-});
-
-test("Review autonomy proposes a skill for approval instead of writing it", async () => {
-  const harness = createControllerHarness({
-    mode: "agent",
-    permissionMode: "fullAuto",
-    learningSettings: { enabled: true, autonomy: "review", skillsEnabled: true, skillsMinRepeats: 2 },
-    files: { "src/core/toolRegistry.ts": "export const tools = [];\n" },
-    responses: [
-      { toolCalls: [toolCall("write_file", { path: "src/core/toolRegistry.ts", content: "a" })] },
-      { content: "done" },
-      { content: "[{\"kind\":\"procedure\",\"text\":\"To add a tool edit toolRegistry then actionProtocol\",\"paths\":[\"src/core/toolRegistry.ts\"]}]" },
-      { toolCalls: [toolCall("write_file", { path: "src/core/toolRegistry.ts", content: "b" })] },
-      { content: "done" },
-      { content: "[{\"kind\":\"procedure\",\"text\":\"Adding another tool also edits toolRegistry and actionProtocol\",\"paths\":[\"src/core/toolRegistry.ts\"]}]" },
-      { content: "{\"name\":\"add-a-tool\",\"description\":\"How to add a tool\",\"body\":\"1. Edit toolRegistry\\n2. Edit actionProtocol\"}" }
-    ]
-  });
-
-  await harness.controller.sendPrompt("Add a tool.");
-  await waitForEvent(harness.events, (event) => event.type === "learningProposed");
-  await harness.controller.sendPrompt("Add another tool.");
-  const proposed = await waitForEventValue(harness.events, (event) => event.type === "skillProposed" ? event : undefined);
-  assert.equal(proposed.skill.status, "proposed");
-  assert.equal(harness.workspace.files.has(".codeforge/skills/add-a-tool/SKILL.md"), false);
-  assert.equal(harness.controller.listPendingSkills().length, 1);
-
-  await harness.controller.acceptSkill(proposed.skill.id);
-  assert.equal(harness.workspace.files.has(".codeforge/skills/add-a-tool/SKILL.md"), true);
-  assert.equal(harness.controller.listPendingSkills().length, 0);
-});
-
-async function waitForEventValue<T>(events: readonly AgentUiEvent[], pick: (event: AgentUiEvent) => T | undefined): Promise<T> {
-  const deadline = Date.now() + 1000;
-  while (Date.now() < deadline) {
-    for (const event of events) {
-      const value = pick(event);
-      if (value !== undefined) {
-        return value;
-      }
-    }
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error("Timed out waiting for event value.");
-}
-
-test("Periodic self-audit prunes the lesson library to the configured cap", async () => {
-  const harness = createControllerHarness({
-    mode: "agent",
-    permissionMode: "fullAuto",
-    learningSettings: { enabled: true, autonomy: "auto", auditCadence: 1, maxLessons: 1, skillsEnabled: false },
-    files: { "README.md": "# CodeForge\n" },
-    responses: [
-      { toolCalls: [toolCall("write_file", { path: "A.md", content: "a" })] },
-      { content: "done" },
-      { content: "[{\"kind\":\"fact\",\"text\":\"lesson one\",\"paths\":[]}]" },
-      { content: "{\"drop\":[],\"rewrite\":[]}" },
-      { toolCalls: [toolCall("write_file", { path: "B.md", content: "b" })] },
-      { content: "done" },
-      { content: "[{\"kind\":\"fact\",\"text\":\"lesson two\",\"paths\":[]}]" },
-      { content: "{\"drop\":[],\"rewrite\":[]}" }
-    ]
-  });
-
-  await harness.controller.sendPrompt("First task.");
-  await waitForEvent(harness.events, (event) => event.type === "learningProposed");
-  await harness.controller.sendPrompt("Second task.");
-  await waitForEvent(harness.events, (event) => event.type === "inspector"
-    && event.inspector.entries.some((entry) => /Audited learned lessons/.test(entry.summary) && /dropped 1/.test(entry.summary)));
-
-  const learned = harness.memory.memories.filter((memory) => isLearnedEntry(memory)).map((memory) => parseLesson(memory)!);
-  assert.equal(learned.length, 1);
-  assert.match(learned[0].body, /lesson two/);
-
-  const auditRequested = harness.provider.requests.some((request) =>
-    request.messages.some((message) => /You audit an AI coding agent/.test(message.content))
-  );
-  assert.equal(auditRequested, true);
-});
-
-test("Learned panel accepts and rejects proposed lessons, gating what gets injected", async () => {
-  const harness = createControllerHarness({
-    mode: "agent",
-    permissionMode: "fullAuto",
-    learningSettings: { enabled: true, autonomy: "review", skillsEnabled: false },
-    files: { "README.md": "# CodeForge\n" },
-    responses: [
-      { toolCalls: [toolCall("write_file", { path: "N.md", content: "hi" })] },
-      { content: "done" },
-      { content: "[{\"kind\":\"fact\",\"text\":\"ACCEPT-ME\",\"paths\":[]},{\"kind\":\"fact\",\"text\":\"REJECT-ME\",\"paths\":[]}]" },
-      { content: "next" }
-    ]
-  });
-
-  await harness.controller.sendPrompt("Task.");
-  await waitForEvent(harness.events, (event) => event.type === "learningProposed");
-
-  const proposed = harness.memory.memories.filter((memory) => isLearnedEntry(memory)).map((memory) => parseLesson(memory)!);
-  assert.equal(proposed.length, 2);
-  assert.ok(proposed.every((lesson) => lesson.status === "proposed"));
-
-  await harness.controller.acceptLesson(proposed.find((lesson) => lesson.body === "ACCEPT-ME")!.id);
-  await harness.controller.rejectLesson(proposed.find((lesson) => lesson.body === "REJECT-ME")!.id);
-
-  const after = harness.memory.memories.filter((memory) => isLearnedEntry(memory)).map((memory) => parseLesson(memory)!);
-  assert.equal(after.length, 1);
-  assert.equal(after[0].body, "ACCEPT-ME");
-  assert.equal(after[0].status, "accepted");
-
-  await harness.controller.sendPrompt("Again.");
-  assert.equal(harness.provider.requests.some((request) => request.messages.some((message) => /ACCEPT-ME/.test(message.content))), true);
-  assert.equal(harness.provider.requests.some((request) => request.messages.some((message) => /REJECT-ME/.test(message.content))), false);
-});
-
-test("Learning surfaces inline chat messages when it learns and when it applies a lesson", async () => {
-  const harness = createControllerHarness({
-    mode: "agent",
-    permissionMode: "fullAuto",
-    learningSettings: { enabled: true, autonomy: "auto", skillsEnabled: false },
-    files: { "README.md": "# CodeForge\n" },
-    responses: [
-      { toolCalls: [toolCall("write_file", { path: "N.md", content: "hi" })] },
-      { content: "done" },
-      { content: "[{\"kind\":\"fact\",\"text\":\"REMEMBER-THIS\",\"paths\":[]}]" },
-      { content: "next" }
-    ]
-  });
-
-  await harness.controller.sendPrompt("Task.");
-  // "🧠 Learned" shows in the conversation, not just the inspector.
-  const learned = await waitForEventValue(harness.events, (event) =>
-    event.type === "message" && event.role === "system" && /Learned 1 lesson/.test(event.text) ? event : undefined);
-  assert.match(learned.text, /REMEMBER-THIS/);
-
-  const beforeApplied = harness.events.length;
-  await harness.controller.sendPrompt("Again.");
-  // "📎 Applied" provenance shows on the next prompt that injects the accepted lesson.
-  assert.ok(harness.events.slice(beforeApplied).some((event) =>
-    event.type === "message" && event.role === "system" && /Applied 1 learned lesson/.test(event.text)));
-});
-
 test("a .codeforge/soul.md persona is injected into the system prompt", async () => {
   const harness = createControllerHarness({
     mode: "agent",
@@ -1263,64 +1005,26 @@ test("a .codeforge/soul.md persona is injected into the system prompt", async ()
   assert.match(system.content, /You are Forge: terse, dry, and bullet-pointed\./);
 });
 
-test("Learning proposes a sub-agent for a recurring task type (review-only) and accept writes a loadable AGENT.md", async () => {
+test("background self-improvement review saves a memory on the turn cadence", async () => {
   const harness = createControllerHarness({
     mode: "agent",
-    permissionMode: "fullAuto",
-    learningSettings: { enabled: true, autonomy: "auto", skillsEnabled: false, agentsEnabled: true, skillsMinRepeats: 2 },
-    files: { "src/auth.ts": "export const auth = 1;\n" },
+    files: {},
+    memorySettings: { nudgeInterval: 1, skillNudgeInterval: 0, reviewMinTurns: 1 },
     responses: [
-      { toolCalls: [toolCall("write_file", { path: "src/auth.ts", content: "a" })] },
-      { content: "done" },
-      { content: "[{\"kind\":\"fix\",\"text\":\"Auth tokens expire; refresh before use\",\"paths\":[\"src/auth.ts\"]}]" },
-      { toolCalls: [toolCall("write_file", { path: "src/auth.ts", content: "b" })] },
-      { content: "done" },
-      { content: "[{\"kind\":\"fix\",\"text\":\"Auth refresh must handle 401 retries\",\"paths\":[\"src/auth.ts\"]}]" },
-      { content: "{\"name\":\"auth-fixer\",\"label\":\"Auth Fixer\",\"description\":\"Fix auth token issues\",\"tools\":[\"read_file\",\"edit_file\"],\"body\":\"Diagnose and fix auth token problems.\"}" }
+      { content: "Understood." },
+      { toolCalls: [toolCall("memory", { action: "add", target: "user", content: "User prefers terse, bulleted answers." })] },
+      { content: "Nothing more to save." }
     ]
   });
 
-  await harness.controller.sendPrompt("Fix auth.");
-  await waitForEvent(harness.events, (event) => event.type === "learningProposed");
-  await harness.controller.sendPrompt("Fix auth again.");
-  const proposed = await waitForEventValue(harness.events, (event) => event.type === "agentProposed" ? event : undefined);
+  await harness.controller.sendPrompt("Be terse and use bullets from now on.");
+  await waitForEvent(
+    harness.events,
+    (event) => event.type === "message" && event.role === "system" && /Self-improvement review/.test(event.text)
+  );
 
-  assert.equal(proposed.agent.status, "proposed");
-  assert.deepEqual(proposed.agent.tools, ["read_file", "edit_file"]);
-  // review-only: nothing written until accepted, even though autonomy is "auto"
-  assert.equal(harness.workspace.files.has(".codeforge/agents/auth-fixer/AGENT.md"), false);
-  assert.equal(harness.controller.listPendingAgents().length, 1);
-
-  await harness.controller.acceptAgent(proposed.agent.id);
-  assert.equal(harness.workspace.files.has(".codeforge/agents/auth-fixer/AGENT.md"), true);
-  const agents = await loadLocalAgents(harness.workspace);
-  const learnedAgent = agents.find((agent) => agent.name === "auth-fixer");
-  assert.ok(learnedAgent);
-  assert.deepEqual(learnedAgent.tools, ["read_file", "edit_file"]);
-});
-
-test("Re-extracting an identical lesson does not duplicate it in the store", async () => {
-  const harness = createControllerHarness({
-    mode: "agent",
-    permissionMode: "fullAuto",
-    learningSettings: { enabled: true, autonomy: "auto", skillsEnabled: false },
-    files: { "README.md": "# CodeForge\n" },
-    responses: [
-      { toolCalls: [toolCall("write_file", { path: "A.md", content: "a" })] },
-      { content: "done" },
-      { content: "[{\"kind\":\"fact\",\"text\":\"DUP-ME\",\"paths\":[]}]" },
-      { toolCalls: [toolCall("write_file", { path: "B.md", content: "b" })] },
-      { content: "done" },
-      { content: "[{\"kind\":\"fact\",\"text\":\"DUP-ME\",\"paths\":[]}]" }
-    ]
-  });
-
-  await harness.controller.sendPrompt("First.");
-  await waitForEvent(harness.events, (event) => event.type === "learningProposed");
-  await harness.controller.sendPrompt("Second.");
-  // give the second learning pass time to run
-  await new Promise((resolve) => setTimeout(resolve, 60));
-
-  const learned = harness.memory.memories.filter((memory) => isLearnedEntry(memory)).map((memory) => parseLesson(memory)!);
-  assert.equal(learned.filter((lesson) => lesson.body === "DUP-ME").length, 1);
+  assert.ok(
+    harness.memory.memories.some((memory) => memory.scope === "user" && /terse, bulleted/.test(memory.text)),
+    "the review should persist a user-profile memory"
+  );
 });

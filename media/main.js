@@ -27,9 +27,6 @@
     addMemory: document.getElementById("addMemory"),
     clearMemories: document.getElementById("clearMemories"),
     memoryList: document.getElementById("memoryList"),
-    learnedList: document.getElementById("learnedList"),
-    learnedSkills: document.getElementById("learnedSkills"),
-    learnedAgents: document.getElementById("learnedAgents"),
     endpointPickerButton: document.getElementById("endpointPickerButton"),
     endpointPickerMenu: document.getElementById("endpointPickerMenu"),
     endpointPickerLabel: document.getElementById("endpointPickerLabel"),
@@ -98,6 +95,7 @@
   let currentRunStatusBusy = false;
   const builtInSlashCommands = [
     { name: "compact", description: "Compact the current session context", argumentHint: "[focus]" },
+    { name: "curator", description: "Maintain the skill library", argumentHint: "[status|run|pause|resume|pin|unpin|archive|restore|backup|rollback]" },
     { name: "context", description: "Show context usage and attached local context" },
     { name: "doctor", description: "Check endpoint, model, workspace, permissions, and MCP status" },
     { name: "index", description: "Build and show the offline workspace index" },
@@ -534,39 +532,6 @@
       } else {
         setRunStatus("Idle");
       }
-    } else if (message.type === "learningProposed" && message.lesson) {
-      state = state || {};
-      const lessons = Array.isArray(state.learnedLessons) ? state.learnedLessons.slice() : [];
-      const idx = lessons.findIndex((lesson) => lesson.id === message.lesson.id);
-      if (idx >= 0) {
-        lessons[idx] = message.lesson;
-      } else {
-        lessons.unshift(message.lesson);
-      }
-      state.learnedLessons = lessons;
-      renderLearned();
-    } else if (message.type === "skillProposed" && message.skill) {
-      state = state || {};
-      const skills = Array.isArray(state.pendingSkills) ? state.pendingSkills.slice() : [];
-      const idx = skills.findIndex((skill) => skill.id === message.skill.id);
-      if (idx >= 0) {
-        skills[idx] = message.skill;
-      } else {
-        skills.unshift(message.skill);
-      }
-      state.pendingSkills = skills;
-      renderLearned();
-    } else if (message.type === "agentProposed" && message.agent) {
-      state = state || {};
-      const agents = Array.isArray(state.pendingAgents) ? state.pendingAgents.slice() : [];
-      const idx = agents.findIndex((agent) => agent.id === message.agent.id);
-      if (idx >= 0) {
-        agents[idx] = message.agent;
-      } else {
-        agents.unshift(message.agent);
-      }
-      state.pendingAgents = agents;
-      renderLearned();
     }
   });
 
@@ -584,7 +549,6 @@
     renderWorkers(state.workers || []);
     renderActiveContext();
     renderMemoryList();
-    renderLearned();
     renderInspector(state.inspector);
     renderContextUsage(state.contextUsage);
     if (isSlashCommandMenuOpen()) {
@@ -796,162 +760,6 @@
       actions.append(edit, remove);
       row.append(meta, actions);
       elements.memoryList.append(row);
-    }
-  }
-
-  function renderLearned() {
-    renderLearnedAgents();
-    renderLearnedSkills();
-    updateLearnedTabBadge();
-    if (!elements.learnedList) {
-      return;
-    }
-    const lessons = Array.isArray(state?.learnedLessons) ? state.learnedLessons : [];
-    elements.learnedList.replaceChildren();
-    if (lessons.length === 0) {
-      const empty = document.createElement("div");
-      empty.className = "memory-empty";
-      empty.textContent = "No lessons learned yet.";
-      elements.learnedList.append(empty);
-      return;
-    }
-    for (const lesson of lessons) {
-      const row = document.createElement("div");
-      row.className = "memory-row";
-      const meta = document.createElement("div");
-      meta.className = "memory-meta";
-      const title = document.createElement("div");
-      title.className = "memory-title";
-      const files = Array.isArray(lesson.paths) && lesson.paths.length ? ` · ${lesson.paths.join(", ")}` : "";
-      title.textContent = `[${lesson.kind}] ${lesson.status} · ${lesson.outcome} · ${lesson.scope}${files}`;
-      const text = document.createElement("div");
-      text.className = "memory-text";
-      text.textContent = lesson.body || "";
-      meta.append(title, text);
-      const actions = document.createElement("div");
-      actions.className = "memory-row-actions";
-      if (lesson.status === "proposed") {
-        const accept = document.createElement("button");
-        accept.type = "button";
-        accept.textContent = "Accept";
-        accept.addEventListener("click", () => {
-          vscode.postMessage({ type: "acceptLesson", id: lesson.id });
-          lesson.status = "accepted";
-          renderLearned();
-        });
-        actions.append(accept);
-      }
-      const reject = document.createElement("button");
-      reject.type = "button";
-      reject.className = "secondary";
-      reject.textContent = "Reject";
-      reject.addEventListener("click", () => {
-        vscode.postMessage({ type: "rejectLesson", id: lesson.id });
-        state.learnedLessons = (Array.isArray(state.learnedLessons) ? state.learnedLessons : []).filter((item) => item.id !== lesson.id);
-        renderLearned();
-      });
-      actions.append(reject);
-      row.append(meta, actions);
-      elements.learnedList.append(row);
-    }
-  }
-
-  function updateLearnedTabBadge() {
-    const tab = document.getElementById("settingsTabLearned");
-    if (!tab) {
-      return;
-    }
-    const pendingLessons = (Array.isArray(state?.learnedLessons) ? state.learnedLessons : []).filter((lesson) => lesson.status === "proposed").length;
-    const pendingSkills = (Array.isArray(state?.pendingSkills) ? state.pendingSkills : []).filter((skill) => skill.status === "proposed").length;
-    const pendingAgents = (Array.isArray(state?.pendingAgents) ? state.pendingAgents : []).filter((agent) => agent.status === "proposed").length;
-    const pending = pendingLessons + pendingSkills + pendingAgents;
-    tab.textContent = pending > 0 ? `Learned (${pending})` : "Learned";
-  }
-
-  function renderLearnedAgents() {
-    if (!elements.learnedAgents) {
-      return;
-    }
-    const agents = (Array.isArray(state?.pendingAgents) ? state.pendingAgents : []).filter((agent) => agent.status === "proposed");
-    elements.learnedAgents.replaceChildren();
-    for (const agent of agents) {
-      const row = document.createElement("div");
-      row.className = "memory-row";
-      const meta = document.createElement("div");
-      meta.className = "memory-meta";
-      const title = document.createElement("div");
-      title.className = "memory-title";
-      title.textContent = `Proposed sub-agent: ${agent.name}`;
-      const text = document.createElement("div");
-      text.className = "memory-text";
-      const tools = Array.isArray(agent.tools) && agent.tools.length ? ` · tools: ${agent.tools.join(", ")}` : "";
-      text.textContent = `${agent.description || ""} (${agent.path}${tools})`;
-      meta.append(title, text);
-      const accept = document.createElement("button");
-      accept.type = "button";
-      accept.textContent = "Create agent";
-      accept.addEventListener("click", () => {
-        vscode.postMessage({ type: "acceptAgent", id: agent.id });
-        state.pendingAgents = (Array.isArray(state.pendingAgents) ? state.pendingAgents : []).filter((item) => item.id !== agent.id);
-        renderLearned();
-      });
-      const reject = document.createElement("button");
-      reject.type = "button";
-      reject.className = "secondary";
-      reject.textContent = "Reject";
-      reject.addEventListener("click", () => {
-        vscode.postMessage({ type: "rejectAgent", id: agent.id });
-        state.pendingAgents = (Array.isArray(state.pendingAgents) ? state.pendingAgents : []).filter((item) => item.id !== agent.id);
-        renderLearned();
-      });
-      const actions = document.createElement("div");
-      actions.className = "memory-row-actions";
-      actions.append(accept, reject);
-      row.append(meta, actions);
-      elements.learnedAgents.append(row);
-    }
-  }
-
-  function renderLearnedSkills() {
-    if (!elements.learnedSkills) {
-      return;
-    }
-    const skills = (Array.isArray(state?.pendingSkills) ? state.pendingSkills : []).filter((skill) => skill.status === "proposed");
-    elements.learnedSkills.replaceChildren();
-    for (const skill of skills) {
-      const row = document.createElement("div");
-      row.className = "memory-row";
-      const meta = document.createElement("div");
-      meta.className = "memory-meta";
-      const title = document.createElement("div");
-      title.className = "memory-title";
-      title.textContent = `Proposed skill: ${skill.name}`;
-      const text = document.createElement("div");
-      text.className = "memory-text";
-      text.textContent = `${skill.description || ""} (${skill.path})`;
-      meta.append(title, text);
-      const accept = document.createElement("button");
-      accept.type = "button";
-      accept.textContent = "Create skill";
-      accept.addEventListener("click", () => {
-        vscode.postMessage({ type: "acceptSkill", id: skill.id });
-        state.pendingSkills = (Array.isArray(state.pendingSkills) ? state.pendingSkills : []).filter((item) => item.id !== skill.id);
-        renderLearned();
-      });
-      const reject = document.createElement("button");
-      reject.type = "button";
-      reject.className = "secondary";
-      reject.textContent = "Reject";
-      reject.addEventListener("click", () => {
-        vscode.postMessage({ type: "rejectSkill", id: skill.id });
-        state.pendingSkills = (Array.isArray(state.pendingSkills) ? state.pendingSkills : []).filter((item) => item.id !== skill.id);
-        renderLearned();
-      });
-      const actions = document.createElement("div");
-      actions.className = "memory-row-actions";
-      actions.append(accept, reject);
-      row.append(meta, actions);
-      elements.learnedSkills.append(row);
     }
   }
 

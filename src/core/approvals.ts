@@ -83,7 +83,7 @@ function approvalKind(action: AgentAction): ApprovalKind {
       return "automation";
     case "ask_user_question":
       return "question";
-    case "memory_write":
+    case "memory":
       return "memory";
     case "tool_search":
     case "tool_list":
@@ -96,7 +96,12 @@ function approvalKind(action: AgentAction): ApprovalKind {
     case "mcp_list_resources":
     case "mcp_read_resource":
     case "notebook_read":
+    case "skill_view":
+    case "skills_list":
       return "read";
+    case "fact_store":
+    case "fact_feedback":
+      return "memory";
     case "task_create":
     case "task_update":
       return "state";
@@ -106,6 +111,7 @@ function approvalKind(action: AgentAction): ApprovalKind {
     case "edit_file":
     case "notebook_edit_cell":
     case "propose_patch":
+    case "skill_manage":
       return "edit";
     case "run_command":
       return "command";
@@ -132,7 +138,7 @@ function titleForAction(action: AgentAction): string {
       return "Read worker output";
     case "ask_user_question":
       return "Answer question";
-    case "memory_write":
+    case "memory":
       return "Save memory";
     case "tool_search":
       return "Search tools";
@@ -162,6 +168,16 @@ function titleForAction(action: AgentAction): string {
       return "Read notebook";
     case "notebook_edit_cell":
       return "Edit notebook cell";
+    case "skill_manage":
+      return "Manage skill";
+    case "skill_view":
+      return "View skill";
+    case "skills_list":
+      return "List skills";
+    case "fact_store":
+      return "Durable memory";
+    case "fact_feedback":
+      return "Rate durable fact";
     case "open_diff":
       return "Open diff preview";
     case "write_file":
@@ -191,8 +207,11 @@ function riskForAction(action: AgentAction): string {
       return "local agent automation";
     case "ask_user_question":
       return "requires user answer";
-    case "memory_write":
+    case "memory":
       return "persistent local memory";
+    case "fact_store":
+    case "fact_feedback":
+      return "durable local memory";
     case "tool_search":
     case "tool_list":
     case "task_list":
@@ -202,6 +221,8 @@ function riskForAction(action: AgentAction): string {
     case "code_references":
     case "code_symbols":
     case "notebook_read":
+    case "skill_view":
+    case "skills_list":
       return "read-only local state";
     case "task_create":
     case "task_update":
@@ -216,6 +237,8 @@ function riskForAction(action: AgentAction): string {
     case "notebook_edit_cell":
     case "propose_patch":
       return "workspace edit";
+    case "skill_manage":
+      return "skill authoring";
     case "run_command":
       return classifyShellCommand(action.command).summary;
     case "mcp_call_tool":

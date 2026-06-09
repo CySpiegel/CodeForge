@@ -116,20 +116,6 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
       await this.controller.removeMemory(message.id);
     } else if (message.type === "clearMemories") {
       await this.controller.clearMemories();
-    } else if (message.type === "acceptLesson" && typeof message.id === "string") {
-      await this.controller.acceptLesson(message.id);
-    } else if (message.type === "editLesson" && typeof message.id === "string" && typeof message.text === "string") {
-      await this.controller.editLesson(message.id, message.text);
-    } else if (message.type === "rejectLesson" && typeof message.id === "string") {
-      await this.controller.rejectLesson(message.id);
-    } else if (message.type === "acceptSkill" && typeof message.id === "string") {
-      await this.controller.acceptSkill(message.id);
-    } else if (message.type === "rejectSkill" && typeof message.id === "string") {
-      this.controller.rejectSkill(message.id);
-    } else if (message.type === "acceptAgent" && typeof message.id === "string") {
-      await this.controller.acceptAgent(message.id);
-    } else if (message.type === "rejectAgent" && typeof message.id === "string") {
-      this.controller.rejectAgent(message.id);
     } else if (message.type === "saveSettings") {
       await this.controller.updateSettings({
         activeProfileId: typeof message.activeProfileId === "string" ? message.activeProfileId : undefined,
@@ -203,7 +189,6 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
           <button id="settingsTabMcp" class="settings-tab" type="button" role="tab" aria-selected="false" data-settings-tab="mcp">MCP</button>
           <button id="settingsTabPermissions" class="settings-tab" type="button" role="tab" aria-selected="false" data-settings-tab="permissions">Permissions</button>
           <button id="settingsTabMemory" class="settings-tab" type="button" role="tab" aria-selected="false" data-settings-tab="memory">Memory</button>
-          <button id="settingsTabLearned" class="settings-tab" type="button" role="tab" aria-selected="false" data-settings-tab="learned">Learned</button>
           <button id="settingsTabInspector" class="settings-tab" type="button" role="tab" aria-selected="false" data-settings-tab="inspector">Inspector</button>
         </div>
         <div class="settings-content">
@@ -279,12 +264,6 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
               <button id="clearMemories" class="secondary" type="button">Clear All</button>
             </div>
             <div id="memoryList" class="memory-list" aria-live="polite"></div>
-          </div>
-          <div id="settingsPaneLearned" class="settings-pane hidden" data-settings-pane="learned">
-            <p class="settings-meta wide">Lessons and skills CodeForge has learned from finished tasks. Accept the ones worth keeping; rejecting one removes it.</p>
-            <div id="learnedAgents" class="learned-skills" aria-live="polite"></div>
-            <div id="learnedSkills" class="learned-skills" aria-live="polite"></div>
-            <div id="learnedList" class="memory-list" aria-live="polite"></div>
           </div>
           <div id="settingsPaneInspector" class="settings-pane hidden" data-settings-pane="inspector">
             <div class="inspector-actions">

@@ -29,18 +29,16 @@ test("extension package stays VS Code only and offline first", () => {
   assert.ok(packageJson.scripts?.package?.includes("vsce package --allow-missing-repository --no-dependencies"));
 });
 
-test("learning settings are declared in configuration with safe defaults", () => {
+test("memory and skills settings are declared in configuration with safe defaults", () => {
   const properties = readPackageJson().contributes?.configuration?.properties ?? {};
   const expected: Record<string, { type: string; default: unknown }> = {
-    "codeforge.learning.enabled": { type: "boolean", default: true },
-    "codeforge.learning.autonomy": { type: "string", default: "hybrid" },
-    "codeforge.learning.scope": { type: "string", default: "split" },
-    "codeforge.learning.auditCadence": { type: "number", default: 15 },
-    "codeforge.learning.maxLessons": { type: "number", default: 60 },
-    "codeforge.learning.maxLessonBytes": { type: "number", default: 24000 },
-    "codeforge.learning.skills.enabled": { type: "boolean", default: true },
-    "codeforge.learning.skills.minRepeats": { type: "number", default: 3 },
-    "codeforge.learning.embeddings.enabled": { type: "boolean", default: false }
+    "codeforge.memory.enabled": { type: "boolean", default: true },
+    "codeforge.memory.charLimit": { type: "number", default: 2200 },
+    "codeforge.memory.userCharLimit": { type: "number", default: 1375 },
+    "codeforge.memory.nudgeInterval": { type: "number", default: 10 },
+    "codeforge.skills.enabled": { type: "boolean", default: true },
+    "codeforge.skills.creationNudgeInterval": { type: "number", default: 10 },
+    "codeforge.skills.digestBytes": { type: "number", default: 24000 }
   };
   for (const [key, spec] of Object.entries(expected)) {
     const property = properties[key];
@@ -48,8 +46,6 @@ test("learning settings are declared in configuration with safe defaults", () =>
     assert.equal(property.type, spec.type, `${key} should be a ${spec.type}`);
     assert.equal(property.default, spec.default, `${key} default`);
   }
-  assert.deepEqual(properties["codeforge.learning.autonomy"].enum, ["review", "hybrid", "auto"]);
-  assert.deepEqual(properties["codeforge.learning.scope"].enum, ["split", "repo", "global"]);
 });
 
 test("model max output tokens defaults to 32k", () => {

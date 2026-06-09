@@ -22,34 +22,28 @@ import {
   renderLocalCommand,
   renderLocalSkillPrompt
 } from "../core/localExtensions";
-import {
-  buildLearningExtractionPrompt,
-  formatLearnedDigest,
-  LearnedLesson,
-  LearningSignals,
-  learnedLessonsFrom,
-  lessonScopeFor,
-  lessonStatusForAutonomy,
-  parseExtractionResult,
-  plainMemoriesFrom,
-  ProposedLesson,
-  rankLessonsForPrompt,
-  serializeLessonText
-} from "../core/learning";
-import { agentRelativePath, buildAgentProposalPrompt, parseAgentProposal, ProposedAgent, renderAgentMarkdown } from "../core/agentProposal";
-import { buildAuditPrompt, overflowEvictions, parseAuditPlan } from "../core/learningAudit";
 import { executeLocalReadOnlyTools, LocalToolProgress } from "../core/localToolExecutor";
+import { formatSkillsDigest } from "../core/skills";
+import { MemoryStore } from "../core/memory";
+import { MemoryManager } from "./memoryManager";
+import { MemoryProvider } from "../core/memoryProvider";
+import { BuiltinMemoryProvider } from "../core/builtinMemoryProvider";
+import { memoryStoreNoteStore } from "../core/memoryStoreNoteStore";
+import { archivedSkillDirPath, skillDirPath, SkillIo } from "../core/skillIo";
+import { SkillManager } from "../core/skillManager";
+import { SkillUsageReportRow, SkillUsageTracker } from "../core/skillUsage";
+import { buildReviewPrompt, REVIEW_TOOL_HINT } from "../core/backgroundReview";
 import {
-  buildSkillProposalPrompt,
-  clusterProcedureLessons,
-  clusterSignature,
-  formatSkillsDigest,
-  parseSkillProposal,
-  ProposedSkill,
-  renderSkillMarkdown,
-  skillRelativePath
-} from "../core/skillProposal";
-import { MemoryEntry, MemoryStore } from "../core/memory";
+  applyAutomaticTransitions,
+  CURATOR_REVIEW_PROMPT,
+  formatCandidateList,
+  formatTransitionSummary,
+  parseCuratorSummary,
+  readCuratorState,
+  shouldRunCurator,
+  writeCuratorState
+} from "../core/curator";
+import { listBackups, rollbackSkills, snapshotSkills } from "../core/curatorBackup";
 import { NotebookPort, UnavailableNotebookPort } from "../core/notebooks";
 import {
   callConfiguredMcpTool,
@@ -120,53 +114,7 @@ export type AgentUiEvent =
   | { readonly type: "approvalRequested"; readonly approval: ApprovalRequest }
   | { readonly type: "approvalResolved"; readonly id: string; readonly accepted: boolean; readonly text: string }
   | { readonly type: "error"; readonly text: string }
-  | { readonly type: "learningProposed"; readonly lesson: AgentLearnedLessonSummary }
-  | { readonly type: "skillProposed"; readonly skill: AgentProposedSkillSummary }
-  | { readonly type: "agentProposed"; readonly agent: AgentProposedAgentSummary }
   | { readonly type: "runComplete"; readonly reason: "idle" | "awaitingApproval" };
-
-export interface AgentLearnedLessonSummary {
-  readonly id: string;
-  readonly kind: LearnedLesson["kind"];
-  readonly status: LearnedLesson["status"];
-  readonly outcome: LearnedLesson["outcome"];
-  readonly scope: LearnedLesson["scope"];
-  readonly paths: readonly string[];
-  readonly body: string;
-  readonly createdAt: number;
-}
-
-export interface AgentProposedSkillSummary {
-  readonly id: string;
-  readonly name: string;
-  readonly description: string;
-  readonly path: string;
-  readonly status: "proposed" | "written";
-}
-
-export interface AgentProposedAgentSummary {
-  readonly id: string;
-  readonly name: string;
-  readonly label: string;
-  readonly description: string;
-  readonly tools: readonly string[];
-  readonly path: string;
-  readonly status: "proposed" | "written";
-}
-
-interface PendingSkill {
-  readonly id: string;
-  readonly skill: ProposedSkill;
-  readonly path: string;
-  readonly content: string;
-}
-
-interface PendingAgent {
-  readonly id: string;
-  readonly agent: ProposedAgent;
-  readonly path: string;
-  readonly content: string;
-}
 
 export interface AgentUiState {
   readonly profiles: readonly AgentProfileSummary[];
@@ -185,9 +133,6 @@ export interface AgentUiState {
   readonly workers: readonly AgentWorkerSummary[];
   readonly activeContext: AgentActiveContextSummary;
   readonly memories: readonly AgentMemorySummary[];
-  readonly learnedLessons: readonly AgentLearnedLessonSummary[];
-  readonly pendingSkills: readonly AgentProposedSkillSummary[];
-  readonly pendingAgents: readonly AgentProposedAgentSummary[];
   readonly capabilityCache: readonly AgentCapabilitySummary[];
   readonly inspector: AgentInspectorSummary;
   readonly settings: AgentSettingsSummary;
@@ -459,14 +404,24 @@ export class AgentController {
   private queuedWork: QueuedWork[] = [];
   private sessionId: string | undefined;
   private sessionStartPromise: Promise<string | undefined> | undefined;
-  private lastLearnedMessageCount = 0;
-  private learningInFlight = false;
-  private learningTaskCount = 0;
   private soulText: string | undefined;
-  private readonly pendingSkills = new Map<string, PendingSkill>();
-  private readonly proposedSkillSignatures = new Set<string>();
-  private readonly pendingAgents = new Map<string, PendingAgent>();
-  private readonly proposedAgentSignatures = new Set<string>();
+  private memoryManager: MemoryManager | undefined;
+  private memoryInitialized = false;
+  private skillManager: SkillManager | undefined;
+  private skillUsage: SkillUsageTracker | undefined;
+  private skillIo: SkillIo | undefined;
+  private curatorInFlight = false;
+  // True while a background self-improvement review fork is running, so skills it creates are
+  // marked curator-eligible (created_by: "agent").
+  private inBackgroundReview = false;
+  private reviewInFlight = false;
+  // Cadence counters for the background self-improvement review (memory ~every N user turns, skills
+  // ~every N tool iterations). Cumulative counters + last-reviewed markers avoid reset races.
+  private userTurnCount = 0;
+  private toolIterationCount = 0;
+  private lastMemoryReviewTurnCount = 0;
+  private lastSkillReviewIterationCount = 0;
+  private lastReviewedMessageCount = 0;
 
   constructor(
     config: CodeForgeConfigService,
@@ -478,7 +433,9 @@ export class AgentController {
     codeIntel: CodeIntelPort = new UnavailableCodeIntelPort(),
     notebooks: NotebookPort = new UnavailableNotebookPort(),
     providerFactory?: () => LlmProvider | Promise<LlmProvider>,
-    endpointCapabilityStore?: EndpointCapabilityStore
+    endpointCapabilityStore?: EndpointCapabilityStore,
+    skillIo?: SkillIo,
+    externalMemoryProvider?: MemoryProvider
   ) {
     this.config = config;
     this.workspace = workspace;
@@ -490,12 +447,31 @@ export class AgentController {
     this.notebooks = notebooks;
     this.providerFactory = providerFactory;
     this.endpointCapabilityStore = endpointCapabilityStore;
+    if (memoryStore) {
+      const memorySettings = config.getMemorySettings();
+      // Reserve core tool names against rogue external providers — but NOT the tools that ARE
+      // memory-provider tools (memory/fact_store/fact_feedback are registered in the core registry
+      // for schema/parse/dispatch yet owned by a provider).
+      const providerOwnedTools = new Set(["memory", "fact_store", "fact_feedback"]);
+      const reservedToolNames = new Set(toolDefinitions.map((tool) => tool.name).filter((name) => !providerOwnedTools.has(name)));
+      this.memoryManager = new MemoryManager(reservedToolNames);
+      this.memoryManager.addProvider(new BuiltinMemoryProvider(memoryStoreNoteStore(memoryStore), {
+        memoryCharLimit: memorySettings.memoryCharLimit,
+        userCharLimit: memorySettings.userCharLimit
+      }));
+      if (externalMemoryProvider && externalMemoryProvider.isAvailable()) {
+        this.memoryManager.addProvider(externalMemoryProvider);
+      }
+    }
+    if (skillIo) {
+      this.skillIo = skillIo;
+      this.skillUsage = new SkillUsageTracker(skillIo);
+      this.skillManager = new SkillManager(skillIo, this.skillUsage);
+    }
     this.workers = new WorkerManager({
       workspace: this.workspace,
       contextLimits: () => this.effectiveContextLimits(),
       maxConcurrentWorkers: () => this.config.getWorkersMaxConcurrent(),
-      memories: (definition) => this.memoriesForWorker(definition),
-      learnedDigest: (_definition, prompt) => this.workerLearnedDigest(prompt),
       skillsDigest: (_definition, prompt) => this.workerSkillsDigest(prompt),
       mcpResources: () => this.mcpContextItems,
       createProvider: () => this.createProvider(),
@@ -535,12 +511,7 @@ export class AgentController {
         this.lastTokenUsage = undefined;
         this.sessionId = undefined;
         this.sessionStartPromise = undefined;
-        this.lastLearnedMessageCount = 0;
-        this.learningInFlight = false;
-        this.pendingSkills.clear();
-        this.proposedSkillSignatures.clear();
-        this.pendingAgents.clear();
-        this.proposedAgentSignatures.clear();
+        this.memoryInitialized = false;
         this.workers.clear();
         this.approvals.clear();
         this.workerApprovalWaiters.clear();
@@ -1190,13 +1161,13 @@ export class AgentController {
     this.continueAfterCurrentRun = false;
     this.pendingContinuation = undefined;
     this.queuedWork = [];
-    this.lastLearnedMessageCount = 0;
-    this.learningInFlight = false;
-    this.learningTaskCount = 0;
-    this.pendingSkills.clear();
-    this.proposedSkillSignatures.clear();
-    this.pendingAgents.clear();
-    this.proposedAgentSignatures.clear();
+    this.memoryInitialized = false;
+    this.reviewInFlight = false;
+    this.userTurnCount = 0;
+    this.toolIterationCount = 0;
+    this.lastMemoryReviewTurnCount = 0;
+    this.lastSkillReviewIterationCount = 0;
+    this.lastReviewedMessageCount = 0;
     this.emit({ type: "sessionReset" });
     this.emitInspector();
     this.emitContextUsage();
@@ -1274,37 +1245,33 @@ export class AgentController {
     this.lastTokenUsage = undefined;
     this.recordInspector("info", "run", `Started ${agentModeLabel(this.config.getAgentMode())} request.`, visiblePrompt);
     this.emit({ type: "message", role: "user", text: visiblePrompt });
+    this.userTurnCount += 1;
 
     try {
       const provider = await this.createProvider();
       const model = await this.resolveModel(provider, abort.signal);
       await this.autoCompactContextIfNeeded(provider, model, abort, "before request");
-      const allMemories = await this.memoryStore?.list() ?? [];
-      const memories = plainMemoriesFrom(allMemories);
-      const learned = this.buildLearnedDigest(allMemories, modelPrompt);
-      const learnedDigest = learned?.text;
-      const context = new ContextBuilder(this.workspace, this.effectiveContextLimits(), { memories, mcpResources: this.mcpContextItems, pinnedFiles: [...this.pinnedFiles], learnedDigest });
+      const context = new ContextBuilder(this.workspace, this.effectiveContextLimits(), { mcpResources: this.mcpContextItems, pinnedFiles: [...this.pinnedFiles] });
       const contextItems = await context.build(abort.signal);
       const contextText = context.format(contextItems);
       this.lastContextItems = contextItems;
       this.recordInspector("info", "context", `Attached ${contextItems.length} context item(s).`, contextItems.map((item) => `${contextItemKindLabel(item.kind)}: ${item.label}`).join("\n"));
       this.soulText = await loadLocalSoul(this.workspace, abort.signal);
+      // Build the curated-notes snapshot once per session before the system prompt is assembled, so
+      // it stays byte-stable (prefix cache) for the whole session.
+      await this.ensureMemoryInitialized();
       this.ensureSystemMessage();
       this.appendMessage({
         role: "user",
         content: modelPrompt
       });
+      // Recalled durable memory (from an external provider, when configured) is injected into the
+      // user message inside <memory-context> fences — never the system prompt. Builtin returns "".
+      const recall = this.memoryManager ? await this.memoryManager.prefetchAll(modelPrompt) : "";
       this.appendMessage({
         role: "user",
-        content: `CodeForge workspace context:\n\n${contextText}`
+        content: recall ? `CodeForge workspace context:\n\n${contextText}\n\n${recall}` : `CodeForge workspace context:\n\n${contextText}`
       });
-      if (learned && learned.count > 0) {
-        this.emit({
-          type: "message",
-          role: "system",
-          text: `📎 Applied ${learned.count} learned lesson${learned.count === 1 ? "" : "s"} from past work to this task.`
-        });
-      }
       this.emitContextUsage();
 
       await this.runModelLoop(provider, model, abort);
@@ -1585,6 +1552,7 @@ export class AgentController {
         return;
       }
       consecutiveInvalidIterations = 0;
+      this.toolIterationCount += 1;
 
       const shouldContinue = await this.handleActions(actions);
       if (abort.signal.aborted) {
@@ -1706,7 +1674,7 @@ export class AgentController {
       }
 
       this.recordAudit(invocation.action, decision, "allowed");
-      if (isApprovalAction(invocation.action) || invocation.action.type === "open_diff" || isInternalAutomationAction(invocation.action) || isInternalStateAction(invocation.action) || isInternalReadAction(invocation.action)) {
+      if (isApprovalAction(invocation.action) || invocation.action.type === "open_diff" || invocation.action.type === "memory" || invocation.action.type === "skill_manage" || isInternalAutomationAction(invocation.action) || isInternalStateAction(invocation.action) || isInternalReadAction(invocation.action)) {
         await this.executePermittedInvocation(invocation);
       } else {
         const text = `<tool_use_error>Error: Unsupported tool ${invocation.action.type}</tool_use_error>`;
@@ -2057,32 +2025,13 @@ export class AgentController {
     return this.executePermittedAction(action, toolCallId);
   }
 
-  private async memoriesForWorker(definition: WorkerDefinition): Promise<readonly MemoryEntry[]> {
-    if (!this.memoryStore) {
-      return [];
-    }
-    // Learned lessons are injected separately as a ranked digest; keep the raw tagged rows out of
-    // the worker's plain memory list.
-    if (definition.kind === "custom" && definition.name) {
-      return plainMemoriesFrom(await this.memoryStore.list({ scope: "agent", namespace: definition.name, includeShared: true }));
-    }
-    return plainMemoriesFrom(await this.memoryStore.list());
-  }
-
-  private async workerLearnedDigest(prompt: string): Promise<string | undefined> {
-    if (!this.memoryStore) {
-      return undefined;
-    }
-    return this.buildLearnedDigest(await this.memoryStore.list().catch(() => []), prompt)?.text;
-  }
-
   private async workerSkillsDigest(prompt: string): Promise<string | undefined> {
-    const settings = this.config.getLearningSettings();
-    if (!settings.enabled || !settings.skillsEnabled) {
+    const settings = this.config.getMemorySettings();
+    if (!settings.skillsEnabled) {
       return undefined;
     }
     const skills = await loadLocalSkills(this.workspace).catch(() => []);
-    return formatSkillsDigest(skills, prompt, settings.maxLessonBytes) || undefined;
+    return formatSkillsDigest(skills, prompt, settings.skillsDigestBytes) || undefined;
   }
 
   private workerApprovalMetadata(worker: WorkerSummary, action: AgentAction, decision: PermissionDecision): { readonly detail?: string; readonly risk?: string; readonly origin: "worker" } {
@@ -2422,15 +2371,66 @@ export class AgentController {
       return transcriptResult;
     }
 
-    if (action.type === "memory_write") {
-      if (!this.memoryStore) {
+    if (action.type === "memory") {
+      if (!this.memoryManager) {
         throw new Error("Local memory is not available in this environment.");
       }
-      const memory = await this.memoryStore.add(action.text, {
-        scope: action.scope ?? "workspace",
-        namespace: action.scope === "agent" ? action.agent : undefined
+      await this.ensureMemoryInitialized();
+      transcriptResult = await this.memoryManager.handleToolCall("memory", {
+        action: action.action,
+        target: action.target,
+        content: action.content,
+        old_text: action.oldText
       });
-      transcriptResult = `memory_write ${memory.id}\n\nSaved ${memory.scope ?? "workspace"} memory${memory.namespace ? ` for ${memory.namespace}` : ""}.`;
+      await this.runLocalHooks("postTool", action);
+      return transcriptResult;
+    }
+
+    if (action.type === "skill_manage") {
+      if (!this.skillManager) {
+        throw new Error("Local skills are not available in this environment.");
+      }
+      transcriptResult = await this.skillManager.handleManage(
+        {
+          action: action.action,
+          name: action.name,
+          content: action.content,
+          old_string: action.oldString,
+          new_string: action.newString,
+          replace_all: action.replaceAll,
+          file_path: action.filePath,
+          file_content: action.fileContent,
+          absorbed_into: action.absorbedInto
+        },
+        { markAgentCreated: this.inBackgroundReview }
+      );
+      await this.runLocalHooks("postTool", action);
+      return transcriptResult;
+    }
+
+    if (action.type === "skill_view") {
+      if (!this.skillManager) {
+        throw new Error("Local skills are not available in this environment.");
+      }
+      return this.skillManager.handleView({ name: action.name, file_path: action.filePath });
+    }
+
+    if (action.type === "skills_list") {
+      if (!this.skillManager) {
+        throw new Error("Local skills are not available in this environment.");
+      }
+      return this.skillManager.handleList();
+    }
+
+    if (action.type === "fact_store" || action.type === "fact_feedback") {
+      if (!this.memoryManager) {
+        throw new Error("Local memory is not available in this environment.");
+      }
+      await this.ensureMemoryInitialized();
+      const args = action.type === "fact_store"
+        ? { action: action.action, content: action.content, category: action.category, tags: action.tags, query: action.query, entity: action.entity, entities: action.entities, id: action.id, limit: action.limit }
+        : { id: action.id, helpful: action.helpful };
+      transcriptResult = await this.memoryManager.handleToolCall(action.type, args);
       await this.runLocalHooks("postTool", action);
       return transcriptResult;
     }
@@ -2666,499 +2666,412 @@ export class AgentController {
     const reason = this.approvals.list().length > 0 ? "awaitingApproval" : "idle";
     this.emit({ type: "runComplete", reason });
     if (reason === "idle") {
-      void this.maybeLearnFromRun();
+      void this.maybeRunBackgroundReview();
+      void this.maybeRunCuratorAuto();
     }
   }
 
-  // Hermes-style learning loop: once a task finishes, distil durable lessons from the new
-  // transcript slice (corrective on failure, reusable on success) and persist them as memories
-  // for future retrieval. Fire-and-forget and fully guarded so it can never break a run.
-  private async maybeLearnFromRun(): Promise<void> {
-    if (this.learningInFlight || !this.memoryStore) {
+  // After a turn goes idle, run a non-blocking self-improvement review: memory roughly every
+  // nudgeInterval user turns, skills roughly every skillNudgeInterval tool iterations. The review is
+  // a restricted tool loop (memory + skill tools only) seeded with the recent transcript. Fully
+  // guarded and fire-and-forget so it can never break a user run.
+  private async maybeRunBackgroundReview(): Promise<void> {
+    if (this.reviewInFlight || !this.memoryManager) {
       return;
     }
-    const settings = this.config.getLearningSettings();
-    if (!settings.enabled) {
+    const settings = this.config.getMemorySettings();
+    if (!settings.enabled || this.userTurnCount < Math.max(1, settings.reviewMinTurns)) {
       return;
     }
-    if (this.lastLearnedMessageCount > this.messages.length) {
-      this.lastLearnedMessageCount = this.messages.length;
+    const memoryDue = settings.nudgeInterval > 0 && this.userTurnCount - this.lastMemoryReviewTurnCount >= settings.nudgeInterval;
+    const skillsDue = Boolean(this.skillManager) && settings.skillsEnabled && settings.skillNudgeInterval > 0
+      && this.toolIterationCount - this.lastSkillReviewIterationCount >= settings.skillNudgeInterval;
+    if (!memoryDue && !skillsDue) {
+      return;
     }
-    const slice = this.messages.slice(this.lastLearnedMessageCount);
-    const didWork = slice.some((message) => message.role === "assistant" && (message.toolCalls?.length ?? 0) > 0);
+    // Advance the markers up front so a transient failure does not immediately re-fire the review.
+    if (memoryDue) {
+      this.lastMemoryReviewTurnCount = this.userTurnCount;
+    }
+    if (skillsDue) {
+      this.lastSkillReviewIterationCount = this.toolIterationCount;
+    }
+
+    const slice = this.messages.slice(this.lastReviewedMessageCount);
+    const didWork = slice.some((message) => message.role === "assistant" && ((message.toolCalls?.length ?? 0) > 0 || message.content.trim().length > 0));
     if (!didWork) {
-      this.lastLearnedMessageCount = this.messages.length;
+      this.lastReviewedMessageCount = this.messages.length;
       return;
     }
 
-    this.learningInFlight = true;
+    this.reviewInFlight = true;
+    this.inBackgroundReview = true;
     try {
-      const signals = this.collectRunSignals(slice);
-      const transcript = slice.map((message) => `${message.role.toUpperCase()}:\n${message.content}`).join("\n\n").slice(-12000);
-      const { system, user } = buildLearningExtractionPrompt(signals);
-      const abort = new AbortController();
-      const provider = await this.createProvider();
-      const model = await this.resolveModel(provider, abort.signal);
-      let response = "";
-      for await (const event of this.streamChatWithIdleTimeout(provider, {
-        model,
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content: `${user}\n\n--- Task transcript ---\n${transcript}` }
-        ],
-        temperature: 0,
-        maxTokens: this.requestMaxTokens(),
-        signal: abort.signal
-      }, abort, "Learning extraction")) {
-        if (event.type === "content") {
-          response += event.text;
-        }
+      await this.ensureMemoryInitialized();
+      const summary = await this.runBackgroundReview(memoryDue, skillsDue, slice);
+      this.lastReviewedMessageCount = this.messages.length;
+      if (summary) {
+        this.emit({ type: "message", role: "system", text: `💾 Self-improvement review: ${summary}` });
+        await this.publishState();
       }
-
-      const proposals = parseExtractionResult(response);
-      if (proposals.length === 0) {
-        // Nothing to persist — the slice is fully handled.
-        this.lastLearnedMessageCount = this.messages.length;
-        return;
-      }
-
-      const status = lessonStatusForAutonomy(settings.autonomy);
-      const outcome = signals.hadFailure ? "failure" : "success";
-      // Dedup by exact serialized text so a retry pass (taken when a persist fails below) does not
-      // duplicate the lessons that already stored.
-      const existingTexts = new Set((await this.memoryStore.list().catch(() => [])).map((memory) => memory.text));
-      let stored = 0;
-      let persistFailed = false;
-      const storedProposals: ProposedLesson[] = [];
-      for (const proposal of proposals) {
-        const scope = lessonScopeFor(proposal.kind, settings.scope);
-        const text = serializeLessonText({ kind: proposal.kind, outcome, status, paths: proposal.paths, body: proposal.text });
-        if (existingTexts.has(text)) {
-          continue;
-        }
-        try {
-          const memory = await this.memoryStore.add(text, { scope });
-          existingTexts.add(text);
-          stored += 1;
-          storedProposals.push(proposal);
-          this.persistSessionRecord((sessionId) => ({
-            type: "learning",
-            sessionId,
-            createdAt: Date.now(),
-            event: status === "accepted" ? "accepted" : "proposed",
-            kind: "lesson",
-            ref: memory.id,
-            summary: proposal.text.slice(0, 160)
-          }));
-          this.emit({
-            type: "learningProposed",
-            lesson: { id: memory.id, kind: proposal.kind, status, outcome, scope, paths: proposal.paths, body: proposal.text, createdAt: memory.createdAt }
-          });
-        } catch (error) {
-          persistFailed = true;
-          this.recordInspector("warn", "learning", `Could not store a learned ${proposal.kind} lesson.`, errorMessage(error));
-        }
-      }
-      // Only advance the baseline once everything persisted; otherwise leave the slice so the next
-      // idle re-extracts it (the dedup above prevents duplicating what already stored).
-      if (!persistFailed) {
-        this.lastLearnedMessageCount = this.messages.length;
-      }
-      this.recordInspector(
-        "info",
-        "learning",
-        `Learned ${stored} lesson(s) from the last task (${status}).`,
-        proposals.map((proposal) => `[${proposal.kind}] ${proposal.text}`).join("\n")
-      );
-      if (storedProposals.length > 0) {
-        const applied = status === "accepted";
-        const heading = `🧠 Learned ${storedProposals.length} lesson${storedProposals.length === 1 ? "" : "s"} from this task` +
-          (applied ? " — applied to future tasks." : " — review them in the Learned panel.");
-        const body = storedProposals.map((proposal) => `• [${proposal.kind}] ${proposal.text}`).join("\n");
-        this.emit({ type: "message", role: "system", text: `${heading}\n${body}` });
-      }
-      if (settings.skillsEnabled && proposals.some((proposal) => proposal.kind === "procedure")) {
-        await this.maybeProposeSkill(settings);
-      }
-      if (settings.agentsEnabled) {
-        await this.maybeProposeAgent(settings);
-      }
-      this.learningTaskCount += 1;
-      if (settings.auditCadence > 0 && this.learningTaskCount % settings.auditCadence === 0) {
-        await this.runLearningAudit(settings);
-      }
-      await this.publishState();
     } catch (error) {
-      this.recordInspector("warn", "learning", "Learning from the last task failed.", errorMessage(error));
+      this.recordInspector("warn", "memory", "Background self-improvement review failed.", errorMessage(error));
     } finally {
-      this.learningInFlight = false;
+      this.inBackgroundReview = false;
+      this.reviewInFlight = false;
     }
   }
 
-  private collectRunSignals(slice: readonly ChatMessage[]): LearningSignals {
-    const changedPaths = new Set<string>();
-    const diagnostics: string[] = [];
-    const failures: string[] = [];
-    for (const message of slice) {
-      if (message.role === "assistant" && message.toolCalls) {
-        for (const toolCall of message.toolCalls) {
-          if (toolCall.name === "write_file" || toolCall.name === "edit_file" || toolCall.name === "notebook_edit_cell") {
-            const path = pathFromToolArguments(toolCall.argumentsJson);
-            if (path) {
-              changedPaths.add(path);
-            }
-          }
-        }
+  private async runBackgroundReview(reviewMemory: boolean, reviewSkills: boolean, slice: readonly ChatMessage[]): Promise<string> {
+    const transcript = slice
+      .filter((message) => message.role !== "system")
+      .map((message) => `${message.role.toUpperCase()}:\n${message.content}`)
+      .join("\n\n")
+      .slice(-12000);
+    const messages: ChatMessage[] = [
+      { role: "system", content: `${buildReviewPrompt(reviewMemory, reviewSkills)}\n\n${REVIEW_TOOL_HINT}` },
+      {
+        role: "user",
+        content: `--- Conversation to review ---\n${transcript}\n\n--- End conversation ---\n\nReview now using only the memory and skill tools. If nothing is worth saving, reply 'Nothing to save.' and stop.`
       }
-      const content = message.content;
-      if ((message.role === "tool" || message.role === "user") && content) {
-        if (content.includes("<tool_use_error>")) {
-          failures.push(firstLines(content.replace(/<\/?tool_use_error>/g, "").trim(), 2));
-        }
-        for (const line of content.split("\n")) {
-          const match = /^-\s+(error|warning)\s+(.+)$/.exec(line.trim());
-          if (match) {
-            diagnostics.push(`${match[1]} ${match[2]}`);
-          }
-        }
-      }
-    }
-    const auditFailure = this.auditEntries.some((entry) => entry.outcome === "failed" || entry.outcome === "rejected" || entry.outcome === "denied");
-    const hadFailure = failures.length > 0 || diagnostics.some((line) => line.startsWith("error")) || auditFailure;
-    return {
-      hadFailure,
-      changedPaths: [...changedPaths],
-      diagnostics: uniqueStrings(diagnostics).slice(0, 20),
-      commandFailures: uniqueStrings(failures).slice(0, 10),
-      outcomeSummary: hadFailure ? "the task hit errors before finishing" : "the task completed without reported errors"
-    };
-  }
-
-  // Periodic self-audit ("nudge"): the model prunes/sharpens the lesson corpus, then a hard count
-  // cap is enforced deterministically so the library stays bounded (forces prioritisation).
-  private async runLearningAudit(settings: ReturnType<CodeForgeConfigService["getLearningSettings"]>): Promise<void> {
-    if (!this.memoryStore) {
-      return;
-    }
-    const lessons = learnedLessonsFrom(await this.memoryStore.list());
-    if (lessons.length === 0) {
-      return;
-    }
-
-    const { system, user } = buildAuditPrompt(lessons, settings.maxLessons);
+    ];
     const abort = new AbortController();
     const provider = await this.createProvider();
     const model = await this.resolveModel(provider, abort.signal);
-    let response = "";
-    for await (const event of this.streamChatWithIdleTimeout(provider, {
-      model,
-      messages: [{ role: "system", content: system }, { role: "user", content: user }],
-      temperature: 0,
-      maxTokens: this.requestMaxTokens(),
-      signal: abort.signal
-    }, abort, "Learning audit")) {
-      if (event.type === "content") {
-        response += event.text;
-      }
-    }
+    // Only offer native tool schemas when the endpoint supports them; otherwise rely on the JSON
+    // action-protocol fallback taught by REVIEW_TOOL_HINT.
+    const capabilities = await this.capabilities(provider, model, abort.signal);
+    const tools = capabilities.nativeToolCalls ? this.reviewToolSchemas() : undefined;
+    const actions: string[] = [];
 
-    const plan = parseAuditPlan(response, lessons.length);
-    let removed = 0;
-    let rewritten = 0;
-    for (const change of plan.rewrite) {
-      const lesson = lessons[change.index - 1];
-      if (!lesson) {
-        continue;
-      }
-      const text = serializeLessonText({ kind: lesson.kind, outcome: lesson.outcome, status: lesson.status, paths: lesson.paths, body: change.text });
-      await this.memoryStore.update(lesson.id, text, { scope: lesson.scope }).catch(() => undefined);
-      rewritten += 1;
-    }
-    const dropped = new Set<string>();
-    for (const index of plan.drop) {
-      const lesson = lessons[index - 1];
-      if (lesson && await this.memoryStore.remove(lesson.id)) {
-        dropped.add(lesson.id);
-        removed += 1;
-      }
-    }
-    const survivors = lessons.filter((lesson) => !dropped.has(lesson.id));
-    for (const id of overflowEvictions(survivors, settings.maxLessons)) {
-      if (await this.memoryStore.remove(id)) {
-        removed += 1;
-      }
-    }
-
-    this.persistSessionRecord((sessionId) => ({
-      type: "learning",
-      sessionId,
-      createdAt: Date.now(),
-      event: "audited",
-      kind: "lesson",
-      ref: String(lessons.length),
-      summary: `Audited learned lessons: dropped ${removed}, rewrote ${rewritten}.`
-    }));
-    this.recordInspector("info", "learning", `Audited learned lessons (kept ${lessons.length - removed}, dropped ${removed}, rewrote ${rewritten}).`);
-    if (removed > 0 || rewritten > 0) {
-      await this.publishState();
-    }
-  }
-
-  // When the same successful procedure recurs, synthesise it into a reusable .codeforge skill.
-  private async maybeProposeSkill(settings: ReturnType<CodeForgeConfigService["getLearningSettings"]>): Promise<void> {
-    if (!this.memoryStore) {
-      return;
-    }
-    const procedures = learnedLessonsFrom(await this.memoryStore.list()).filter((lesson) => lesson.kind === "procedure");
-    const clusters = clusterProcedureLessons(procedures, settings.skillsMinRepeats);
-    for (const cluster of clusters) {
-      const signature = clusterSignature(cluster);
-      if (this.proposedSkillSignatures.has(signature)) {
-        continue;
-      }
-
-      const { system, user } = buildSkillProposalPrompt(cluster);
-      const abort = new AbortController();
-      const provider = await this.createProvider();
-      const model = await this.resolveModel(provider, abort.signal);
-      let response = "";
+    for (let iteration = 0; iteration < maxBackgroundReviewIterations; iteration++) {
+      let content = "";
+      const toolCalls: ToolCall[] = [];
       for await (const event of this.streamChatWithIdleTimeout(provider, {
         model,
-        messages: [{ role: "system", content: system }, { role: "user", content: user }],
+        messages,
+        tools,
         temperature: 0,
         maxTokens: this.requestMaxTokens(),
         signal: abort.signal
-      }, abort, "Skill proposal")) {
+      }, abort, "Self-improvement review")) {
         if (event.type === "content") {
-          response += event.text;
+          content += event.text;
+        } else if (event.type === "toolCalls") {
+          toolCalls.push(...event.toolCalls);
         }
       }
 
-      const skill = parseSkillProposal(response);
-      if (!skill) {
-        continue; // transient parse failure — leave the cluster eligible for a later retry
-      }
-      // Dedup only once we have a valid proposal, so a flaky parse does not permanently block it.
-      this.proposedSkillSignatures.add(signature);
-      const existing = await loadLocalSkills(this.workspace).catch(() => []);
-      if (existing.some((item) => item.name === skill.name)) {
+      if (toolCalls.length > 0) {
+        messages.push({ role: "assistant", content, toolCalls });
+        for (const toolCall of toolCalls) {
+          const result = await this.executeReviewTool(toolCall.name, safeParseArgs(toolCall.argumentsJson));
+          if (result.summary) {
+            actions.push(result.summary);
+          }
+          messages.push({ role: "tool", content: result.output, toolCallId: toolCall.id, name: toolCall.name });
+        }
         continue;
       }
-      const path = skillRelativePath(skill.name);
-      const content = renderSkillMarkdown(skill);
-      if (settings.autonomy === "auto") {
-        await this.writeProposedSkill(skill, path, content);
-      } else {
-        const id = `skill-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-        this.pendingSkills.set(id, { id, skill, path, content });
-        this.persistSessionRecord((sessionId) => ({
-          type: "learning",
-          sessionId,
-          createdAt: Date.now(),
-          event: "proposed",
-          kind: "skill",
-          ref: path,
-          summary: skill.description
-        }));
-        this.recordInspector("info", "learning", `Proposed a reusable skill: ${skill.name}.`, skill.description);
-        this.emit({ type: "skillProposed", skill: { id, name: skill.name, description: skill.description, path, status: "proposed" } });
+
+      // Non-native models emit the CodeForge JSON action protocol in text instead of native calls.
+      const fallback = reviewActionsFromText(content);
+      for (const action of fallback) {
+        const result = await this.executeReviewTool(action.name, action.args);
+        if (result.summary) {
+          actions.push(result.summary);
+        }
+      }
+      break;
+    }
+
+    return summarizeReviewActions(actions);
+  }
+
+  private reviewToolSchemas(): ToolDefinition[] {
+    const memorySchemas = this.memoryManager?.getAllToolSchemas() ?? [];
+    const skillNames = new Set(["skills_list", "skill_view", "skill_manage"]);
+    const skillSchemas = this.skillManager
+      ? codeForgeTools.filter((tool) => skillNames.has(tool.name)).map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters }))
+      : [];
+    return [...memorySchemas, ...skillSchemas];
+  }
+
+  private async executeReviewTool(name: string, args: Record<string, unknown>): Promise<{ readonly output: string; readonly summary: string }> {
+    try {
+      if (name === "memory" && this.memoryManager) {
+        const output = await this.memoryManager.handleToolCall("memory", args);
+        return { output, summary: reviewToolSummary(output, `${describeMemoryWrite(args)}`) };
+      }
+      if (name === "skill_manage" && this.skillManager) {
+        const output = await this.skillManager.handleManage(args, { markAgentCreated: true });
+        return { output, summary: reviewToolSummary(output, `${String(args.action ?? "update")} skill ${String(args.name ?? "")}`.trim()) };
+      }
+      if (name === "skill_view" && this.skillManager) {
+        return { output: await this.skillManager.handleView(args), summary: "" };
+      }
+      if (name === "skills_list" && this.skillManager) {
+        return { output: await this.skillManager.handleList(), summary: "" };
+      }
+    } catch (error) {
+      return { output: JSON.stringify({ success: false, error: errorMessage(error) }), summary: "" };
+    }
+    return { output: JSON.stringify({ success: false, error: `Tool '${name}' is not available in the review pass.` }), summary: "" };
+  }
+
+  // -- Curator (long-horizon skill maintenance) -----------------------------
+
+  private async maybeRunCuratorAuto(): Promise<void> {
+    if (this.curatorInFlight || !this.skillIo || !this.skillUsage || !this.skillManager) {
+      return;
+    }
+    const io = this.skillIo;
+    const settings = this.config.getCuratorSettings();
+    const now = Date.now();
+    let state;
+    try {
+      state = await readCuratorState(io);
+    } catch {
+      return;
+    }
+    const gate = shouldRunCurator(state, now, settings);
+    if (gate.seedFirstRun) {
+      state.lastRunAt = now;
+      await writeCuratorState(io, state).catch(() => undefined);
+      return;
+    }
+    if (!gate.run) {
+      return;
+    }
+    await this.runCurator({ dryRun: false });
+  }
+
+  async runCurator(options: { readonly dryRun?: boolean } = {}): Promise<string> {
+    if (!this.skillIo || !this.skillUsage || !this.skillManager) {
+      return "Skills are not available in this environment.";
+    }
+    if (this.curatorInFlight) {
+      return "A curator pass is already running.";
+    }
+    const io = this.skillIo;
+    const usage = this.skillUsage;
+    const settings = this.config.getCuratorSettings();
+    const now = Date.now();
+    const dryRun = options.dryRun ?? false;
+    const start = Date.now();
+    this.curatorInFlight = true;
+    this.inBackgroundReview = true;
+    try {
+      let backupNote = "";
+      if (!dryRun && settings.backupEnabled) {
+        const info = await snapshotSkills(io, now, settings.backupKeep).catch(() => undefined);
+        if (info) {
+          backupNote = `backup ${info.id} (${info.fileCount} files); `;
+        }
+      }
+      const transitions = await applyAutomaticTransitions(io, usage, settings, now, !dryRun);
+      const report = await usage.agentCreatedReport();
+      const consolidation = await this.runCuratorConsolidation(report, now, dryRun);
+      const summaryText = `${formatTransitionSummary(transitions)}${consolidation ? `; ${consolidation}` : ""}`;
+      if (!dryRun) {
+        const state = await readCuratorState(io);
+        state.lastRunAt = now;
+        state.lastRunDurationMs = Date.now() - start;
+        state.lastRunSummary = summaryText;
+        state.runCount += 1;
+        await writeCuratorState(io, state).catch(() => undefined);
+      }
+      const message = `🧹 Curator${dryRun ? " (dry run)" : ""}: ${backupNote}${summaryText}`;
+      this.emit({ type: "message", role: "system", text: message });
+      await this.publishState();
+      return message;
+    } catch (error) {
+      this.recordInspector("warn", "memory", "Curator pass failed.", errorMessage(error));
+      return `Curator pass failed: ${errorMessage(error)}`;
+    } finally {
+      this.inBackgroundReview = false;
+      this.curatorInFlight = false;
+    }
+  }
+
+  private async runCuratorConsolidation(report: readonly SkillUsageReportRow[], nowMs: number, dryRun: boolean): Promise<string> {
+    if (dryRun || report.length === 0 || !this.skillManager) {
+      return "";
+    }
+    const messages: ChatMessage[] = [
+      { role: "system", content: `${CURATOR_REVIEW_PROMPT}\n\n${REVIEW_TOOL_HINT}` },
+      {
+        role: "user",
+        content: `Candidate agent-created skills:\n${formatCandidateList(report, nowMs)}\n\nConsolidate now. Use skills_list / skill_view to inspect, then skill_manage to patch/create/write_file and to archive (action=delete) absorbed siblings. Finish with the structured summary block.`
+      }
+    ];
+    const abort = new AbortController();
+    const provider = await this.createProvider();
+    const model = await this.resolveModel(provider, abort.signal);
+    const capabilities = await this.capabilities(provider, model, abort.signal);
+    const tools = capabilities.nativeToolCalls ? this.reviewToolSchemas().filter((tool) => tool.name.startsWith("skill")) : undefined;
+    let lastContent = "";
+    let ops = 0;
+
+    for (let iteration = 0; iteration < maxCuratorIterations; iteration++) {
+      let content = "";
+      const toolCalls: ToolCall[] = [];
+      for await (const event of this.streamChatWithIdleTimeout(provider, {
+        model,
+        messages,
+        tools,
+        temperature: 0,
+        maxTokens: this.requestMaxTokens(),
+        signal: abort.signal
+      }, abort, "Curator consolidation")) {
+        if (event.type === "content") {
+          content += event.text;
+        } else if (event.type === "toolCalls") {
+          toolCalls.push(...event.toolCalls);
+        }
+      }
+      lastContent = content || lastContent;
+
+      if (toolCalls.length === 0) {
+        for (const action of reviewActionsFromText(content).filter((a) => a.name.startsWith("skill"))) {
+          await this.executeReviewTool(action.name, action.args);
+          ops += 1;
+        }
+        break;
+      }
+      messages.push({ role: "assistant", content, toolCalls });
+      for (const toolCall of toolCalls) {
+        const result = await this.executeReviewTool(toolCall.name, safeParseArgs(toolCall.argumentsJson));
+        if (toolCall.name === "skill_manage") {
+          ops += 1;
+        }
+        messages.push({ role: "tool", content: result.output, toolCallId: toolCall.id, name: toolCall.name });
+      }
+    }
+
+    const parsed = parseCuratorSummary(lastContent);
+    if (ops === 0 && parsed.consolidations.length === 0 && parsed.prunings.length === 0) {
+      return "";
+    }
+    return `consolidated ${parsed.consolidations.length} · pruned ${parsed.prunings.length}`;
+  }
+
+  /** Slash-command surface: /curator status|run|pause|resume|pin|unpin|archive|restore|backup|rollback|list-archived. */
+  async handleCuratorCommand(rest: string): Promise<void> {
+    if (!this.skillIo || !this.skillUsage || !this.skillManager) {
+      this.emit({ type: "error", text: "Skills are not available in this environment." });
+      return;
+    }
+    const io = this.skillIo;
+    const usage = this.skillUsage;
+    const settings = this.config.getCuratorSettings();
+    const [verb, ...args] = rest.trim().split(/\s+/).filter(Boolean);
+    const arg = args.filter((value) => !value.startsWith("--")).join(" ");
+    const dryRun = args.includes("--dry-run");
+
+    switch (verb ?? "status") {
+      case "status": {
+        const state = await readCuratorState(io);
+        const report = await usage.agentCreatedReport();
+        const byState = (s: string) => report.filter((row) => row.state === s).length;
+        const pinned = report.filter((row) => row.pinned).map((row) => row.name);
+        const last = state.lastRunAt ? new Date(state.lastRunAt).toISOString() : "never";
+        this.emit({
+          type: "message",
+          role: "system",
+          text:
+            `🧹 Curator: ${settings.enabled ? (state.paused ? "PAUSED" : "enabled") : "disabled"}\n` +
+            `runs: ${state.runCount} · last run: ${last}\n` +
+            `last summary: ${state.lastRunSummary ?? "—"}\n` +
+            `interval: ${settings.intervalHours}h · stale after ${settings.staleAfterDays}d · archive after ${settings.archiveAfterDays}d\n` +
+            `agent-created skills: ${report.length} (active ${byState("active")}, stale ${byState("stale")}, archived ${byState("archived")})\n` +
+            `pinned (${pinned.length}): ${pinned.join(", ") || "none"}`
+        });
+        return;
+      }
+      case "run":
+        await this.runCurator({ dryRun });
+        return;
+      case "pause": {
+        const state = await readCuratorState(io);
+        state.paused = true;
+        await writeCuratorState(io, state);
+        this.emit({ type: "status", text: "Curator paused." });
+        return;
+      }
+      case "resume": {
+        const state = await readCuratorState(io);
+        state.paused = false;
+        await writeCuratorState(io, state);
+        this.emit({ type: "status", text: "Curator resumed." });
+        return;
+      }
+      case "pin":
+        if (!arg) {
+          this.emit({ type: "error", text: "Usage: /curator pin <skill>" });
+          return;
+        }
+        await usage.setPinned(arg, true);
+        this.emit({ type: "status", text: `Pinned skill ${arg} (protected from auto-archive).` });
+        return;
+      case "unpin":
+        if (!arg) {
+          this.emit({ type: "error", text: "Usage: /curator unpin <skill>" });
+          return;
+        }
+        await usage.setPinned(arg, false);
+        this.emit({ type: "status", text: `Unpinned skill ${arg}.` });
+        return;
+      case "archive": {
+        if (!arg) {
+          this.emit({ type: "error", text: "Usage: /curator archive <skill>" });
+          return;
+        }
+        const result = JSON.parse(await this.skillManager.handleManage({ action: "delete", name: arg, absorbed_into: "" }));
+        this.emit({ type: result.success ? "status" : "error", text: result.message ?? result.error ?? "" });
         await this.publishState();
+        return;
       }
-      return; // at most one skill proposal per finished task
-    }
-  }
-
-  async acceptSkill(id: string): Promise<void> {
-    const pending = this.pendingSkills.get(id);
-    if (!pending) {
-      this.emit({ type: "error", text: "That skill proposal is no longer pending." });
-      return;
-    }
-    this.pendingSkills.delete(id);
-    try {
-      await this.writeProposedSkill(pending.skill, pending.path, pending.content);
-      await this.publishState();
-    } catch (error) {
-      this.emit({ type: "error", text: `Could not write skill ${pending.skill.name}: ${errorMessage(error)}` });
-    }
-  }
-
-  rejectSkill(id: string): void {
-    const pending = this.pendingSkills.get(id);
-    if (!pending) {
-      return;
-    }
-    this.pendingSkills.delete(id);
-    this.persistSessionRecord((sessionId) => ({
-      type: "learning",
-      sessionId,
-      createdAt: Date.now(),
-      event: "rejected",
-      kind: "skill",
-      ref: pending.path,
-      summary: pending.skill.description
-    }));
-    this.recordInspector("info", "learning", `Rejected proposed skill: ${pending.skill.name}.`);
-    void this.publishState();
-  }
-
-  listPendingSkills(): readonly AgentProposedSkillSummary[] {
-    return [...this.pendingSkills.values()].map((pending) => ({
-      id: pending.id,
-      name: pending.skill.name,
-      description: pending.skill.description,
-      path: pending.path,
-      status: "proposed" as const
-    }));
-  }
-
-  private async writeProposedSkill(skill: ProposedSkill, path: string, content: string): Promise<void> {
-    await this.diff.applyWriteFile({ type: "write_file", path, content });
-    this.persistSessionRecord((sessionId) => ({
-      type: "learning",
-      sessionId,
-      createdAt: Date.now(),
-      event: "accepted",
-      kind: "skill",
-      ref: path,
-      summary: skill.description
-    }));
-    this.recordInspector("info", "learning", `Saved reusable skill: ${skill.name}.`, path);
-    this.emit({ type: "skillProposed", skill: { id: path, name: skill.name, description: skill.description, path, status: "written" } });
-  }
-
-  // Propose a specialized sub-agent for a recurring kind of task. Agents grant a toolset, so they
-  // are ALWAYS review-only — never auto-written, even under autonomy "auto".
-  private async maybeProposeAgent(settings: ReturnType<CodeForgeConfigService["getLearningSettings"]>): Promise<void> {
-    if (!this.memoryStore) {
-      return;
-    }
-    const lessons = learnedLessonsFrom(await this.memoryStore.list());
-    const clusters = clusterProcedureLessons(lessons, settings.skillsMinRepeats);
-    const allowedTools = codeForgeTools.map((tool) => tool.name);
-    for (const cluster of clusters) {
-      const signature = clusterSignature(cluster);
-      if (this.proposedAgentSignatures.has(signature)) {
-        continue;
-      }
-
-      const { system, user } = buildAgentProposalPrompt(cluster, allowedTools);
-      const abort = new AbortController();
-      const provider = await this.createProvider();
-      const model = await this.resolveModel(provider, abort.signal);
-      let response = "";
-      for await (const event of this.streamChatWithIdleTimeout(provider, {
-        model,
-        messages: [{ role: "system", content: system }, { role: "user", content: user }],
-        temperature: 0,
-        maxTokens: this.requestMaxTokens(),
-        signal: abort.signal
-      }, abort, "Agent proposal")) {
-        if (event.type === "content") {
-          response += event.text;
+      case "restore": {
+        if (!arg) {
+          this.emit({ type: "error", text: "Usage: /curator restore <skill>" });
+          return;
         }
+        if (!(await io.exists(archivedSkillDirPath(arg)))) {
+          this.emit({ type: "error", text: `No archived skill '${arg}'.` });
+          return;
+        }
+        await io.move(archivedSkillDirPath(arg), skillDirPath(arg));
+        await usage.setState(arg, "active");
+        this.emit({ type: "status", text: `Restored skill ${arg}.` });
+        await this.publishState();
+        return;
       }
-
-      const agent = parseAgentProposal(response, allowedTools);
-      if (!agent) {
-        continue; // transient parse failure — leave the cluster eligible for a later retry
+      case "list-archived": {
+        const archived = (await usage.report()).filter((row) => row.state === "archived").map((row) => row.name);
+        this.emit({ type: "message", role: "system", text: `Archived skills (${archived.length}): ${archived.join(", ") || "none"}` });
+        return;
       }
-      // Dedup only once we have a valid proposal, so a flaky parse does not permanently block it.
-      this.proposedAgentSignatures.add(signature);
-      const existing = await loadLocalAgents(this.workspace).catch(() => []);
-      if (existing.some((item) => item.name === agent.name)) {
-        continue;
+      case "backup": {
+        const info = await snapshotSkills(io, Date.now(), settings.backupKeep);
+        this.emit({ type: "status", text: `Backed up ${info.fileCount} skill file(s) as ${info.id}.` });
+        return;
       }
-      const path = agentRelativePath(agent.name);
-      const content = renderAgentMarkdown(agent);
-      const id = `agent-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-      this.pendingAgents.set(id, { id, agent, path, content });
-      this.persistSessionRecord((sessionId) => ({
-        type: "learning",
-        sessionId,
-        createdAt: Date.now(),
-        event: "proposed",
-        kind: "agent",
-        ref: path,
-        summary: agent.description
-      }));
-      this.recordInspector("info", "learning", `Proposed a specialized sub-agent: ${agent.name}.`, `tools: ${agent.tools.join(", ") || "(default)"}`);
-      this.emit({ type: "agentProposed", agent: this.agentSummary(id, agent, path, "proposed") });
-      await this.publishState();
-      return; // at most one agent proposal per finished task
+      case "rollback": {
+        const ids = await listBackups(io);
+        if (!arg && ids.length === 0) {
+          this.emit({ type: "error", text: "No curator backups to roll back to." });
+          return;
+        }
+        const id = arg || ids[ids.length - 1];
+        const result = await rollbackSkills(io, id, Date.now(), settings.backupKeep);
+        this.emit({ type: result.ok ? "status" : "error", text: result.message });
+        await this.publishState();
+        return;
+      }
+      default:
+        this.emit({ type: "error", text: `Unknown curator command '${verb}'. Try: status, run, pause, resume, pin, unpin, archive, restore, list-archived, backup, rollback.` });
     }
-  }
-
-  async acceptAgent(id: string): Promise<void> {
-    const pending = this.pendingAgents.get(id);
-    if (!pending) {
-      this.emit({ type: "error", text: "That agent proposal is no longer pending." });
-      return;
-    }
-    this.pendingAgents.delete(id);
-    try {
-      await this.diff.applyWriteFile({ type: "write_file", path: pending.path, content: pending.content });
-      this.persistSessionRecord((sessionId) => ({
-        type: "learning",
-        sessionId,
-        createdAt: Date.now(),
-        event: "accepted",
-        kind: "agent",
-        ref: pending.path,
-        summary: pending.agent.description
-      }));
-      this.recordInspector("info", "learning", `Saved sub-agent: ${pending.agent.name}.`, pending.path);
-      this.emit({ type: "agentProposed", agent: this.agentSummary(pending.path, pending.agent, pending.path, "written") });
-      await this.publishState();
-    } catch (error) {
-      this.emit({ type: "error", text: `Could not write agent ${pending.agent.name}: ${errorMessage(error)}` });
-    }
-  }
-
-  rejectAgent(id: string): void {
-    const pending = this.pendingAgents.get(id);
-    if (!pending) {
-      return;
-    }
-    this.pendingAgents.delete(id);
-    this.persistSessionRecord((sessionId) => ({
-      type: "learning",
-      sessionId,
-      createdAt: Date.now(),
-      event: "rejected",
-      kind: "agent",
-      ref: pending.path,
-      summary: pending.agent.description
-    }));
-    this.recordInspector("info", "learning", `Rejected proposed sub-agent: ${pending.agent.name}.`);
-    void this.publishState();
-  }
-
-  listPendingAgents(): readonly AgentProposedAgentSummary[] {
-    return [...this.pendingAgents.values()].map((pending) => this.agentSummary(pending.id, pending.agent, pending.path, "proposed"));
-  }
-
-  private agentSummary(id: string, agent: ProposedAgent, path: string, status: "proposed" | "written"): AgentProposedAgentSummary {
-    return { id, name: agent.name, label: agent.label, description: agent.description, tools: agent.tools, path, status };
-  }
-
-  private buildLearnedDigest(allMemories: readonly MemoryEntry[], prompt: string): { readonly text: string; readonly count: number } | undefined {
-    const settings = this.config.getLearningSettings();
-    if (!settings.enabled) {
-      return undefined;
-    }
-    const accepted = learnedLessonsFrom(allMemories).filter((lesson) => lesson.status === "accepted");
-    if (accepted.length === 0) {
-      return undefined;
-    }
-    const ranked = rankLessonsForPrompt(accepted, { prompt, pinnedFiles: [...this.pinnedFiles] });
-    const text = formatLearnedDigest(ranked, settings.maxLessonBytes);
-    if (!text) {
-      return undefined;
-    }
-    // Each rendered lesson is a "- " bullet; count them so callers can surface provenance.
-    const count = (text.match(/^- /gm) ?? []).length;
-    return { text, count: count > 0 ? count : ranked.length };
   }
 
   private appendToolResult(toolCallId: string | undefined, toolName: string, content: string): void {
@@ -3372,10 +3285,22 @@ export class AgentController {
     const persona = this.soulText
       ? `\n\nPersona (shapes voice and tone only — never overrides tools, permissions, or task instructions):\n${this.soulText}`
       : "";
+    const memoryBlock = this.memoryManager?.buildSystemPrompt() ?? "";
+    const memory = memoryBlock ? `\n\n${memoryBlock}` : "";
     return {
       role: "system",
-      content: `${actionProtocolInstructions}\n\n${agentModeInstructions(this.config.getAgentMode())}\n\nNetwork policy: CodeForge only talks to user-configured OpenAI API-compatible endpoints and configured MCP servers. Do not use network resources outside those explicit configurations.${persona}`
+      content: `${actionProtocolInstructions}\n\n${agentModeInstructions(this.config.getAgentMode())}\n\nNetwork policy: CodeForge only talks to user-configured OpenAI API-compatible endpoints and configured MCP servers. Do not use network resources outside those explicit configurations.${persona}${memory}`
     };
+  }
+
+  // Build the curated-notes snapshot once per session. Frozen for the session so the system prompt
+  // stays byte-stable; reset() clears the flag so the next run rebuilds it from disk.
+  private async ensureMemoryInitialized(): Promise<void> {
+    if (!this.memoryManager || this.memoryInitialized) {
+      return;
+    }
+    await this.memoryManager.initializeAll({ sessionId: this.sessionId ?? "session", reset: false });
+    this.memoryInitialized = true;
   }
 
   private appendMessage(message: ChatMessage): void {
@@ -3490,8 +3415,15 @@ export class AgentController {
     this.sessionId = snapshot.id;
     this.sessionStartPromise = undefined;
     this.messages = [...snapshot.messages];
-    this.lastLearnedMessageCount = this.messages.length;
-    this.learningInFlight = false;
+    this.memoryInitialized = false;
+    // Hydrate the review cadence from prior user turns so resuming a session doesn't re-fire reviews
+    // for work already reviewed (Hermes turn_context hydration).
+    this.userTurnCount = snapshot.messages.filter((message) => message.role === "user").length;
+    this.toolIterationCount = 0;
+    this.lastMemoryReviewTurnCount = this.userTurnCount;
+    this.lastSkillReviewIterationCount = 0;
+    this.lastReviewedMessageCount = snapshot.messages.length;
+    this.reviewInFlight = false;
     this.restoreTasksFromSessionRecords(snapshot.records);
     this.lastContextItems = [];
     this.mcpContextItems = [];
@@ -3598,6 +3530,9 @@ export class AgentController {
       case "/compact":
         await this.compactContext(rest);
         return;
+      case "/curator":
+        await this.handleCuratorCommand(rest);
+        return;
       case "/context": {
         this.emit({ type: "message", role: "system", text: this.formatContextReport() });
         this.emitContextUsage();
@@ -3702,7 +3637,7 @@ export class AgentController {
         this.emit({
           type: "message",
           role: "system",
-          text: `Unknown command ${command}. Available commands: /new, /compact, /context, /doctor, /index, /pin, /unpin, /pins, /inspect, /audit, /capabilities, /commands, /mcp, /workers, /worker, /agents, /review, /skills, /skill, /memory, /clear, /stop, /history, /resume, /fork, /diff, /export, /model, /models, /agent, /ask, /plan, /manual, /smart, /full-auto, /config.`
+          text: `Unknown command ${command}. Available commands: /new, /compact, /curator, /context, /doctor, /index, /pin, /unpin, /pins, /inspect, /audit, /capabilities, /commands, /mcp, /workers, /worker, /agents, /review, /skills, /skill, /memory, /clear, /stop, /history, /resume, /fork, /diff, /export, /model, /models, /agent, /ask, /plan, /manual, /smart, /full-auto, /config.`
         });
     }
   }
@@ -4300,9 +4235,6 @@ export class AgentController {
       workers: this.workers.list(),
       activeContext: await this.activeContextSummary(),
       memories: await this.memorySummaries(),
-      learnedLessons: await this.learnedLessonSummaries(),
-      pendingSkills: this.listPendingSkills(),
-      pendingAgents: this.listPendingAgents(),
       capabilityCache: await this.capabilitySummaries(activeProfile.id),
       inspector: this.inspectorSummary(),
       settings: {
@@ -4352,93 +4284,13 @@ export class AgentController {
       return [];
     }
     const memories = await this.memoryStore.list().catch(() => []);
-    // Learned lessons are surfaced in the dedicated Learned panel, not the manual Memory list.
-    return plainMemoriesFrom(memories).map((memory) => ({
+    return memories.map((memory) => ({
       id: memory.id,
       text: memory.text,
       createdAt: memory.createdAt,
       scope: memory.scope ?? "workspace",
       namespace: memory.namespace
     }));
-  }
-
-  private async learnedLessonSummaries(): Promise<readonly AgentLearnedLessonSummary[]> {
-    if (!this.memoryStore) {
-      return [];
-    }
-    const memories = await this.memoryStore.list().catch(() => []);
-    return [...learnedLessonsFrom(memories)]
-      .sort((a, b) => b.createdAt - a.createdAt)
-      .map((lesson) => ({
-        id: lesson.id,
-        kind: lesson.kind,
-        status: lesson.status,
-        outcome: lesson.outcome,
-        scope: lesson.scope,
-        paths: lesson.paths,
-        body: lesson.body,
-        createdAt: lesson.createdAt
-      }));
-  }
-
-  async acceptLesson(id: string): Promise<void> {
-    await this.restatusLesson(id, "accepted");
-  }
-
-  async editLesson(id: string, body: string): Promise<void> {
-    if (!this.memoryStore || !body.trim()) {
-      return;
-    }
-    const lesson = learnedLessonsFrom(await this.memoryStore.list()).find((item) => item.id === id);
-    if (!lesson) {
-      return;
-    }
-    const text = serializeLessonText({ kind: lesson.kind, outcome: lesson.outcome, status: lesson.status, paths: lesson.paths, body });
-    await this.memoryStore.update(id, text, { scope: lesson.scope }).catch(() => undefined);
-    await this.publishState();
-  }
-
-  async rejectLesson(id: string): Promise<void> {
-    if (!this.memoryStore) {
-      return;
-    }
-    const lesson = learnedLessonsFrom(await this.memoryStore.list()).find((item) => item.id === id);
-    if (!lesson) {
-      return;
-    }
-    await this.memoryStore.remove(id);
-    this.persistSessionRecord((sessionId) => ({
-      type: "learning",
-      sessionId,
-      createdAt: Date.now(),
-      event: "rejected",
-      kind: "lesson",
-      ref: id,
-      summary: lesson.body.slice(0, 160)
-    }));
-    await this.publishState();
-  }
-
-  private async restatusLesson(id: string, status: LearnedLesson["status"]): Promise<void> {
-    if (!this.memoryStore) {
-      return;
-    }
-    const lesson = learnedLessonsFrom(await this.memoryStore.list()).find((item) => item.id === id);
-    if (!lesson || lesson.status === status) {
-      return;
-    }
-    const text = serializeLessonText({ kind: lesson.kind, outcome: lesson.outcome, status, paths: lesson.paths, body: lesson.body });
-    await this.memoryStore.update(id, text, { scope: lesson.scope }).catch(() => undefined);
-    this.persistSessionRecord((sessionId) => ({
-      type: "learning",
-      sessionId,
-      createdAt: Date.now(),
-      event: "accepted",
-      kind: "lesson",
-      ref: id,
-      summary: lesson.body.slice(0, 160)
-    }));
-    await this.publishState();
   }
 
   private async capabilitySummaries(profileId: string): Promise<readonly AgentCapabilitySummary[]> {
@@ -4732,15 +4584,6 @@ function uniqueStrings(values: readonly string[] | undefined): readonly string[]
   return [...new Set((values ?? []).map((value) => value.trim()).filter(Boolean))];
 }
 
-function pathFromToolArguments(argumentsJson: string): string | undefined {
-  try {
-    const parsed = JSON.parse(argumentsJson);
-    return parsed && typeof parsed.path === "string" && parsed.path.trim() ? parsed.path.trim() : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 function formatTaskLine(task: CodeForgeTask): string {
   const owner = task.owner ? ` owner=${task.owner}` : "";
   const blockedBy = task.blockedBy.length > 0 ? ` blockedBy=${task.blockedBy.join(",")}` : "";
@@ -4774,7 +4617,8 @@ const localAgentEditTools = ["open_diff", "propose_patch", "write_file", "edit_f
 const localAgentCommandTools = ["run_command"] as const;
 const localAgentMcpTools = ["mcp_call_tool", "mcp_list_resources", "mcp_read_resource"] as const;
 const localAgentAutomationTools = ["spawn_agent", "worker_output"] as const;
-const localAgentMemoryTools = ["memory_write"] as const;
+const localAgentMemoryTools = ["memory", "fact_store", "fact_feedback"] as const;
+const localAgentSkillTools = ["skill_manage", "skill_view", "skills_list"] as const;
 
 function localAgentWorkerDefinition(agent: LocalAgent): WorkerDefinition {
   const label = agent.label?.trim() || agent.name;
@@ -4842,6 +4686,9 @@ function localAgentAllowedToolNames(agent: LocalAgent): readonly WorkerDefinitio
     } else if (tool === "memory" || tool === "remember") {
       addTools(allowed, localAgentReadTools);
       addTools(allowed, localAgentMemoryTools);
+    } else if (tool === "skill" || tool === "skills") {
+      addTools(allowed, localAgentReadTools);
+      addTools(allowed, localAgentSkillTools);
     } else if (tool === "all") {
       addTools(allowed, localAgentReadTools);
       addTools(allowed, localAgentCodeIntelTools);
@@ -4854,6 +4701,7 @@ function localAgentAllowedToolNames(agent: LocalAgent): readonly WorkerDefinitio
       addTools(allowed, localAgentMcpTools);
       addTools(allowed, localAgentAutomationTools);
       addTools(allowed, localAgentMemoryTools);
+      addTools(allowed, localAgentSkillTools);
     } else if (knownToolNames.has(tool)) {
       allowed.add(tool);
     }
@@ -5186,6 +5034,67 @@ const readOnlyToolNames = new Set([
   "notebook_read"
 ]);
 
+const maxBackgroundReviewIterations = 6;
+const maxCuratorIterations = 24;
+
+function safeParseArgs(json: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(json);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function reviewToolSummary(output: string, label: string): string {
+  try {
+    return (JSON.parse(output) as { success?: boolean }).success ? label : "";
+  } catch {
+    return "";
+  }
+}
+
+function describeMemoryWrite(args: Record<string, unknown>): string {
+  const action = String(args.action ?? "update");
+  const target = args.target === "user" ? "user profile" : "memory";
+  const verb = action === "add" ? "saved to" : action === "remove" ? "removed from" : "updated";
+  return `${verb} ${target}`;
+}
+
+function summarizeReviewActions(actions: readonly string[]): string {
+  return [...new Set(actions.filter(Boolean))].join(" · ");
+}
+
+// Recover memory/skill tool calls from a non-native model's text (the CodeForge JSON action protocol).
+function reviewActionsFromText(content: string): { readonly name: string; readonly args: Record<string, unknown> }[] {
+  const out: { name: string; args: Record<string, unknown> }[] = [];
+  for (const action of parseActionsFromAssistantText(content)) {
+    if (action.type === "memory") {
+      out.push({ name: "memory", args: { action: action.action, target: action.target, content: action.content, old_text: action.oldText } });
+    } else if (action.type === "skill_manage") {
+      out.push({
+        name: "skill_manage",
+        args: {
+          action: action.action,
+          name: action.name,
+          content: action.content,
+          old_string: action.oldString,
+          new_string: action.newString,
+          replace_all: action.replaceAll,
+          file_path: action.filePath,
+          file_content: action.fileContent,
+          absorbed_into: action.absorbedInto
+        }
+      });
+    } else if (action.type === "skill_view") {
+      out.push({ name: "skill_view", args: { name: action.name, file_path: action.filePath } });
+    } else if (action.type === "skills_list") {
+      out.push({ name: "skills_list", args: {} });
+    }
+  }
+  return out;
+}
+
 function isInternalAutomationAction(action: AgentAction): boolean {
   return action.type === "spawn_agent" || action.type === "worker_output";
 }
@@ -5205,7 +5114,11 @@ function isInternalReadAction(action: AgentAction): boolean {
     || action.type === "code_symbols"
     || action.type === "mcp_list_resources"
     || action.type === "mcp_read_resource"
-    || action.type === "notebook_read";
+    || action.type === "notebook_read"
+    || action.type === "skill_view"
+    || action.type === "skills_list"
+    || action.type === "fact_store"
+    || action.type === "fact_feedback";
 }
 
 function formatCommandResult(action: RunCommandAction, result: CommandResult): string {
@@ -5288,8 +5201,18 @@ function approvalAcceptedText(action: AgentAction, transcriptResult: string): st
       return `Read notebook ${action.path}.`;
     case "notebook_edit_cell":
       return `Edited notebook ${action.path} cell ${action.index}.`;
-    case "memory_write":
-      return "Saved local memory.";
+    case "memory":
+      return "Updated curated memory.";
+    case "fact_store":
+      return `Durable memory: ${action.action}.`;
+    case "fact_feedback":
+      return "Rated a durable fact.";
+    case "skill_manage":
+      return `Skill ${action.action}: ${action.name}.`;
+    case "skill_view":
+      return `Viewed skill ${action.name}.`;
+    case "skills_list":
+      return "Listed skills.";
     case "write_file":
       return `Wrote ${action.path}.`;
     case "edit_file":

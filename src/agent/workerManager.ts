@@ -1,7 +1,6 @@
 import { parseActionsFromAssistantText, parseToolActionDetailed } from "../core/actionProtocol";
 import { ContextBuilder } from "../core/contextBuilder";
 import { executeLocalReadOnlyTools, LocalToolProgress } from "../core/localToolExecutor";
-import { MemoryEntry } from "../core/memory";
 import { evaluateActionPermission } from "../core/permissions";
 import { SessionRecord } from "../core/session";
 import {
@@ -25,8 +24,6 @@ export interface WorkerManagerOptions {
   readonly workspace: WorkspacePort;
   readonly contextLimits: () => ContextLimits;
   readonly maxConcurrentWorkers?: () => number;
-  readonly memories: (definition: WorkerDefinition) => Promise<readonly MemoryEntry[]>;
-  readonly learnedDigest?: (definition: WorkerDefinition, prompt: string) => Promise<string | undefined>;
   readonly skillsDigest?: (definition: WorkerDefinition, prompt: string) => Promise<string | undefined>;
   readonly mcpResources: () => readonly ContextItem[];
   readonly createProvider: () => Promise<LlmProvider>;
@@ -186,16 +183,6 @@ const workerAutomationToolInstruction = `This worker may also delegate focused w
 }
 
 Use delegation for independent review, exploration, or verification work. The spawned agent inherits CodeForge's local endpoint, repo context, permission policy, and approval bridge.`;
-
-const workerMemoryToolInstruction = `This worker may also request approval to save durable local memory:
-
-{
-  "actions": [
-    { "type": "memory_write", "text": "stable preference or repository fact", "scope": "agent", "agent": "agent-name", "reason": "why this should persist" }
-  ]
-}
-
-Only save stable user preferences or repository facts that should affect future sessions. Memory writes are persistent, local, inspectable, and approval-gated.`;
 
 const workerMcpResourceToolInstruction = `This worker may also read resources from explicitly configured MCP servers:
 
@@ -412,8 +399,6 @@ export class WorkerManager {
       this.appendTranscript(task, "status", `Calling ${provider.profile.label} / ${model}.`);
 
       const context = new ContextBuilder(this.options.workspace, this.effectiveContextLimits(), {
-        memories: await this.options.memories(task.definition),
-        learnedDigest: await this.options.learnedDigest?.(task.definition, task.prompt),
         skillsDigest: await this.options.skillsDigest?.(task.definition, task.prompt),
         mcpResources: this.options.mcpResources()
       });
@@ -711,7 +696,6 @@ function workerToolInstruction(definition: WorkerDefinition): string {
   const canEdit = definition.allowedToolNames.some((tool) => tool === "edit_file" || tool === "write_file" || tool === "propose_patch" || tool === "open_diff");
   const canCommand = definition.allowedToolNames.some((tool) => tool === "run_command");
   const canAutomate = definition.allowedToolNames.some((tool) => tool === "spawn_agent" || tool === "worker_output");
-  const canRemember = definition.allowedToolNames.some((tool) => tool === "memory_write");
   const canCodeIntel = definition.allowedToolNames.some((tool) => tool === "code_hover" || tool === "code_definition" || tool === "code_references" || tool === "code_symbols");
   const canState = definition.allowedToolNames.some((tool) => tool === "tool_search" || tool === "tool_list" || tool === "task_create" || tool === "task_update" || tool === "task_list" || tool === "task_get");
   const canQuestion = definition.allowedToolNames.some((tool) => tool === "ask_user_question");
@@ -726,7 +710,6 @@ function workerToolInstruction(definition: WorkerDefinition): string {
     canEdit ? workerEditToolInstruction : undefined,
     canCommand ? workerCommandToolInstruction : undefined,
     canAutomate ? workerAutomationToolInstruction : undefined,
-    canRemember ? workerMemoryToolInstruction : undefined,
     canMcpResource ? workerMcpResourceToolInstruction : undefined
   ].filter((part): part is string => Boolean(part)).join("\n\n");
 }

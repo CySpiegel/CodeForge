@@ -291,7 +291,7 @@ async function safeGlob(workspace: WorkspacePort, pattern: string, limit: number
   }
 }
 
-function parseMarkdownFile(raw: string): ParsedMarkdownFile {
+export function parseMarkdownFile(raw: string): ParsedMarkdownFile {
   const normalized = raw.replace(/\r\n/g, "\n");
   if (!normalized.startsWith("---\n")) {
     return { metadata: {}, body: normalized };

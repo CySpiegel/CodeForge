@@ -39,8 +39,8 @@ test("parses and validates registered tools", () => {
   assert.deepEqual(toolSearch, { type: "tool_search", query: "notebook edit", limit: 5, reason: "load deferred schema" });
   assert.equal(toolSearch ? validateAction(toolSearch).ok : false, true);
 
-  const memory = parseAction("memory_write", { text: "Prefer local endpoints.", scope: "workspace" });
-  assert.deepEqual(memory, { type: "memory_write", text: "Prefer local endpoints.", scope: "workspace", agent: undefined, reason: undefined });
+  const memory = parseAction("memory", { action: "add", target: "memory", content: "Prefer local endpoints." });
+  assert.deepEqual(memory, { type: "memory", action: "add", target: "memory", content: "Prefer local endpoints.", oldText: undefined, reason: undefined });
   assert.equal(memory ? validateAction(memory).ok : false, true);
 
   const question = parseAction("ask_user_question", {
@@ -199,7 +199,12 @@ const validToolSamples: Record<AgentAction["type"], Record<string, unknown>> = {
   mcp_read_resource: { serverId: "local", uri: "file:///notes.md" },
   notebook_read: { path: "notebooks/demo.ipynb" },
   notebook_edit_cell: { path: "notebooks/demo.ipynb", index: 0, content: "print('hi')", language: "python", kind: "code" },
-  memory_write: { text: "Prefer local endpoints.", scope: "workspace" },
+  memory: { action: "add", target: "memory", content: "Prefer local endpoints." },
+  skill_manage: { action: "create", name: "add-a-tool", content: "---\nname: add-a-tool\ndescription: d\n---\nbody" },
+  skill_view: { name: "add-a-tool" },
+  skills_list: {},
+  fact_store: { action: "save", content: "A durable fact." },
+  fact_feedback: { id: 1, helpful: true },
   propose_patch: { patch: validPatch },
   write_file: { path: "src/new.ts", content: "export {};\n" },
   edit_file: { path: "src/core/types.ts", oldText: "old", newText: "new" },
