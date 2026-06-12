@@ -1029,7 +1029,9 @@ export class AgentController {
 
     try {
       const provider = await this.createProvider();
-      const model = await this.resolveModel(provider, abort.signal);
+      const model = this.config.getAuxiliaryModel()
+        ? await this.resolveAuxiliaryModel(provider, abort.signal)
+        : await this.resolveModel(provider, abort.signal);
       await this.compactSessionWithProvider(provider, model, abort, focus);
       await this.publishTranscript();
       this.emit({ type: "message", role: "system", text: "Context compacted with the selected model." });
@@ -1051,7 +1053,10 @@ export class AgentController {
 
     this.emit({ type: "status", text: `Auto-compacting context at ${usage.percent}% ${phase}.` });
     try {
-      await this.compactSessionWithProvider(provider, model, abort, `Automatic compaction at ${usage.percent}% context usage.`);
+      const compactModel = this.config.getAuxiliaryModel()
+        ? await this.resolveAuxiliaryModel(provider, abort.signal, model)
+        : model;
+      await this.compactSessionWithProvider(provider, compactModel, abort, `Automatic compaction at ${usage.percent}% context usage.`);
       await this.publishTranscript();
       this.emit({ type: "message", role: "system", text: `Context auto-compacted at ${usage.percent}%.` });
       this.emitContextUsage();
@@ -2769,7 +2774,9 @@ export class AgentController {
     ];
     const abort = new AbortController();
     const provider = await this.createProvider();
-    const model = await this.resolveModel(provider, abort.signal);
+    const model = this.config.getAuxiliaryModel()
+      ? await this.resolveAuxiliaryModel(provider, abort.signal)
+      : await this.resolveModel(provider, abort.signal);
     // Only offer native tool schemas when the endpoint supports them; otherwise rely on the JSON
     // action-protocol fallback taught by REVIEW_TOOL_HINT.
     const capabilities = await this.capabilities(provider, model, abort.signal);
@@ -2951,7 +2958,9 @@ export class AgentController {
     ];
     const abort = new AbortController();
     const provider = await this.createProvider();
-    const model = await this.resolveModel(provider, abort.signal);
+    const model = this.config.getAuxiliaryModel()
+      ? await this.resolveAuxiliaryModel(provider, abort.signal)
+      : await this.resolveModel(provider, abort.signal);
     const capabilities = await this.capabilities(provider, model, abort.signal);
     const tools = capabilities.nativeToolCalls ? this.reviewToolSchemas().filter((tool) => tool.name.startsWith("skill")) : undefined;
     let lastContent = "";
@@ -3198,6 +3207,33 @@ export class AgentController {
     }
     this.notifyIfSelectedModelUnavailable(provider.profile, inspection);
     return this.selectedModelFor(provider.profile, inspection);
+  }
+
+  // Resolve the model for one of CodeForge's own utility turns (compaction / learning review /
+  // curator). Uses codeforge.model.auxiliary when it is set AND actually served by the endpoint;
+  // otherwise falls back to the provided main model, or resolves the selected model.
+  private async resolveAuxiliaryModel(provider: LlmProvider, signal: AbortSignal, fallbackModel?: string): Promise<string> {
+    const aux = this.config.getAuxiliaryModel();
+    const fallback = async (): Promise<string> => fallbackModel ?? this.resolveModel(provider, signal);
+    if (!aux) {
+      return fallback();
+    }
+    let inspection = this.endpointCache.get(provider.profile.id);
+    if (!inspection) {
+      inspection = await provider.inspectEndpoint(signal).catch(() => undefined);
+      if (inspection) {
+        this.endpointCache.set(provider.profile.id, inspection);
+      }
+    }
+    if (!inspection) {
+      return fallback();
+    }
+    const needle = aux.toLowerCase();
+    const available = inspection.models.some((model) =>
+      model.id.trim().toLowerCase() === needle
+      || (model.aliases ?? []).some((alias) => alias.trim().toLowerCase() === needle)
+    );
+    return available ? aux : fallback();
   }
 
   private async capabilities(provider: LlmProvider, model: string, signal: AbortSignal): Promise<ProviderCapabilities> {

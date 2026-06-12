@@ -132,6 +132,12 @@ export class CodeForgeConfigService {
     return this.config().get<string>("model", "").trim();
   }
 
+  // Optional smaller/faster model for CodeForge's own utility turns (compaction, learning review,
+  // curator). Empty string means "use the selected model for everything".
+  getAuxiliaryModel(): string {
+    return this.config().get<string>("model.auxiliary", "").trim();
+  }
+
   getActiveProfileId(): string {
     return this.config().get<string>("activeProfile", "openai-api-local");
   }

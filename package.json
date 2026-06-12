@@ -166,6 +166,12 @@
           "scope": "resource",
           "markdownDescription": "Maximum tokens the model may generate per turn (`max_tokens` sent to the endpoint).\n\n- `32000` (default) — cap output at ~32k, matching Claude Code's default. Automatically bounded to half the context window (so the prompt always has room) and to the model's reported output limit, so it stays safe on small-context models.\n- `0` — **No limit**: send no `max_tokens`. The endpoint/model decides; on vLLM this generates up to the remaining context window. Use this for the largest possible single response.\n- `>= 1` — your own cap, bounded the same way as the default."
         },
+        "codeforge.model.auxiliary": {
+          "type": "string",
+          "default": "",
+          "scope": "resource",
+          "markdownDescription": "Optional smaller/faster model id used for CodeForge's own utility turns — context compaction, the background self-improvement (learning) review, and curator consolidation — instead of your main coding model. Leave empty to use the selected model for everything. Falls back to the selected model when the id is not served by the endpoint. Keeping these background turns off your main model reduces latency and tokens-per-minute pressure on a single local endpoint."
+        },
         "codeforge.agent.mode": {
           "type": "string",
           "default": "agent",

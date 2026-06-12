@@ -407,6 +407,7 @@ export function createControllerHarness(options: ControllerHarnessOptions): Cont
     getPermissionPolicy: () => permissionPolicy,
     getMcpServers: () => options.mcpServers ?? [],
     getConfiguredModel: () => options.configuredModel ?? fakeProfile.defaultModel ?? "",
+    getAuxiliaryModel: () => "",
     getContextLimits: () => contextLimits,
     getMemorySettings: () => memorySettings,
     getCuratorSettings: () => ({ enabled: false, intervalHours: 168, minIdleHours: 2, staleAfterDays: 30, archiveAfterDays: 90, backupEnabled: true, backupKeep: 5 }),
