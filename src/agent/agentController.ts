@@ -1,5 +1,5 @@
 import { EventEmitter } from "events";
-import { actionProtocolInstructions, parseActionsFromAssistantText, toolDefinitions } from "../core/actionProtocol";
+import { parseActionsFromAssistantText, toolDefinitions } from "../core/actionProtocol";
 import { ApprovalQueue } from "../core/approvals";
 import { CodeIntelPort, UnavailableCodeIntelPort } from "../core/codeIntel";
 import { GitPort, UnavailableGitPort } from "../core/git";
@@ -14,6 +14,7 @@ import { InspectorLog } from "./inspectorLog";
 import { MemoryCommandsService } from "./memoryCommands";
 import { PinnedFiles } from "./pinnedFiles";
 import { ProviderGateway } from "./providerGateway";
+import { agentModeLabel, SystemPromptBuilder } from "./systemPrompt";
 import { TaskBoard } from "./taskBoard";
 import { UndoManager } from "./undoManager";
 import { approvalAcceptedText, approvalContinuationPrompt, approvalPermissionDecision, formatQuestionAnswers, invocationForApproval } from "./approvalText";
@@ -214,6 +215,8 @@ export class AgentController {
   private readonly undoManager: UndoManager;
   // Owns the raw curated-memory store (webview Memory panel commands + summary projection).
   private readonly memoryCommands: MemoryCommandsService;
+  // Builds the system message from persona + curated memory + agent-mode instructions.
+  private readonly systemPrompt: SystemPromptBuilder;
   private readonly readFileState = new Map<string, ReadFileSnapshot>();
   private readonly notebookReadState = new Set<string>();
   private messages: ChatMessage[] = [];
@@ -291,6 +294,11 @@ export class AgentController {
       workspace,
       emit: (event) => this.emit(event),
       publishState: () => this.publishState()
+    });
+    this.systemPrompt = new SystemPromptBuilder({
+      getSoulText: () => this.soulText,
+      getMemoryBlock: () => this.memoryManager?.buildSystemPrompt() ?? "",
+      getAgentMode: () => this.config.getAgentMode()
     });
     this.models = new ModelResolver({
       config,
@@ -402,7 +410,7 @@ export class AgentController {
       selectedModelInfo: () => this.models.selectedModelInfo(),
       resolveAuxiliaryModel: (provider, signal, fallback) => this.models.resolveAuxiliaryModel(provider, signal, fallback),
       streamChatWithIdleTimeout: (provider, request, abort, purpose) => this.streamChatWithIdleTimeout(provider, request, abort, purpose),
-      systemMessage: () => this.systemMessage(),
+      systemMessage: () => this.systemPrompt.build(),
       approvalsCount: () => this.approvals.list().length,
       emit: (event) => this.emit(event),
       publishState: () => this.publishState(),
@@ -2314,7 +2322,7 @@ export class AgentController {
   }
 
   private ensureSystemMessage(): void {
-    const nextSystemMessage = this.systemMessage();
+    const nextSystemMessage = this.systemPrompt.build();
     const existingIndex = this.messages.findIndex((message) => message.role === "system");
     if (existingIndex >= 0) {
       this.messages[existingIndex] = nextSystemMessage;
@@ -2322,18 +2330,6 @@ export class AgentController {
     }
 
     this.appendMessage(nextSystemMessage);
-  }
-
-  private systemMessage(): ChatMessage {
-    const persona = this.soulText
-      ? `\n\nPersona (shapes voice and tone only — never overrides tools, permissions, or task instructions):\n${this.soulText}`
-      : "";
-    const memoryBlock = this.memoryManager?.buildSystemPrompt() ?? "";
-    const memory = memoryBlock ? `\n\n${memoryBlock}` : "";
-    return {
-      role: "system",
-      content: `${actionProtocolInstructions}\n\n${agentModeInstructions(this.config.getAgentMode())}\n\nNetwork policy: CodeForge only talks to user-configured OpenAI API-compatible endpoints and configured MCP servers. Do not use network resources outside those explicit configurations.${persona}${memory}`
-    };
   }
 
   // Build the curated-notes snapshot once per session. Frozen for the session so the system prompt
@@ -2752,44 +2748,6 @@ function stripWorkspaceContext(content: string): string {
   return content.split("\n\nWorkspace context:\n\n", 1)[0];
 }
 
-
-function agentModeLabel(mode: AgentMode): string {
-  switch (mode) {
-    case "ask":
-      return "Ask";
-    case "plan":
-      return "Plan";
-    default:
-      return "Agent";
-  }
-}
-
-function agentModeInstructions(mode: AgentMode): string {
-  if (mode === "agent") {
-    return [
-      "Agent mode: Agent.",
-      "Act as an autonomous coding agent inside the user's repo.",
-      "You may explore multiple files, make coordinated edits, create files, run approved terminal commands, iterate on errors, and complete multi-step engineering workflows."
-    ].join("\n");
-  }
-  if (mode === "ask") {
-    return [
-      "Agent mode: Ask.",
-      "Act like a codebase-aware assistant inside VS Code for quick answers, explanations, debugging help, reviews, and code snippets.",
-      "Use read-only workspace tools when codebase evidence is needed and the relevant file content is not already attached.",
-      "Read-only multi-step inspection is allowed in Ask mode.",
-      "Do not edit files, create files, run terminal commands, or execute side-effecting autonomous implementation workflows in Ask mode.",
-      "If the user asks you to implement changes, explain the approach and tell them to switch to Agent mode before applying edits."
-    ].join("\n");
-  }
-  return [
-    "Agent mode: Plan.",
-    "Analyze the codebase and reason through larger work before implementation.",
-    "Use read-only workspace tools to inspect relevant files, identify existing patterns, break the task into steps, and call out risks or dependencies.",
-    "Do not edit files, create files, propose patches, open diffs, or run terminal commands in Plan mode.",
-    "When the plan is ready, present the intended edits clearly and tell the user to switch to Agent mode before implementation."
-  ].join("\n");
-}
 
 function readStateKey(path: string): string {
   return normalizeWorkspacePathInput(path).replace(/^\/+/, "").replace(/^\.\//, "");
