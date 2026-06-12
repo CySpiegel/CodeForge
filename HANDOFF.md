@@ -1,6 +1,6 @@
 # CodeForge Handoff
 
-Last updated: 2026-06-08
+Last updated: 2026-06-12
 
 ## Project Direction
 
@@ -16,7 +16,7 @@ Keep these design constraints intact:
 - network access limited to localhost, private IP ranges, and explicitly allowlisted on-prem hosts
 - all file edits, commands, MCP service calls, and memory writes routed through typed tools and permission policy
 
-## Current State (v0.1.14)
+## Current State (v0.1.15)
 
 Core product (Phases 0–11) is unchanged and described in the git history. Several recent bodies of work sit on top:
 
@@ -28,12 +28,37 @@ Core product (Phases 0–11) is unchanged and described in the git history. Seve
 
 4. **Visible learning + Learned-panel fix** (v0.1.13) — described below.
 
-5. **Context-length detection + startup model selection** (v0.1.14, this session) — described below.
+5. **Context-length detection + startup model selection** (v0.1.14) — described below.
 
-**Tests: 206 pass / 0 fail.** `tsc` clean, extension compiles. Run:
+6. **agentController.ts decomposition** (this session, post-v0.1.15) — pure structural refactor, described next.
+
+**Tests: 278 pass / 0 fail.** `tsc` clean, extension compiles. Run:
 ```bash
 npm run compile && npm run compile:tests && node --test out-test/test/unit/*.test.js out-test/test/integration/*.test.js
 ```
+
+## agentController.ts decomposition (this session — structural, behavior-preserving)
+
+Goal (user directive): "one function does one thing", "we should never be doing huge monolithic code files", proper design patterns. `agentController.ts` went from **5,763 → 2,869 lines (≈50%)** by lifting every *separable* concern into its own SRP module, while the **run engine stays cohesive** (run loop, tool execution, approval flow, streaming, system-message/context wiring, collaborator orchestration). No behavior change — verified by an 8-agent adversarial workflow (byte-level diffs vs pre-refactor `f0155f4`) reporting **zero regressions**, plus the full suite green at every commit.
+
+**Extraction pattern (follow it for any future split):** each module declares an `XxxDeps`/host interface; the controller constructs it with arrow closures bound to its own methods/state (same DI shape as the pre-existing `WorkerManager`/`SessionService`/`ContextManager`). Type-only cross-imports use `import type`. Backward-compatible test imports preserved via re-export (e.g. `export { isContextOverflowError } from "./toolText"`). A *wide* interface on a top-level dispatcher (the slash router) is inherent, not a smell — do not force-split a cohesive flow just to shrink an interface.
+
+**Modules extracted this session (commits `f0155f4`..`0731c89`):**
+- `src/agent/slashCommandRouter.ts` (673) — the entire `/command` surface: parse + dispatch + all report/list builders. `SlashCommandHost` is intentionally wide.
+- `src/core/toolDiscovery.ts` (231) — pure tool discovery + schema search + `parseNativeToolCall` + markers/`readOnlyToolNames`/`McpToolBinding`/`ToolSchemaSearchResult`. Core (no `vscode`), shared by the run engine. Unit-tested.
+- `src/agent/taskBoard.ts` (131) — model-facing task board (task_create/update/list/get) + session persist/restore. `getState` does **not** project tasks. Unit-tested.
+- `src/agent/undoManager.ts` (119) — undo snapshot stack + `/undo` restore. Public `AgentController.undo()` delegate kept for the view provider.
+- `src/agent/approvalText.ts` (118) — pure approval presentation builders (incl. the exhaustive `approvalAcceptedText` switch).
+- `src/agent/providerGateway.ts` (79) — provider construction + per-(profile,model) capability probe/cache.
+- `src/agent/inspectorLog.ts` (73) — run-inspector + permission-audit ring buffers and the `inspector` UI event.
+- `src/agent/commandResultText.ts` (37) — command/hook result rendering.
+- **Consolidated into existing cohesive homes (not a new junk-drawer module):** error-classification helpers (`isContextOverflowError`, `isRecoverableEditPreflightError`, `modelRecoverableToolError`, `isMissingFileError`, `isRecord`) → `src/agent/toolText.ts`; action-visibility predicates (`isInternal{Automation,State,Read}Action`) → `src/core/toolRegistry.ts` beside the other action predicates.
+
+This builds on the earlier decomposition phases (also in git history): `sessionService.ts`, `contextManager.ts`, `modelResolver.ts`, `mcpCoordinator.ts`, `doctorService.ts`, `learningCoordinator.ts`, `learningReview.ts`, `modelStream.ts`, `agentUiTypes.ts`, `core/git.ts` + `gitTool.ts`. The controller is now a thin orchestrator over ~25 focused modules.
+
+**Two near-misses caught by verification (already fixed before their commits):** (1) the view provider calls `controller.undo()` directly — the full-project typecheck caught it; preserved via a thin public delegate. (2) a hand-written `formatTask` in `taskBoard.ts` diverged from the original (`Active:` vs `Active form:`, `toISOString` vs `toLocaleString`, the metadata key-count guard) — corrected to byte-match. **Lesson: when re-typing a moved body, diff it against `git show <base>:<file>` rather than trusting memory.**
+
+**Follow-up (low priority, not done):** `src/agent/workerManager.ts` keeps its own copies of `codeForgeToolSchemaMarker` + `escapeRegExp` + an inline schema-marker discovery regex; these could now import from `core/toolDiscovery.ts` to de-duplicate.
 
 ## Learning + multi-agent system
 
@@ -169,7 +194,12 @@ An adversarial multi-agent review confirmed 4 issues; all fixed + covered or rea
 - Worker concurrency default is 3; raise `workers.maxConcurrent` cautiously for a single local endpoint.
 
 ## Important files (quick map)
-- Orchestration / learning loop: `src/agent/agentController.ts`
+- Orchestration / run engine (run loop, tool execution, approval flow, streaming, system message, collaborator wiring): `src/agent/agentController.ts` — now a thin orchestrator; separable concerns live in the modules below.
+- Slash commands: `src/agent/slashCommandRouter.ts`
+- Tool discovery + schema search + native-call parse: `src/core/toolDiscovery.ts`
+- Task board: `src/agent/taskBoard.ts` · Undo: `src/agent/undoManager.ts` · Provider/capability gateway: `src/agent/providerGateway.ts` · Inspector/audit buffers: `src/agent/inspectorLog.ts`
+- Approval presentation: `src/agent/approvalText.ts` · Command-result text: `src/agent/commandResultText.ts` · Tool-error text/classification: `src/agent/toolText.ts`
+- Session/context/model/MCP/doctor/learning collaborators: `src/agent/{sessionService,contextManager,modelResolver,mcpCoordinator,doctorService,learningCoordinator}.ts`
 - Sub-agents: `src/agent/workerManager.ts`, `src/core/workerAgents.ts`
 - Learning core: `src/core/learning.ts`, `skillProposal.ts`, `agentProposal.ts`, `learningAudit.ts`
 - Worktree adapter: `src/adapters/worktree.ts`
@@ -189,7 +219,8 @@ An adversarial multi-agent review confirmed 4 issues; all fixed + covered or rea
 - LiteLLM proxy serving `gemma-4-31B-it` (and others) — the v0.1.12 truncation reports came from this setup. LiteLLM advertises each model's context length under `max_tokens` in `/v1/models` (now read as `contextLength`).
 
 ## Session notes for next agent
-- Follow the ports-and-adapters boundaries; keep `src/core/*` testable without `vscode` imports (that is why `learning.ts`/`skillProposal.ts`/`agentProposal.ts`/`learningAudit.ts` are pure).
+- **Decomposition invariants — do not regress:** keep the **run engine cohesive** in `agentController.ts` (don't force-split the run loop / tool execution / approval flow / streaming). Any *new* separable concern gets its own module via an `XxxDeps`/host interface with controller-bound closures (the established pattern). When relocating an existing function, move it **byte-faithfully** — diff against `git show <base>:src/agent/agentController.ts`, don't retype from memory. Prefer placing a stray helper in a cohesive existing home (e.g. tool-error helpers → `toolText.ts`, action predicates → `core/toolRegistry.ts`) over creating a catch-all "misc" module.
+- Follow the ports-and-adapters boundaries; keep `src/core/*` testable without `vscode` imports (that is why `learning.ts`/`skillProposal.ts`/`agentProposal.ts`/`learningAudit.ts`/`toolDiscovery.ts` are pure).
 - New `src/core` logic should ship with a focused unit test; controller behavior with a harness integration test (`test/harness/agentControllerHarness.ts`, `ScriptedLlmProvider`, `FakeMemoryStore`).
 - The harness defaults `learning.enabled` to **false** so existing tests are unaffected; opt in per-test via `learningSettings`.
 - Run `npm run compile && npm run compile:tests && node --test out-test/test/unit/*.test.js out-test/test/integration/*.test.js` before handoff.

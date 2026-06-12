@@ -11,6 +11,7 @@ import { McpCoordinator } from "./mcpCoordinator";
 import { SessionService } from "./sessionService";
 import { ContextManager } from "./contextManager";
 import { InspectorLog } from "./inspectorLog";
+import { MemoryCommandsService } from "./memoryCommands";
 import { ProviderGateway } from "./providerGateway";
 import { TaskBoard } from "./taskBoard";
 import { UndoManager } from "./undoManager";
@@ -107,7 +108,6 @@ export * from "./agentUiTypes";
 import {
   AgentActiveContextSummary,
   AgentLocalCommandSummary,
-  AgentMemorySummary,
   AgentModelSummary,
   AgentProfileSummary,
   AgentSessionSummary,
@@ -211,6 +211,8 @@ export class AgentController {
   private readonly inspector: InspectorLog;
   // Owns the bounded pre-change snapshot stack and the /undo restore.
   private readonly undoManager: UndoManager;
+  // Owns the raw curated-memory store (webview Memory panel commands + summary projection).
+  private readonly memoryCommands: MemoryCommandsService;
   private readonly readFileState = new Map<string, ReadFileSnapshot>();
   private readonly notebookReadState = new Set<string>();
   private messages: ChatMessage[] = [];
@@ -275,6 +277,12 @@ export class AgentController {
     });
     this.taskBoard = new TaskBoard({
       record: (factory) => this.sessions.record(factory),
+      publishState: () => this.publishState()
+    });
+    this.memoryCommands = new MemoryCommandsService({
+      memoryStore,
+      recordInspector: (level, category, summary, detail) => this.inspector.record(level, category, summary, detail),
+      emit: (event) => this.emit(event),
       publishState: () => this.publishState()
     });
     this.models = new ModelResolver({
@@ -674,58 +682,22 @@ export class AgentController {
     await this.publishState();
   }
 
+  // Public memory-panel facade — the view provider and tests call these by name; logic lives in
+  // MemoryCommandsService.
   async addMemory(text: string, scope: "workspace" | "user" | "agent" = "workspace", namespace?: string): Promise<void> {
-    if (!this.memoryStore) {
-      this.emit({ type: "error", text: "Local memory is not available in this environment." });
-      return;
-    }
-    try {
-      const memory = await this.memoryStore.add(text, { scope, namespace });
-      this.inspector.record("info", "memory", `Saved ${scope} memory ${memory.id}.`, memory.text);
-      this.emit({ type: "status", text: `Saved local memory ${memory.id}.` });
-      await this.publishState();
-    } catch (error) {
-      this.emit({ type: "error", text: errorMessage(error) });
-    }
+    await this.memoryCommands.add(text, scope, namespace);
   }
 
   async updateMemory(id: string, text: string, scope: "workspace" | "user" | "agent" = "workspace", namespace?: string): Promise<void> {
-    if (!this.memoryStore) {
-      this.emit({ type: "error", text: "Local memory is not available in this environment." });
-      return;
-    }
-    try {
-      const memory = await this.memoryStore.update(id, text, { scope, namespace });
-      if (!memory) {
-        this.emit({ type: "error", text: `No local memory found for ${id}.` });
-        return;
-      }
-      this.inspector.record("info", "memory", `Updated ${scope} memory ${memory.id}.`, memory.text);
-      this.emit({ type: "status", text: `Updated local memory ${memory.id}.` });
-      await this.publishState();
-    } catch (error) {
-      this.emit({ type: "error", text: errorMessage(error) });
-    }
+    await this.memoryCommands.update(id, text, scope, namespace);
   }
 
   async removeMemory(id: string): Promise<void> {
-    if (!this.memoryStore) {
-      this.emit({ type: "error", text: "Local memory is not available in this environment." });
-      return;
-    }
-    const removed = await this.memoryStore.remove(id);
-    this.emit({ type: removed ? "status" : "error", text: removed ? `Removed local memory ${id}.` : `No local memory found for ${id}.` });
-    await this.publishState();
+    await this.memoryCommands.remove(id);
   }
 
   async clearMemories(): Promise<void> {
-    if (!this.memoryStore) {
-      this.emit({ type: "error", text: "Local memory is not available in this environment." });
-      return;
-    }
-    await this.memoryStore.clear();
-    this.emit({ type: "status", text: "Cleared all local CodeForge memories." });
-    await this.publishState();
+    await this.memoryCommands.clear();
   }
 
   async updateSettings(settings: Partial<CodeForgeSettingsUpdate>): Promise<void> {
@@ -2574,7 +2546,7 @@ export class AgentController {
       mcpContext: this.mcp.resourceSummaries(),
       workers: this.workers.list(),
       activeContext: await this.activeContextSummary(),
-      memories: await this.memorySummaries(),
+      memories: await this.memoryCommands.summaries(),
       capabilityCache: await this.providerGateway.capabilitySummaries(activeProfile.id),
       inspector: this.inspector.summary(),
       settings: {
@@ -2617,20 +2589,6 @@ export class AgentController {
       workspaceReady,
       pinnedFiles: [...this.pinnedFiles]
     };
-  }
-
-  private async memorySummaries(): Promise<readonly AgentMemorySummary[]> {
-    if (!this.memoryStore) {
-      return [];
-    }
-    const memories = await this.memoryStore.list().catch(() => []);
-    return memories.map((memory) => ({
-      id: memory.id,
-      text: memory.text,
-      createdAt: memory.createdAt,
-      scope: memory.scope ?? "workspace",
-      namespace: memory.namespace
-    }));
   }
 
   // Thin delegates to the context manager (kept on the controller so the many call sites and the
