@@ -11,6 +11,7 @@ import { McpCoordinator } from "./mcpCoordinator";
 import { SessionService } from "./sessionService";
 import { ContextManager } from "./contextManager";
 import { InspectorLog } from "./inspectorLog";
+import { ProviderGateway } from "./providerGateway";
 import { UndoManager } from "./undoManager";
 import { approvalAcceptedText, approvalContinuationPrompt, approvalPermissionDecision, formatQuestionAnswers, invocationForApproval } from "./approvalText";
 import { SlashCommandRouter } from "./slashCommandRouter";
@@ -25,7 +26,7 @@ export { buildGitArgv } from "./gitTool";
 import { ContextBuilder, contextItemKindLabel } from "../core/contextBuilder";
 import { ContextUsage, formatBytes } from "../core/contextUsage";
 import { DoctorCheck, formatDoctorReport, worstDoctorStatus } from "../core/doctor";
-import { EndpointCapabilityStore, isFreshCapability } from "../core/endpointCapabilityCache";
+import { EndpointCapabilityStore } from "../core/endpointCapabilityCache";
 import {
   loadLocalCommands,
   loadLocalAgents,
@@ -52,7 +53,6 @@ import {
   inspectConfiguredMcpServers,
   readConfiguredMcpResource
 } from "../core/mcpClient";
-import { OpenAiCompatibleProvider } from "../core/openaiAdapter";
 import { evaluateActionPermission, permissionModeLabel } from "../core/permissions";
 import { SessionRecord, SessionSnapshot, SessionStore } from "../core/session";
 import { classifyShellCommand } from "../core/shellSemantics";
@@ -72,7 +72,6 @@ import {
   ModelInfo,
   PermissionDecision,
   PermissionMode,
-  ProviderCapabilities,
   TokenUsage,
   ToolCall,
   ToolDefinition,
@@ -107,7 +106,6 @@ import { WorkerDefinition, WorkerSummary } from "../core/workerTypes";
 export * from "./agentUiTypes";
 import {
   AgentActiveContextSummary,
-  AgentCapabilitySummary,
   AgentLocalCommandSummary,
   AgentMemorySummary,
   AgentModelSummary,
@@ -196,14 +194,13 @@ export class AgentController {
   private readonly memoryStore: MemoryStore | undefined;
   private readonly codeIntel: CodeIntelPort;
   private readonly notebooks: NotebookPort;
-  private readonly providerFactory: (() => LlmProvider | Promise<LlmProvider>) | undefined;
-  private readonly endpointCapabilityStore: EndpointCapabilityStore | undefined;
   private readonly workers: WorkerManager;
   private readonly events = new EventEmitter();
   private readonly approvals = new ApprovalQueue();
   private readonly workerApprovalWaiters = new Map<string, { readonly workerId: string; readonly resolve: (text: string) => void }>();
   private readonly approvalContinuations = new Map<string, readonly ToolInvocation[]>();
-  private readonly capabilityCache = new Map<string, ProviderCapabilities>();
+  // Owns provider construction + the per-(profile,model) capability probe/cache.
+  private readonly providerGateway: ProviderGateway;
   // Owns endpoint discovery caches + which model is selected/served per profile, and the availability
   // warnings. The controller reads/writes the cache through accessors and delegates resolution.
   private readonly models: ModelResolver;
@@ -288,8 +285,13 @@ export class AgentController {
     this.memoryStore = memoryStore;
     this.codeIntel = codeIntel;
     this.notebooks = notebooks;
-    this.providerFactory = providerFactory;
-    this.endpointCapabilityStore = endpointCapabilityStore;
+    this.providerGateway = new ProviderGateway({
+      config,
+      providerFactory,
+      endpointCapabilityStore,
+      getInspection: (profileId) => this.models.getInspection(profileId),
+      recordInspector: (level, category, summary, detail) => this.inspector.record(level, category, summary, detail)
+    });
     if (memoryStore) {
       const memorySettings = config.getMemorySettings();
       // Reserve core tool names against rogue external providers — but NOT the tools that ARE
@@ -317,9 +319,9 @@ export class AgentController {
       maxConcurrentWorkers: () => this.config.getWorkersMaxConcurrent(),
       skillsDigest: (_definition, prompt) => this.workerSkillsDigest(prompt),
       mcpResources: () => this.mcp.getContextItems(),
-      createProvider: () => this.createProvider(),
+      createProvider: () => this.providerGateway.createProvider(),
       resolveModel: (provider, signal) => this.models.resolveModel(provider, signal),
-      capabilities: (provider, model, signal) => this.capabilities(provider, model, signal),
+      capabilities: (provider, model, signal) => this.providerGateway.capabilities(provider, model, signal),
       selectedModelInfo: () => this.models.selectedModelInfo(),
       requestMaxTokens: () => this.requestMaxTokens(),
       permissionPolicy: () => this.config.getPermissionPolicy(),
@@ -335,10 +337,10 @@ export class AgentController {
       skillIo: () => this.skillIo,
       skillUsage: () => this.skillUsage,
       config: this.config,
-      createProvider: () => this.createProvider(),
+      createProvider: () => this.providerGateway.createProvider(),
       resolveModel: (provider, signal) => this.models.resolveModel(provider, signal),
       resolveAuxiliaryModel: (provider, signal, fallback) => this.models.resolveAuxiliaryModel(provider, signal, fallback),
-      capabilities: (provider, model, signal) => this.capabilities(provider, model, signal),
+      capabilities: (provider, model, signal) => this.providerGateway.capabilities(provider, model, signal),
       streamChatWithIdleTimeout: (provider, request, abort, purpose) => this.streamChatWithIdleTimeout(provider, request, abort, purpose),
       requestMaxTokens: () => this.requestMaxTokens(),
       ensureMemoryInitialized: () => this.ensureMemoryInitialized(),
@@ -353,8 +355,8 @@ export class AgentController {
     this.doctor = new DoctorService({
       config,
       workspace: this.workspace,
-      createProvider: () => this.createProvider(),
-      capabilities: (provider, model, signal) => this.capabilities(provider, model, signal),
+      createProvider: () => this.providerGateway.createProvider(),
+      capabilities: (provider, model, signal) => this.providerGateway.capabilities(provider, model, signal),
       cacheInspection: (profileId, inspection) => this.models.cacheInspection(profileId, inspection),
       selectedModelFor: (profile, inspection) => this.models.selectedModelFor(profile, inspection),
       hasSessionStore: () => Boolean(this.sessionStore),
@@ -423,7 +425,7 @@ export class AgentController {
         this.workerApprovalWaiters.clear();
       },
       emitInspector: () => this.inspector.emit(),
-      capabilitySummaries: (profileId) => this.capabilitySummaries(profileId),
+      capabilitySummaries: (profileId) => this.providerGateway.capabilitySummaries(profileId),
       getMessages: () => this.messages,
       getLastContextItems: () => this.lastContextItems,
       getPinnedFiles: () => [...this.pinnedFiles],
@@ -534,7 +536,7 @@ export class AgentController {
 
   async refreshModels(): Promise<void> {
     try {
-      const provider = await this.createProvider();
+      const provider = await this.providerGateway.createProvider();
       const inspection = await provider.inspectEndpoint();
       this.models.cacheInspection(provider.profile.id, inspection);
       const models = inspection.models.map((model) => model.id);
@@ -756,7 +758,7 @@ export class AgentController {
     this.emit({ type: "status", text: "Compacting context with the selected model." });
 
     try {
-      const provider = await this.createProvider();
+      const provider = await this.providerGateway.createProvider();
       const model = this.config.getAuxiliaryModel()
         ? await this.models.resolveAuxiliaryModel(provider, abort.signal)
         : await this.models.resolveModel(provider, abort.signal);
@@ -891,7 +893,7 @@ export class AgentController {
     this.lastRunErrored = false;
 
     try {
-      const provider = await this.createProvider();
+      const provider = await this.providerGateway.createProvider();
       const model = await this.models.resolveModel(provider, abort.signal);
       await this.context.autoCompactIfNeeded(provider, model, abort, "before request");
       const context = new ContextBuilder(this.workspace, this.effectiveContextLimits(), { mcpResources: this.mcp.getContextItems(), pinnedFiles: [...this.pinnedFiles] });
@@ -1141,7 +1143,7 @@ export class AgentController {
     for (let iteration = 0; iteration < maxToolTurns; iteration++) {
       this.context.compactOldToolResults();
       this.emit({ type: "status", text: `Calling ${provider.profile.label} / ${model}` });
-      const capabilities = await this.capabilities(provider, model, abort.signal);
+      const capabilities = await this.providerGateway.capabilities(provider, model, abort.signal);
       const agentMode = this.config.getAgentMode();
       const mcpToolBindings = new Map<string, McpToolBinding>();
       const requestTools = capabilities.nativeToolCalls
@@ -2275,7 +2277,7 @@ export class AgentController {
     const abort = new AbortController();
     this.runningAbort = abort;
     try {
-      const provider = await this.createProvider();
+      const provider = await this.providerGateway.createProvider();
       const model = await this.models.resolveModel(provider, abort.signal);
       if (continuationPrompt) {
         this.emit({ type: "status", text: statusText });
@@ -2372,47 +2374,6 @@ export class AgentController {
         readOnly: progress.readOnly
       }
     });
-  }
-
-  private async createProvider(): Promise<LlmProvider> {
-    if (this.providerFactory) {
-      return this.providerFactory();
-    }
-    const profile = await this.config.getActiveProfile();
-    return new OpenAiCompatibleProvider(profile, this.config.getNetworkPolicy(), {
-      streamCompletionGraceMs: this.config.getStreamCompletionGraceSeconds() * 1000,
-      maxRateLimitRetries: this.config.getRateLimitRetries()
-    });
-  }
-
-  private async capabilities(provider: LlmProvider, model: string, signal: AbortSignal): Promise<ProviderCapabilities> {
-    const key = `${provider.profile.id}:${model}`;
-    const cached = this.capabilityCache.get(key);
-    if (cached) {
-      return cached;
-    }
-
-    const persisted = await this.endpointCapabilityStore?.get(provider.profile.id, provider.profile.baseUrl, model);
-    if (persisted && isFreshCapability(persisted)) {
-      this.capabilityCache.set(key, persisted.capabilities);
-      this.inspector.record("info", "endpoint", `Loaded cached capabilities for ${model}.`, `Native tools: ${persisted.capabilities.nativeToolCalls ? "yes" : "no"}\nStreaming: ${persisted.capabilities.streaming ? "yes" : "no"}`);
-      return persisted.capabilities;
-    }
-
-    const capabilities = await provider.probeCapabilities(model, signal);
-    this.capabilityCache.set(key, capabilities);
-    const inspection = this.models.getInspection(provider.profile.id);
-    void this.endpointCapabilityStore?.upsert({
-      profileId: provider.profile.id,
-      baseUrl: provider.profile.baseUrl,
-      model,
-      backendLabel: inspection?.backendLabel,
-      modelInfo: inspection?.models.find((item) => item.id === model),
-      capabilities,
-      checkedAt: Date.now()
-    });
-    this.inspector.record("info", "endpoint", `Probed capabilities for ${model}.`, `Native tools: ${capabilities.nativeToolCalls ? "yes" : "no"}\nStreaming: ${capabilities.streaming ? "yes" : "no"}`);
-    return capabilities;
   }
 
   private async toolDefinitionsForRequest(mode: AgentMode, mcpToolBindings: Map<string, McpToolBinding>, signal: AbortSignal): Promise<readonly ToolDefinition[]> {
@@ -2692,7 +2653,7 @@ export class AgentController {
       workers: this.workers.list(),
       activeContext: await this.activeContextSummary(),
       memories: await this.memorySummaries(),
-      capabilityCache: await this.capabilitySummaries(activeProfile.id),
+      capabilityCache: await this.providerGateway.capabilitySummaries(activeProfile.id),
       inspector: this.inspector.summary(),
       settings: {
         agentMode,
@@ -2747,22 +2708,6 @@ export class AgentController {
       createdAt: memory.createdAt,
       scope: memory.scope ?? "workspace",
       namespace: memory.namespace
-    }));
-  }
-
-  private async capabilitySummaries(profileId: string): Promise<readonly AgentCapabilitySummary[]> {
-    const entries = await this.endpointCapabilityStore?.list(profileId).catch(() => []) ?? [];
-    return entries.slice(0, 20).map((entry) => ({
-      profileId: entry.profileId,
-      baseUrl: entry.baseUrl,
-      model: entry.model,
-      backendLabel: entry.backendLabel,
-      nativeToolCalls: entry.capabilities.nativeToolCalls,
-      streaming: entry.capabilities.streaming,
-      modelListing: entry.capabilities.modelListing,
-      contextLength: entry.modelInfo?.contextLength,
-      supportsReasoning: entry.modelInfo?.supportsReasoning,
-      checkedAt: entry.checkedAt
     }));
   }
 
