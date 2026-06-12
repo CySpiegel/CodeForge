@@ -9,6 +9,11 @@ export function isToolErrorText(text: string): boolean {
   return text.includes("<tool_use_error>");
 }
 
+// Extract a human-readable message from any thrown value.
+export function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 // Parse a tool call's JSON arguments into a plain object, tolerating malformed input (returns {}).
 export function safeParseArgs(json: string): Record<string, unknown> {
   try {

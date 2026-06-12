@@ -4,9 +4,9 @@ import { ApprovalQueue } from "../core/approvals";
 import { CodeIntelPort, UnavailableCodeIntelPort } from "../core/codeIntel";
 import { GitPort, UnavailableGitPort } from "../core/git";
 import { runGitOperation, unsafeGitArgsMessage } from "./gitTool";
-import { isToolErrorText, safeParseArgs, toolError } from "./toolText";
+import { LearningCoordinator } from "./learningCoordinator";
+import { errorMessage, isToolErrorText, toolError } from "./toolText";
 import { modelStreamIdleTimeoutMs, streamWithIdleTimeout } from "./modelStream";
-import { describeMemoryWrite, learningNotice, ReviewToolOutcome, reviewActionsFromText, reviewWriteSucceeded, summarizeReviewActions } from "./learningReview";
 // Re-exported so existing test imports (`from agentController`) keep working after the extraction.
 export { buildGitArgv } from "./gitTool";
 import { ContextBuilder } from "../core/contextBuilder";
@@ -36,21 +36,9 @@ import { MemoryManager } from "./memoryManager";
 import { MemoryProvider } from "../core/memoryProvider";
 import { BuiltinMemoryProvider } from "../core/builtinMemoryProvider";
 import { memoryStoreNoteStore } from "../core/memoryStoreNoteStore";
-import { archivedSkillDirPath, skillDirPath, SkillIo } from "../core/skillIo";
+import { SkillIo } from "../core/skillIo";
 import { SkillManager } from "../core/skillManager";
-import { SkillUsageReportRow, SkillUsageTracker } from "../core/skillUsage";
-import { buildReviewPrompt, REVIEW_TOOL_HINT } from "../core/backgroundReview";
-import {
-  applyAutomaticTransitions,
-  CURATOR_REVIEW_PROMPT,
-  formatCandidateList,
-  formatTransitionSummary,
-  parseCuratorSummary,
-  readCuratorState,
-  shouldRunCurator,
-  writeCuratorState
-} from "../core/curator";
-import { listBackups, rollbackSkills, snapshotSkills } from "../core/curatorBackup";
+import { SkillUsageTracker } from "../core/skillUsage";
 import { NotebookPort, UnavailableNotebookPort } from "../core/notebooks";
 import {
   callConfiguredMcpTool,
@@ -427,27 +415,18 @@ export class AgentController {
   private skillManager: SkillManager | undefined;
   private skillUsage: SkillUsageTracker | undefined;
   private skillIo: SkillIo | undefined;
-  private curatorInFlight = false;
-  // True while a background self-improvement review fork is running, so skills it creates are
-  // marked curator-eligible (created_by: "agent").
-  private inBackgroundReview = false;
-  private reviewInFlight = false;
-  // True while reviewing a failed/abandoned run — blocks skill writes so a wrong approach can't poison
-  // the skill library. Set per-review in maybeRunBackgroundReview.
-  private reviewSkillWritesBlocked = false;
-  // Did the most recent run surface an error? Feeds assessRunOutcome so the learning loop won't distil
-  // durable lessons from a failed run.
+  // Owns the self-improvement review + curator. The controller keeps only the run-loop signals it
+  // reads (turn/iteration counts, error flag) and the transcript.
+  private readonly learning: LearningCoordinator;
+  // Did the most recent run surface an error? Read by the learning loop so it won't distil durable
+  // lessons from a failed run.
   private lastRunErrored = false;
   // Bounded stack of pre-change file snapshots, captured at each checkpoint, so the user can /undo the
   // last applied edit/write/patch. Cleared on reset.
   private undoStack: UndoSnapshot[] = [];
-  // Cadence counters for the background self-improvement review (memory ~every N user turns, skills
-  // ~every N tool iterations). Cumulative counters + last-reviewed markers avoid reset races.
+  // Cumulative cadence counters the learning loop reads to decide when a review is due.
   private userTurnCount = 0;
   private toolIterationCount = 0;
-  private lastMemoryReviewTurnCount = 0;
-  private lastSkillReviewIterationCount = 0;
-  private lastReviewedMessageCount = 0;
 
   constructor(
     config: CodeForgeConfigService,
@@ -514,6 +493,32 @@ export class AgentController {
       onDidChange: (workers) => this.emit({ type: "workers", workers }),
       onNotice: (message) => this.emit({ type: "message", role: "system", text: message })
     });
+    this.learning = new LearningCoordinator({
+      memoryManager: () => this.memoryManager,
+      skillManager: () => this.skillManager,
+      skillIo: () => this.skillIo,
+      skillUsage: () => this.skillUsage,
+      config: this.config,
+      createProvider: () => this.createProvider(),
+      resolveModel: (provider, signal) => this.resolveModel(provider, signal),
+      resolveAuxiliaryModel: (provider, signal, fallback) => this.resolveAuxiliaryModel(provider, signal, fallback),
+      capabilities: (provider, model, signal) => this.capabilities(provider, model, signal),
+      streamChatWithIdleTimeout: (provider, request, abort, purpose) => this.streamChatWithIdleTimeout(provider, request, abort, purpose),
+      requestMaxTokens: () => this.requestMaxTokens(),
+      ensureMemoryInitialized: () => this.ensureMemoryInitialized(),
+      publishState: () => this.publishState(),
+      emit: (event) => this.emit(event),
+      recordInspector: (level, category, summary, detail) => this.recordInspector(level, category, summary, detail),
+      getMessages: () => this.messages,
+      getUserTurnCount: () => this.userTurnCount,
+      getToolIterationCount: () => this.toolIterationCount,
+      getLastRunErrored: () => this.lastRunErrored
+    });
+  }
+
+  // Public delegate kept for the live curator smoke test and any external caller.
+  async runCurator(options: { readonly dryRun?: boolean } = {}): Promise<string> {
+    return this.learning.runCurator(options);
   }
 
   onEvent(listener: (event: AgentUiEvent) => void): () => void {
@@ -1154,12 +1159,9 @@ export class AgentController {
     this.queuedWork = [];
     this.undoStack = [];
     this.memoryInitialized = false;
-    this.reviewInFlight = false;
     this.userTurnCount = 0;
     this.toolIterationCount = 0;
-    this.lastMemoryReviewTurnCount = 0;
-    this.lastSkillReviewIterationCount = 0;
-    this.lastReviewedMessageCount = 0;
+    this.learning.reset();
     this.emit({ type: "sessionReset" });
     this.emitInspector();
     this.emitContextUsage();
@@ -2441,7 +2443,7 @@ export class AgentController {
           file_content: action.fileContent,
           absorbed_into: action.absorbedInto
         },
-        { markAgentCreated: this.inBackgroundReview }
+        { markAgentCreated: this.learning.isInBackgroundReview() }
       );
       await this.runLocalHooks("postTool", action);
       return transcriptResult;
@@ -2706,470 +2708,8 @@ export class AgentController {
     const reason = this.approvals.list().length > 0 ? "awaitingApproval" : "idle";
     this.emit({ type: "runComplete", reason });
     if (reason === "idle") {
-      void this.maybeRunBackgroundReview();
-      void this.maybeRunCuratorAuto();
-    }
-  }
-
-  // After a turn goes idle, run a non-blocking self-improvement review: memory roughly every
-  // nudgeInterval user turns, skills roughly every skillNudgeInterval tool iterations. The review is
-  // a restricted tool loop (memory + skill tools only) seeded with the recent transcript. Fully
-  // guarded and fire-and-forget so it can never break a user run.
-  private async maybeRunBackgroundReview(): Promise<void> {
-    if (this.reviewInFlight || !this.memoryManager) {
-      return;
-    }
-    const settings = this.config.getMemorySettings();
-    if (!settings.enabled || this.userTurnCount < Math.max(1, settings.reviewMinTurns)) {
-      return;
-    }
-    const memoryDue = settings.nudgeInterval > 0 && this.userTurnCount - this.lastMemoryReviewTurnCount >= settings.nudgeInterval;
-    const skillsDue = Boolean(this.skillManager) && settings.skillsEnabled && settings.skillNudgeInterval > 0
-      && this.toolIterationCount - this.lastSkillReviewIterationCount >= settings.skillNudgeInterval;
-    if (!memoryDue && !skillsDue) {
-      return;
-    }
-    // Advance the markers up front so a transient failure does not immediately re-fire the review.
-    if (memoryDue) {
-      this.lastMemoryReviewTurnCount = this.userTurnCount;
-    }
-    if (skillsDue) {
-      this.lastSkillReviewIterationCount = this.toolIterationCount;
-    }
-
-    const slice = this.messages.slice(this.lastReviewedMessageCount);
-    const didWork = slice.some((message) => message.role === "assistant" && ((message.toolCalls?.length ?? 0) > 0 || message.content.trim().length > 0));
-    if (!didWork) {
-      this.lastReviewedMessageCount = this.messages.length;
-      return;
-    }
-
-    // Anti-poisoning: never distil a SKILL or reusable lesson from a run that failed — a wrong approach
-    // must not become durable guidance the agent follows forever. A failed run is restricted to
-    // outcome-independent persona facts and verified corrections (enforced by the prompt and the
-    // skill-write block below).
-    const outcome = this.assessRunOutcome(slice);
-    const reviewSkills = skillsDue && outcome === "ok";
-    this.recordInspector("info", "memory", `Self-improvement review on a ${outcome === "ok" ? "successful" : "failed/abandoned"} run.`, `memory=${memoryDue}, skills=${reviewSkills}`);
-
-    this.reviewInFlight = true;
-    this.inBackgroundReview = true;
-    this.reviewSkillWritesBlocked = outcome !== "ok";
-    try {
-      await this.ensureMemoryInitialized();
-      const summary = await this.runBackgroundReview(memoryDue, reviewSkills, slice, outcome);
-      this.lastReviewedMessageCount = this.messages.length;
-      if (summary) {
-        // Per-update "learning" notices are emitted live inside runBackgroundReview as each memory,
-        // user-profile, or skill write lands; here we just refresh the side panels (Learned/memory
-        // list/skills) so they reflect what was just saved.
-        await this.publishState();
-      }
-    } catch (error) {
-      this.recordInspector("warn", "memory", "Background self-improvement review failed.", errorMessage(error));
-    } finally {
-      this.inBackgroundReview = false;
-      this.reviewInFlight = false;
-      this.reviewSkillWritesBlocked = false;
-    }
-  }
-
-  // Classify the reviewed slice so the learning loop can refuse to harvest durable skills/lessons from
-  // a run that went wrong. Conservative: a run is "failed" only on a clear signal (an error surfaced
-  // during the run, or tool calls were dominated by errors).
-  private assessRunOutcome(slice: readonly ChatMessage[]): "ok" | "failed" {
-    if (this.lastRunErrored) {
-      return "failed";
-    }
-    let toolResults = 0;
-    let toolErrors = 0;
-    for (const message of slice) {
-      if (message.role === "tool") {
-        toolResults++;
-        if (isToolErrorText(message.content)) {
-          toolErrors++;
-        }
-      }
-    }
-    if (toolResults >= 3 && toolErrors / toolResults >= 0.5) {
-      return "failed";
-    }
-    return "ok";
-  }
-
-  private async runBackgroundReview(reviewMemory: boolean, reviewSkills: boolean, slice: readonly ChatMessage[], outcome: "ok" | "failed" = "ok"): Promise<string> {
-    const transcript = slice
-      .filter((message) => message.role !== "system")
-      .map((message) => `${message.role.toUpperCase()}:\n${message.content}`)
-      .join("\n\n")
-      .slice(-12000);
-    const messages: ChatMessage[] = [
-      { role: "system", content: `${buildReviewPrompt(reviewMemory, reviewSkills, outcome)}\n\n${REVIEW_TOOL_HINT}` },
-      {
-        role: "user",
-        content: `--- Conversation to review ---\n${transcript}\n\n--- End conversation ---\n\nReview now using only the memory and skill tools. If nothing is worth saving, reply 'Nothing to save.' and stop.`
-      }
-    ];
-    const abort = new AbortController();
-    const provider = await this.createProvider();
-    const model = this.config.getAuxiliaryModel()
-      ? await this.resolveAuxiliaryModel(provider, abort.signal)
-      : await this.resolveModel(provider, abort.signal);
-    // Only offer native tool schemas when the endpoint supports them; otherwise rely on the JSON
-    // action-protocol fallback taught by REVIEW_TOOL_HINT.
-    const capabilities = await this.capabilities(provider, model, abort.signal);
-    const tools = capabilities.nativeToolCalls ? this.reviewToolSchemas() : undefined;
-    const actions: string[] = [];
-
-    for (let iteration = 0; iteration < maxBackgroundReviewIterations; iteration++) {
-      let content = "";
-      const toolCalls: ToolCall[] = [];
-      for await (const event of this.streamChatWithIdleTimeout(provider, {
-        model,
-        messages,
-        tools,
-        temperature: 0,
-        maxTokens: this.requestMaxTokens(),
-        signal: abort.signal
-      }, abort, "Self-improvement review")) {
-        if (event.type === "content") {
-          content += event.text;
-        } else if (event.type === "toolCalls") {
-          toolCalls.push(...event.toolCalls);
-        }
-      }
-
-      if (toolCalls.length > 0) {
-        messages.push({ role: "assistant", content, toolCalls });
-        for (const toolCall of toolCalls) {
-          const result = await this.executeReviewTool(toolCall.name, safeParseArgs(toolCall.argumentsJson));
-          if (result.summary) {
-            actions.push(result.summary);
-          }
-          if (result.notice) {
-            this.emit({ type: "message", role: "system", text: result.notice });
-          }
-          messages.push({ role: "tool", content: result.output, toolCallId: toolCall.id, name: toolCall.name });
-        }
-        continue;
-      }
-
-      // Non-native models emit the CodeForge JSON action protocol in text instead of native calls.
-      const fallback = reviewActionsFromText(content);
-      for (const action of fallback) {
-        const result = await this.executeReviewTool(action.name, action.args);
-        if (result.summary) {
-          actions.push(result.summary);
-        }
-        if (result.notice) {
-          this.emit({ type: "message", role: "system", text: result.notice });
-        }
-      }
-      break;
-    }
-
-    return summarizeReviewActions(actions);
-  }
-
-  private reviewToolSchemas(): ToolDefinition[] {
-    const memorySchemas = this.memoryManager?.getAllToolSchemas() ?? [];
-    const skillNames = new Set(["skills_list", "skill_view", "skill_manage"]);
-    const skillSchemas = this.skillManager
-      ? codeForgeTools.filter((tool) => skillNames.has(tool.name)).map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters }))
-      : [];
-    return [...memorySchemas, ...skillSchemas];
-  }
-
-  private async executeReviewTool(name: string, args: Record<string, unknown>): Promise<ReviewToolOutcome> {
-    try {
-      if (name === "memory" && this.memoryManager) {
-        const output = await this.memoryManager.handleToolCall("memory", args);
-        const ok = reviewWriteSucceeded(output);
-        return { output, summary: ok ? describeMemoryWrite(args) : "", notice: ok ? learningNotice("memory", args) : "" };
-      }
-      if (name === "skill_manage" && this.skillManager) {
-        if (this.reviewSkillWritesBlocked) {
-          // Anti-poisoning hard gate: a failed/abandoned run may not create or change skills.
-          return {
-            output: JSON.stringify({ success: false, error: "Skill changes are disabled for this review because the run did not succeed. Save only a durable user fact or a verified corrective note." }),
-            summary: "",
-            notice: ""
-          };
-        }
-        const output = await this.skillManager.handleManage(args, { markAgentCreated: true });
-        const ok = reviewWriteSucceeded(output);
-        return {
-          output,
-          summary: ok ? `${String(args.action ?? "update")} skill ${String(args.name ?? "")}`.trim() : "",
-          notice: ok ? learningNotice("skill_manage", args) : ""
-        };
-      }
-      if (name === "skill_view" && this.skillManager) {
-        return { output: await this.skillManager.handleView(args), summary: "", notice: "" };
-      }
-      if (name === "skills_list" && this.skillManager) {
-        return { output: await this.skillManager.handleList(), summary: "", notice: "" };
-      }
-    } catch (error) {
-      return { output: JSON.stringify({ success: false, error: errorMessage(error) }), summary: "", notice: "" };
-    }
-    return { output: JSON.stringify({ success: false, error: `Tool '${name}' is not available in the review pass.` }), summary: "", notice: "" };
-  }
-
-  // -- Curator (long-horizon skill maintenance) -----------------------------
-
-  private async maybeRunCuratorAuto(): Promise<void> {
-    if (this.curatorInFlight || !this.skillIo || !this.skillUsage || !this.skillManager) {
-      return;
-    }
-    const io = this.skillIo;
-    const settings = this.config.getCuratorSettings();
-    const now = Date.now();
-    let state;
-    try {
-      state = await readCuratorState(io);
-    } catch {
-      return;
-    }
-    const gate = shouldRunCurator(state, now, settings);
-    if (gate.seedFirstRun) {
-      state.lastRunAt = now;
-      await writeCuratorState(io, state).catch(() => undefined);
-      return;
-    }
-    if (!gate.run) {
-      return;
-    }
-    await this.runCurator({ dryRun: false });
-  }
-
-  async runCurator(options: { readonly dryRun?: boolean } = {}): Promise<string> {
-    if (!this.skillIo || !this.skillUsage || !this.skillManager) {
-      return "Skills are not available in this environment.";
-    }
-    if (this.curatorInFlight) {
-      return "A curator pass is already running.";
-    }
-    const io = this.skillIo;
-    const usage = this.skillUsage;
-    const settings = this.config.getCuratorSettings();
-    const now = Date.now();
-    const dryRun = options.dryRun ?? false;
-    const start = Date.now();
-    this.curatorInFlight = true;
-    this.inBackgroundReview = true;
-    try {
-      let backupNote = "";
-      if (!dryRun && settings.backupEnabled) {
-        const info = await snapshotSkills(io, now, settings.backupKeep).catch(() => undefined);
-        if (info) {
-          backupNote = `backup ${info.id} (${info.fileCount} files); `;
-        }
-      }
-      const transitions = await applyAutomaticTransitions(io, usage, settings, now, !dryRun);
-      const report = await usage.agentCreatedReport();
-      const consolidation = await this.runCuratorConsolidation(report, now, dryRun);
-      const summaryText = `${formatTransitionSummary(transitions)}${consolidation ? `; ${consolidation}` : ""}`;
-      if (!dryRun) {
-        const state = await readCuratorState(io);
-        state.lastRunAt = now;
-        state.lastRunDurationMs = Date.now() - start;
-        state.lastRunSummary = summaryText;
-        state.runCount += 1;
-        await writeCuratorState(io, state).catch(() => undefined);
-      }
-      const message = `🧹 Curator${dryRun ? " (dry run)" : ""}: ${backupNote}${summaryText}`;
-      this.emit({ type: "message", role: "system", text: message });
-      await this.publishState();
-      return message;
-    } catch (error) {
-      this.recordInspector("warn", "memory", "Curator pass failed.", errorMessage(error));
-      return `Curator pass failed: ${errorMessage(error)}`;
-    } finally {
-      this.inBackgroundReview = false;
-      this.curatorInFlight = false;
-    }
-  }
-
-  private async runCuratorConsolidation(report: readonly SkillUsageReportRow[], nowMs: number, dryRun: boolean): Promise<string> {
-    if (dryRun || report.length === 0 || !this.skillManager) {
-      return "";
-    }
-    const messages: ChatMessage[] = [
-      { role: "system", content: `${CURATOR_REVIEW_PROMPT}\n\n${REVIEW_TOOL_HINT}` },
-      {
-        role: "user",
-        content: `Candidate agent-created skills:\n${formatCandidateList(report, nowMs)}\n\nConsolidate now. Use skills_list / skill_view to inspect, then skill_manage to patch/create/write_file and to archive (action=delete) absorbed siblings. Finish with the structured summary block.`
-      }
-    ];
-    const abort = new AbortController();
-    const provider = await this.createProvider();
-    const model = this.config.getAuxiliaryModel()
-      ? await this.resolveAuxiliaryModel(provider, abort.signal)
-      : await this.resolveModel(provider, abort.signal);
-    const capabilities = await this.capabilities(provider, model, abort.signal);
-    const tools = capabilities.nativeToolCalls ? this.reviewToolSchemas().filter((tool) => tool.name.startsWith("skill")) : undefined;
-    let lastContent = "";
-    let ops = 0;
-
-    for (let iteration = 0; iteration < maxCuratorIterations; iteration++) {
-      let content = "";
-      const toolCalls: ToolCall[] = [];
-      for await (const event of this.streamChatWithIdleTimeout(provider, {
-        model,
-        messages,
-        tools,
-        temperature: 0,
-        maxTokens: this.requestMaxTokens(),
-        signal: abort.signal
-      }, abort, "Curator consolidation")) {
-        if (event.type === "content") {
-          content += event.text;
-        } else if (event.type === "toolCalls") {
-          toolCalls.push(...event.toolCalls);
-        }
-      }
-      lastContent = content || lastContent;
-
-      if (toolCalls.length === 0) {
-        for (const action of reviewActionsFromText(content).filter((a) => a.name.startsWith("skill"))) {
-          await this.executeReviewTool(action.name, action.args);
-          ops += 1;
-        }
-        break;
-      }
-      messages.push({ role: "assistant", content, toolCalls });
-      for (const toolCall of toolCalls) {
-        const result = await this.executeReviewTool(toolCall.name, safeParseArgs(toolCall.argumentsJson));
-        if (toolCall.name === "skill_manage") {
-          ops += 1;
-        }
-        messages.push({ role: "tool", content: result.output, toolCallId: toolCall.id, name: toolCall.name });
-      }
-    }
-
-    const parsed = parseCuratorSummary(lastContent);
-    if (ops === 0 && parsed.consolidations.length === 0 && parsed.prunings.length === 0) {
-      return "";
-    }
-    return `consolidated ${parsed.consolidations.length} · pruned ${parsed.prunings.length}`;
-  }
-
-  /** Slash-command surface: /curator status|run|pause|resume|pin|unpin|archive|restore|backup|rollback|list-archived. */
-  async handleCuratorCommand(rest: string): Promise<void> {
-    if (!this.skillIo || !this.skillUsage || !this.skillManager) {
-      this.emit({ type: "error", text: "Skills are not available in this environment." });
-      return;
-    }
-    const io = this.skillIo;
-    const usage = this.skillUsage;
-    const settings = this.config.getCuratorSettings();
-    const [verb, ...args] = rest.trim().split(/\s+/).filter(Boolean);
-    const arg = args.filter((value) => !value.startsWith("--")).join(" ");
-    const dryRun = args.includes("--dry-run");
-
-    switch (verb ?? "status") {
-      case "status": {
-        const state = await readCuratorState(io);
-        const report = await usage.agentCreatedReport();
-        const byState = (s: string) => report.filter((row) => row.state === s).length;
-        const pinned = report.filter((row) => row.pinned).map((row) => row.name);
-        const last = state.lastRunAt ? new Date(state.lastRunAt).toISOString() : "never";
-        this.emit({
-          type: "message",
-          role: "system",
-          text:
-            `🧹 Curator: ${settings.enabled ? (state.paused ? "PAUSED" : "enabled") : "disabled"}\n` +
-            `runs: ${state.runCount} · last run: ${last}\n` +
-            `last summary: ${state.lastRunSummary ?? "—"}\n` +
-            `interval: ${settings.intervalHours}h · stale after ${settings.staleAfterDays}d · archive after ${settings.archiveAfterDays}d\n` +
-            `agent-created skills: ${report.length} (active ${byState("active")}, stale ${byState("stale")}, archived ${byState("archived")})\n` +
-            `pinned (${pinned.length}): ${pinned.join(", ") || "none"}`
-        });
-        return;
-      }
-      case "run":
-        await this.runCurator({ dryRun });
-        return;
-      case "pause": {
-        const state = await readCuratorState(io);
-        state.paused = true;
-        await writeCuratorState(io, state);
-        this.emit({ type: "status", text: "Curator paused." });
-        return;
-      }
-      case "resume": {
-        const state = await readCuratorState(io);
-        state.paused = false;
-        await writeCuratorState(io, state);
-        this.emit({ type: "status", text: "Curator resumed." });
-        return;
-      }
-      case "pin":
-        if (!arg) {
-          this.emit({ type: "error", text: "Usage: /curator pin <skill>" });
-          return;
-        }
-        await usage.setPinned(arg, true);
-        this.emit({ type: "status", text: `Pinned skill ${arg} (protected from auto-archive).` });
-        return;
-      case "unpin":
-        if (!arg) {
-          this.emit({ type: "error", text: "Usage: /curator unpin <skill>" });
-          return;
-        }
-        await usage.setPinned(arg, false);
-        this.emit({ type: "status", text: `Unpinned skill ${arg}.` });
-        return;
-      case "archive": {
-        if (!arg) {
-          this.emit({ type: "error", text: "Usage: /curator archive <skill>" });
-          return;
-        }
-        const result = JSON.parse(await this.skillManager.handleManage({ action: "delete", name: arg, absorbed_into: "" }));
-        this.emit({ type: result.success ? "status" : "error", text: result.message ?? result.error ?? "" });
-        await this.publishState();
-        return;
-      }
-      case "restore": {
-        if (!arg) {
-          this.emit({ type: "error", text: "Usage: /curator restore <skill>" });
-          return;
-        }
-        if (!(await io.exists(archivedSkillDirPath(arg)))) {
-          this.emit({ type: "error", text: `No archived skill '${arg}'.` });
-          return;
-        }
-        await io.move(archivedSkillDirPath(arg), skillDirPath(arg));
-        await usage.setState(arg, "active");
-        this.emit({ type: "status", text: `Restored skill ${arg}.` });
-        await this.publishState();
-        return;
-      }
-      case "list-archived": {
-        const archived = (await usage.report()).filter((row) => row.state === "archived").map((row) => row.name);
-        this.emit({ type: "message", role: "system", text: `Archived skills (${archived.length}): ${archived.join(", ") || "none"}` });
-        return;
-      }
-      case "backup": {
-        const info = await snapshotSkills(io, Date.now(), settings.backupKeep);
-        this.emit({ type: "status", text: `Backed up ${info.fileCount} skill file(s) as ${info.id}.` });
-        return;
-      }
-      case "rollback": {
-        const ids = await listBackups(io);
-        if (!arg && ids.length === 0) {
-          this.emit({ type: "error", text: "No curator backups to roll back to." });
-          return;
-        }
-        const id = arg || ids[ids.length - 1];
-        const result = await rollbackSkills(io, id, Date.now(), settings.backupKeep);
-        this.emit({ type: result.ok ? "status" : "error", text: result.message });
-        await this.publishState();
-        return;
-      }
-      default:
-        this.emit({ type: "error", text: `Unknown curator command '${verb}'. Try: status, run, pause, resume, pin, unpin, archive, restore, list-archived, backup, rollback.` });
+      void this.learning.maybeRunBackgroundReview();
+      void this.learning.maybeRunCuratorAuto();
     }
   }
 
@@ -3611,10 +3151,7 @@ export class AgentController {
     // for work already reviewed (Hermes turn_context hydration).
     this.userTurnCount = snapshot.messages.filter((message) => message.role === "user").length;
     this.toolIterationCount = 0;
-    this.lastMemoryReviewTurnCount = this.userTurnCount;
-    this.lastSkillReviewIterationCount = 0;
-    this.lastReviewedMessageCount = snapshot.messages.length;
-    this.reviewInFlight = false;
+    this.learning.onSessionRestored(snapshot.messages.length);
     this.restoreTasksFromSessionRecords(snapshot.records);
     this.lastContextItems = [];
     this.mcpContextItems = [];
@@ -3725,7 +3262,7 @@ export class AgentController {
         await this.undo();
         return;
       case "/curator":
-        await this.handleCuratorCommand(rest);
+        await this.learning.handleCuratorCommand(rest);
         return;
       case "/context": {
         this.emit({ type: "message", role: "system", text: this.formatContextReport() });
@@ -4985,10 +4522,6 @@ function stripWorkspaceContext(content: string): string {
   return content.split("\n\nWorkspace context:\n\n", 1)[0];
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -5259,8 +4792,6 @@ const readOnlyToolNames = new Set([
   "notebook_read"
 ]);
 
-const maxBackgroundReviewIterations = 6;
-const maxCuratorIterations = 24;
 
 // Heuristic: does this endpoint error mean the prompt exceeded the model's context window? Covers the
 // common phrasings from vLLM, llama.cpp, LM Studio, LiteLLM, and OpenAI-style gateways.
