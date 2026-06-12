@@ -26,6 +26,7 @@ import { approvalAcceptedText, approvalContinuationPrompt, approvalPermissionDec
 import { SlashCommandRouter } from "./slashCommandRouter";
 // Re-exported so existing test imports (`from agentController`) keep working after the extraction.
 export { resolveConfiguredModelId } from "./modelResolver";
+import { assertNever } from "../core/guards";
 import { errorMessage, firstLines, isContextOverflowError, isMissingFileError, isRecoverableEditPreflightError, isToolErrorText, modelRecoverableToolError, toolError } from "./toolText";
 // Re-exported so existing test imports (`from agentController`) keep working after the extraction.
 export { isContextOverflowError } from "./toolText";
@@ -1726,9 +1727,17 @@ export class AgentController {
     return result ?? toolError(unsafeGitArgsMessage(action));
   }
 
+  // Runs the pre/post-tool local hooks ONCE around the actual dispatch (previously copy-pasted into
+  // every branch — and silently skipped on skill_view/skills_list). The dispatch itself is an
+  // exhaustive switch so a newly-added action type fails to compile rather than silently shell-exec'ing.
   private async executePermittedAction(action: AgentAction, toolCallId: string | undefined): Promise<string> {
     await this.localHooks.run("preTool", action);
-    let transcriptResult: string;
+    const transcriptResult = await this.dispatchPermittedAction(action, toolCallId);
+    await this.localHooks.run("postTool", action);
+    return transcriptResult;
+  }
+
+  private async dispatchPermittedAction(action: AgentAction, toolCallId: string | undefined): Promise<string> {
     if (isLocalReadOnlyAction(action)) {
       const [result] = await executeLocalReadOnlyTools(
         [{ id: toolCallId ?? `approval-${Date.now()}`, action, source: toolCallId ? "native" : "json", toolCallId }],
@@ -1740,241 +1749,192 @@ export class AgentController {
           onProgress: (progress) => this.emitToolProgress(progress)
         }
       );
-      transcriptResult = result.content;
       if (!result.isError && action.type === "read_file") {
-        this.readState.remember(action.path, readFileContentFromToolResult(transcriptResult, action.path), 48000, "tool");
+        this.readState.remember(action.path, readFileContentFromToolResult(result.content, action.path), 48000, "tool");
       }
-      await this.localHooks.run("postTool", action);
-      return transcriptResult;
+      return result.content;
     }
 
-    if (action.type === "spawn_agent") {
-      transcriptResult = await this.spawnAgent.execute(action);
-      await this.localHooks.run("postTool", action);
-      return transcriptResult;
-    }
+    switch (action.type) {
+      case "spawn_agent":
+        return this.spawnAgent.execute(action);
 
-    if (action.type === "worker_output") {
-      if (action.wait) {
-        await this.workers.waitFor(action.workerId, workerJoinTimeoutMs, this.runningAbort?.signal);
+      case "worker_output": {
+        if (action.wait) {
+          await this.workers.waitFor(action.workerId, workerJoinTimeoutMs, this.runningAbort?.signal);
+        }
+        return this.workers.output(action.workerId) ?? `worker_output ${action.workerId}\n\nNo worker found.`;
       }
-      transcriptResult = this.workers.output(action.workerId) ?? `worker_output ${action.workerId}\n\nNo worker found.`;
-      await this.localHooks.run("postTool", action);
-      return transcriptResult;
-    }
 
-    if (action.type === "git") {
-      transcriptResult = await this.executeGitAction(action);
-      await this.localHooks.run("postTool", action);
-      return transcriptResult;
-    }
+      case "git":
+        return this.executeGitAction(action);
 
-    if (action.type === "ask_user_question") {
-      transcriptResult = toolError("ask_user_question requires a user answer and cannot be auto-approved.");
-      await this.localHooks.run("postTool", action);
-      return transcriptResult;
-    }
+      case "ask_user_question":
+        return toolError("ask_user_question requires a user answer and cannot be auto-approved.");
 
-    if (action.type === "tool_list") {
-      transcriptResult = this.toolSchemas.formatList();
-      await this.localHooks.run("postTool", action);
-      return transcriptResult;
-    }
+      case "tool_list":
+        return this.toolSchemas.formatList();
 
-    if (action.type === "tool_search") {
-      transcriptResult = await this.toolSchemas.search(action);
-      await this.localHooks.run("postTool", action);
-      return transcriptResult;
-    }
+      case "tool_search":
+        return this.toolSchemas.search(action);
 
-    if (action.type === "task_create") {
-      transcriptResult = await this.taskBoard.createTask(action);
-      await this.localHooks.run("postTool", action);
-      return transcriptResult;
-    }
+      case "task_create":
+        return this.taskBoard.createTask(action);
 
-    if (action.type === "task_update") {
-      transcriptResult = await this.taskBoard.updateTask(action);
-      await this.localHooks.run("postTool", action);
-      return transcriptResult;
-    }
+      case "task_update":
+        return this.taskBoard.updateTask(action);
 
-    if (action.type === "task_list") {
-      transcriptResult = this.taskBoard.listTasks(action);
-      await this.localHooks.run("postTool", action);
-      return transcriptResult;
-    }
+      case "task_list":
+        return this.taskBoard.listTasks(action);
 
-    if (action.type === "task_get") {
-      transcriptResult = this.taskBoard.getTask(action.taskId);
-      await this.localHooks.run("postTool", action);
-      return transcriptResult;
-    }
+      case "task_get":
+        return this.taskBoard.getTask(action.taskId);
 
-    if (action.type === "code_hover" || action.type === "code_definition" || action.type === "code_references" || action.type === "code_symbols") {
-      transcriptResult = await this.codeIntel.execute(action, this.runningAbort?.signal);
-      await this.localHooks.run("postTool", action);
-      return transcriptResult;
-    }
+      case "code_hover":
+      case "code_definition":
+      case "code_references":
+      case "code_symbols":
+        return this.codeIntel.execute(action, this.runningAbort?.signal);
 
-    if (action.type === "notebook_read") {
-      transcriptResult = await this.notebooks.execute(action, this.runningAbort?.signal);
-      this.readState.markNotebookRead(action.path);
-      await this.localHooks.run("postTool", action);
-      return transcriptResult;
-    }
-
-    if (action.type === "mcp_list_resources") {
-      transcriptResult = await this.mcp.listResourcesForTool(action.serverId);
-      await this.localHooks.run("postTool", action);
-      return transcriptResult;
-    }
-
-    if (action.type === "mcp_read_resource") {
-      const resource = await readConfiguredMcpResource(
-        this.config.getMcpServers(),
-        this.config.getNetworkPolicy(),
-        action.serverId,
-        action.uri,
-        this.runningAbort?.signal
-      );
-      transcriptResult = `mcp_read_resource ${resource.serverId}:${resource.uri}\n\n${resource.content}`;
-      await this.localHooks.run("postTool", action);
-      return transcriptResult;
-    }
-
-    if (action.type === "memory") {
-      if (!this.memoryManager) {
-        throw new Error("Local memory is not available in this environment.");
+      case "notebook_read": {
+        const output = await this.notebooks.execute(action, this.runningAbort?.signal);
+        this.readState.markNotebookRead(action.path);
+        return output;
       }
-      await this.ensureMemoryInitialized();
-      transcriptResult = await this.memoryManager.handleToolCall("memory", {
-        action: action.action,
-        target: action.target,
-        content: action.content,
-        old_text: action.oldText
-      });
-      await this.localHooks.run("postTool", action);
-      return transcriptResult;
-    }
 
-    if (action.type === "skill_manage") {
-      if (!this.skillManager) {
-        throw new Error("Local skills are not available in this environment.");
+      case "mcp_list_resources":
+        return this.mcp.listResourcesForTool(action.serverId);
+
+      case "mcp_read_resource": {
+        const resource = await readConfiguredMcpResource(
+          this.config.getMcpServers(),
+          this.config.getNetworkPolicy(),
+          action.serverId,
+          action.uri,
+          this.runningAbort?.signal
+        );
+        return `mcp_read_resource ${resource.serverId}:${resource.uri}\n\n${resource.content}`;
       }
-      transcriptResult = await this.skillManager.handleManage(
-        {
+
+      case "memory": {
+        if (!this.memoryManager) {
+          throw new Error("Local memory is not available in this environment.");
+        }
+        await this.ensureMemoryInitialized();
+        return this.memoryManager.handleToolCall("memory", {
           action: action.action,
-          name: action.name,
+          target: action.target,
           content: action.content,
-          old_string: action.oldString,
-          new_string: action.newString,
-          replace_all: action.replaceAll,
-          file_path: action.filePath,
-          file_content: action.fileContent,
-          absorbed_into: action.absorbedInto
-        },
-        { markAgentCreated: this.learning.isInBackgroundReview() }
-      );
-      await this.localHooks.run("postTool", action);
-      return transcriptResult;
-    }
-
-    if (action.type === "skill_view") {
-      if (!this.skillManager) {
-        throw new Error("Local skills are not available in this environment.");
+          old_text: action.oldText
+        });
       }
-      return this.skillManager.handleView({ name: action.name, file_path: action.filePath });
-    }
 
-    if (action.type === "skills_list") {
-      if (!this.skillManager) {
-        throw new Error("Local skills are not available in this environment.");
+      case "skill_manage": {
+        if (!this.skillManager) {
+          throw new Error("Local skills are not available in this environment.");
+        }
+        return this.skillManager.handleManage(
+          {
+            action: action.action,
+            name: action.name,
+            content: action.content,
+            old_string: action.oldString,
+            new_string: action.newString,
+            replace_all: action.replaceAll,
+            file_path: action.filePath,
+            file_content: action.fileContent,
+            absorbed_into: action.absorbedInto
+          },
+          { markAgentCreated: this.learning.isInBackgroundReview() }
+        );
       }
-      return this.skillManager.handleList();
-    }
 
-    if (action.type === "fact_store" || action.type === "fact_feedback") {
-      if (!this.memoryManager) {
-        throw new Error("Local memory is not available in this environment.");
+      case "skill_view": {
+        if (!this.skillManager) {
+          throw new Error("Local skills are not available in this environment.");
+        }
+        return this.skillManager.handleView({ name: action.name, file_path: action.filePath });
       }
-      await this.ensureMemoryInitialized();
-      const args = action.type === "fact_store"
-        ? { action: action.action, content: action.content, category: action.category, tags: action.tags, query: action.query, entity: action.entity, entities: action.entities, id: action.id, limit: action.limit }
-        : { id: action.id, helpful: action.helpful };
-      transcriptResult = await this.memoryManager.handleToolCall(action.type, args);
-      await this.localHooks.run("postTool", action);
-      return transcriptResult;
-    }
 
-    if (action.type === "propose_patch") {
-      await this.recordCheckpoint(action, "Before applying proposed patch.");
-      const changed = await this.diff.applyPatch(action.patch);
-      transcriptResult = `propose_patch\n\nApplied changes to ${changed.join(", ")}.${await this.changeVerifier.verify(changed)}`;
-      await this.localHooks.run("postTool", action);
-      return transcriptResult;
-    }
+      case "skills_list": {
+        if (!this.skillManager) {
+          throw new Error("Local skills are not available in this environment.");
+        }
+        return this.skillManager.handleList();
+      }
 
-    if (action.type === "write_file") {
-      await this.preflightWritableAction(action);
-      await this.recordCheckpoint(action, `Before writing ${action.path}.`);
-      const changed = await this.diff.applyWriteFile(action);
-      transcriptResult = `write_file ${action.path}\n\nWrote ${changed.join(", ")}.${await this.changeVerifier.verify(changed)}`;
-      this.readState.remember(action.path, action.content, Math.max(48000, Buffer.byteLength(action.content, "utf8")), "tool");
-      await this.localHooks.run("postTool", action);
-      return transcriptResult;
-    }
+      case "fact_store":
+      case "fact_feedback": {
+        if (!this.memoryManager) {
+          throw new Error("Local memory is not available in this environment.");
+        }
+        await this.ensureMemoryInitialized();
+        const args = action.type === "fact_store"
+          ? { action: action.action, content: action.content, category: action.category, tags: action.tags, query: action.query, entity: action.entity, entities: action.entities, id: action.id, limit: action.limit }
+          : { id: action.id, helpful: action.helpful };
+        return this.memoryManager.handleToolCall(action.type, args);
+      }
 
-    if (action.type === "edit_file") {
-      await this.preflightWritableAction(action);
-      await this.recordCheckpoint(action, `Before editing ${action.path}.`);
-      const changed = await this.diff.applyEditFile(action);
-      transcriptResult = `edit_file ${action.path}\n\nEdited ${changed.join(", ")}.${await this.changeVerifier.verify(changed)}`;
-      await this.rememberCurrentFile(action.path);
-      await this.localHooks.run("postTool", action);
-      return transcriptResult;
-    }
+      case "propose_patch": {
+        await this.recordCheckpoint(action, "Before applying proposed patch.");
+        const changed = await this.diff.applyPatch(action.patch);
+        return `propose_patch\n\nApplied changes to ${changed.join(", ")}.${await this.changeVerifier.verify(changed)}`;
+      }
 
-    if (action.type === "open_diff") {
-      await this.diff.previewPatch(action.patch);
-      transcriptResult = "open_diff\n\nOpened VS Code diff preview.";
-      await this.localHooks.run("postTool", action);
-      return transcriptResult;
-    }
+      case "write_file": {
+        await this.preflightWritableAction(action);
+        await this.recordCheckpoint(action, `Before writing ${action.path}.`);
+        const changed = await this.diff.applyWriteFile(action);
+        const transcriptResult = `write_file ${action.path}\n\nWrote ${changed.join(", ")}.${await this.changeVerifier.verify(changed)}`;
+        this.readState.remember(action.path, action.content, Math.max(48000, Buffer.byteLength(action.content, "utf8")), "tool");
+        return transcriptResult;
+      }
 
-    if (action.type === "mcp_call_tool") {
-      transcriptResult = await callConfiguredMcpTool(
-        this.config.getMcpServers(),
-        this.config.getNetworkPolicy(),
-        action,
-        this.runningAbort?.signal
-      );
-      await this.localHooks.run("postTool", action);
-      return transcriptResult;
-    }
+      case "edit_file": {
+        await this.preflightWritableAction(action);
+        await this.recordCheckpoint(action, `Before editing ${action.path}.`);
+        const changed = await this.diff.applyEditFile(action);
+        const transcriptResult = `edit_file ${action.path}\n\nEdited ${changed.join(", ")}.${await this.changeVerifier.verify(changed)}`;
+        await this.rememberCurrentFile(action.path);
+        return transcriptResult;
+      }
 
-    if (action.type === "notebook_edit_cell") {
-      await this.preflightWritableAction(action);
-      await this.recordCheckpoint(action, `Before editing notebook ${action.path} cell ${action.index}.`);
-      transcriptResult = await this.notebooks.execute(action, this.runningAbort?.signal);
-      transcriptResult = `${transcriptResult}${await this.changeVerifier.verify([action.path])}`;
-      this.readState.markNotebookRead(action.path);
-      await this.localHooks.run("postTool", action);
-      return transcriptResult;
-    }
+      case "open_diff":
+        await this.diff.previewPatch(action.patch);
+        return "open_diff\n\nOpened VS Code diff preview.";
 
-    const timeout = this.config.getCommandTimeoutSeconds();
-    await this.recordCheckpoint(action, `Before running ${action.command}.`);
-    const result = await this.terminal.run(action, {
-      timeoutSeconds: timeout,
-      outputLimitBytes: this.config.getCommandOutputLimitBytes(),
-      signal: this.runningAbort?.signal
-    }, (stream, text) => {
-      this.emit({ type: "toolResult", text: `${stream}: ${text}` });
-    });
-    transcriptResult = formatCommandResult(action, result);
-    await this.localHooks.run("postTool", action);
-    return transcriptResult;
+      case "mcp_call_tool":
+        return callConfiguredMcpTool(
+          this.config.getMcpServers(),
+          this.config.getNetworkPolicy(),
+          action,
+          this.runningAbort?.signal
+        );
+
+      case "notebook_edit_cell": {
+        await this.preflightWritableAction(action);
+        await this.recordCheckpoint(action, `Before editing notebook ${action.path} cell ${action.index}.`);
+        const edited = await this.notebooks.execute(action, this.runningAbort?.signal);
+        const transcriptResult = `${edited}${await this.changeVerifier.verify([action.path])}`;
+        this.readState.markNotebookRead(action.path);
+        return transcriptResult;
+      }
+
+      case "run_command": {
+        await this.recordCheckpoint(action, `Before running ${action.command}.`);
+        const result = await this.terminal.run(action, {
+          timeoutSeconds: this.config.getCommandTimeoutSeconds(),
+          outputLimitBytes: this.config.getCommandOutputLimitBytes(),
+          signal: this.runningAbort?.signal
+        }, (stream, text) => {
+          this.emit({ type: "toolResult", text: `${stream}: ${text}` });
+        });
+        return formatCommandResult(action, result);
+      }
+
+      default:
+        return assertNever(action);
+    }
   }
 
   private async continueAfterToolResult(continuationPrompt?: string, statusText = "Continuing after tool result.", remainingInvocations?: readonly ToolInvocation[]): Promise<void> {

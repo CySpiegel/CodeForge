@@ -13,3 +13,10 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
 export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
+
+// Compile-time exhaustiveness guard for discriminated-union switches: pass the value in the `default`
+// branch and TS errors if any case is unhandled. At runtime (should be unreachable) it throws rather
+// than letting an unhandled action fall through to a side-effecting default.
+export function assertNever(value: never): never {
+  throw new Error(`Unhandled case: ${JSON.stringify(value)}`);
+}
