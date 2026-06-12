@@ -260,6 +260,32 @@ test("manual context compaction idle timeout releases the running slot", async (
   }
 });
 
+test("recovers from a context-window overflow by compacting and retrying once", async () => {
+  const harness = createControllerHarness({
+    mode: "agent",
+    files: { "README.md": "# CodeForge\n" },
+    responses: [
+      { error: "Endpoint returned HTTP 400: This model's maximum context length is 4096 tokens. However, you requested 5200 tokens." },
+      { content: "Compacted summary." },
+      { content: "Recovered answer." }
+    ]
+  });
+
+  await harness.controller.sendPrompt("Do the thing.");
+  await waitForEvent(
+    harness.events,
+    (event) => event.type === "message" && event.role === "assistant" && /Recovered answer/.test(event.text)
+  );
+
+  assert.ok(
+    harness.events.some((event) => event.type === "message" && event.role === "system" && /exceeded the model's context window/.test(event.text)),
+    "should announce the automatic recovery"
+  );
+  assert.equal(harness.events.some((event) => event.type === "error"), false, "no error surfaced to the user");
+  // overflow attempt + compaction turn + retried model turn
+  assert.equal(harness.provider.requests.length, 3);
+});
+
 test("inspector and audit track denied side-effect tools", async () => {
   const harness = createControllerHarness({
     mode: "ask",

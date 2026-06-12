@@ -1302,7 +1302,7 @@ export class AgentController {
       });
       this.emitContextUsage();
 
-      await this.runModelLoop(provider, model, abort);
+      await this.runModelLoopWithOverflowRecovery(provider, model, abort);
       await this.autoCompactContextIfNeeded(provider, model, abort, "after request");
     } catch (error) {
       this.recordInspector("error", "run", "Request failed.", errorMessage(error));
@@ -1488,6 +1488,33 @@ export class AgentController {
       this.emitContextUsage();
       void this.publishState();
       void this.continueAfterToolResult(approvalContinuationPrompt(approval.action, "rejected"), "Continuing after rejection.");
+    }
+  }
+
+  // Run the agent turn, recovering once from a context-window overflow. Local models frequently
+  // report a larger window in /v1/models than they actually accept, so a prompt that "fit" can still
+  // be rejected. Rather than failing the turn, compact older context once and retry.
+  private async runModelLoopWithOverflowRecovery(provider: LlmProvider, model: string, abort: AbortController): Promise<void> {
+    try {
+      await this.runModelLoop(provider, model, abort);
+    } catch (error) {
+      if (abort.signal.aborted || !isContextOverflowError(error)) {
+        throw error;
+      }
+      this.recordInspector("warn", "context", "Model context window exceeded — compacting and retrying.", errorMessage(error));
+      this.emit({ type: "status", text: "Context window exceeded — compacting and retrying." });
+      this.emit({
+        type: "message",
+        role: "system",
+        text: "⚠️ The request exceeded the model's context window. CodeForge compacted older context and retried automatically."
+      });
+      const compactModel = this.config.getAuxiliaryModel()
+        ? await this.resolveAuxiliaryModel(provider, abort.signal, model)
+        : model;
+      await this.compactSessionWithProvider(provider, compactModel, abort, "Recover from a context-window overflow.");
+      await this.publishTranscript();
+      // Single retry — a second overflow propagates to the caller as a normal error.
+      await this.runModelLoop(provider, model, abort);
     }
   }
 
@@ -5165,6 +5192,23 @@ function safeParseArgs(json: string): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+// Heuristic: does this endpoint error mean the prompt exceeded the model's context window? Covers the
+// common phrasings from vLLM, llama.cpp, LM Studio, LiteLLM, and OpenAI-style gateways.
+export function isContextOverflowError(error: unknown): boolean {
+  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  if (!message) {
+    return false;
+  }
+  return /context (length|window|size)/.test(message)
+    || /maximum context/.test(message)
+    || /exceed[a-z]*[^.]{0,24}context/.test(message)
+    || /context[^.]{0,24}exceed/.test(message)
+    || /too many tokens/.test(message)
+    || /reduce the (length|input|number of tokens|prompt)/.test(message)
+    || /prompt is too long/.test(message)
+    || (/\b(400|413)\b/.test(message) && /\btokens?\b/.test(message));
 }
 
 interface ReviewToolOutcome {

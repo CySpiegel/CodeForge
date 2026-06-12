@@ -39,6 +39,8 @@ export interface ScriptedLlmResponse {
   readonly toolCalls?: readonly ToolCall[];
   readonly usage?: TokenUsage;
   readonly waitBeforeDone?: Promise<void>;
+  // When set, streamChat throws this error instead of yielding — used to exercise error recovery.
+  readonly error?: string;
 }
 
 export class ScriptedLlmProvider implements LlmProvider {
@@ -58,6 +60,9 @@ export class ScriptedLlmProvider implements LlmProvider {
     const response = this.responses.shift();
     if (!response) {
       throw new Error(`No scripted LLM response for request ${this.requests.length}.`);
+    }
+    if (response.error) {
+      throw new Error(response.error);
     }
     if (response.usage) {
       yield { type: "usage", usage: response.usage };
