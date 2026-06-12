@@ -1,5 +1,5 @@
 import { EventEmitter } from "events";
-import { actionProtocolInstructions, parseActionsFromAssistantText, parseToolActionDetailed, ToolActionParseResult, toolDefinitions } from "../core/actionProtocol";
+import { actionProtocolInstructions, parseActionsFromAssistantText, toolDefinitions } from "../core/actionProtocol";
 import { ApprovalQueue } from "../core/approvals";
 import { CodeIntelPort, UnavailableCodeIntelPort } from "../core/codeIntel";
 import { GitPort, UnavailableGitPort } from "../core/git";
@@ -46,7 +46,6 @@ import { NotebookPort, UnavailableNotebookPort } from "../core/notebooks";
 import {
   callConfiguredMcpTool,
   inspectConfiguredMcpServers,
-  McpToolSummary,
   readConfiguredMcpResource
 } from "../core/mcpClient";
 import { OpenAiCompatibleProvider } from "../core/openaiAdapter";
@@ -81,6 +80,20 @@ import {
   WorkspacePort
 } from "../core/types";
 import { codeForgeTools, isApprovalAction, isConcurrencySafeAction, isLocalReadOnlyAction, isReadOnlyAction, ToolInvocation, toolSummary, validateAction } from "../core/toolRegistry";
+import {
+  discoveredCodeForgeToolNames,
+  discoveredMcpToolNames,
+  formatMcpToolSchemaSearchResult,
+  mcpFunctionName,
+  McpToolBinding,
+  mcpToolParameters,
+  parseNativeToolCall,
+  scoreToolSearch,
+  searchCodeForgeTools,
+  selectedToolNames,
+  ToolSchemaSearchResult,
+  toolDefinitionsForAgentMode
+} from "../core/toolDiscovery";
 import { DiffService } from "../adapters/diffService";
 import { TerminalRunner } from "../adapters/terminalRunner";
 import { CodeForgeConfigService, CodeForgeSettingsUpdate } from "../adapters/vscodeConfig";
@@ -112,8 +125,6 @@ const queuedWorkLimit = 20;
 // large to snapshot safely (restoring a truncated copy would corrupt it).
 const undoStackLimit = 25;
 const undoSnapshotMaxBytes = 5_000_000;
-const codeForgeToolSchemaMarker = "CODEFORGE_TOOL_SCHEMA_LOADED:";
-const mcpToolSchemaMarker = "CODEFORGE_MCP_TOOL_SCHEMA_LOADED:";
 
 interface QueuedPrompt {
   readonly type: "prompt";
@@ -169,17 +180,6 @@ const coreReadOnlyToolNames = new Set([
 interface InvalidNativeToolCall {
   readonly toolCall: ToolCall;
   readonly message: string;
-}
-
-interface McpToolBinding {
-  readonly serverId: string;
-  readonly toolName: string;
-}
-
-interface ToolSchemaSearchResult {
-  readonly name: string;
-  readonly score: number;
-  readonly content: string;
 }
 
 interface ReadFileSnapshot {
@@ -1168,7 +1168,7 @@ export class AgentController {
         } else if (event.type === "toolCalls") {
           for (const toolCall of event.toolCalls) {
             nativeToolCalls.push(toolCall);
-            const parsed = this.parseNativeToolCall(toolCall, mcpToolBindings);
+            const parsed = parseNativeToolCall(toolCall, mcpToolBindings);
             if (parsed.ok) {
               invocations.push({
                 id: toolCall.id,
@@ -2460,40 +2460,6 @@ export class AgentController {
     }
   }
 
-  private parseNativeToolCall(toolCall: ToolCall, mcpToolBindings: ReadonlyMap<string, McpToolBinding>): ToolActionParseResult {
-    const parsed = parseToolActionDetailed(toolCall.name, toolCall.argumentsJson);
-    if (parsed.ok) {
-      return parsed;
-    }
-
-    const binding = mcpToolBindings.get(toolCall.name);
-    if (!binding) {
-      return parsed;
-    }
-
-    let args: unknown;
-    try {
-      args = JSON.parse(toolCall.argumentsJson || "{}");
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      return { ok: false, message: `Arguments for ${toolCall.name} must be valid JSON. ${detail}` };
-    }
-    if (!isRecord(args)) {
-      return { ok: false, message: `Arguments for ${toolCall.name} must be a JSON object.` };
-    }
-
-    return {
-      ok: true,
-      action: {
-        type: "mcp_call_tool",
-        serverId: binding.serverId,
-        toolName: binding.toolName,
-        arguments: args,
-        reason: `Call MCP tool ${binding.toolName} on ${binding.serverId}`
-      }
-    };
-  }
-
   private ensureSystemMessage(): void {
     const nextSystemMessage = this.systemMessage();
     const existingIndex = this.messages.findIndex((message) => message.role === "system");
@@ -3080,153 +3046,6 @@ function agentModeLabel(mode: AgentMode): string {
   }
 }
 
-function toolDefinitionsForAgentMode(mode: AgentMode): typeof toolDefinitions {
-  if (mode === "agent") {
-    return toolDefinitions;
-  }
-  return toolDefinitions.filter((tool) => readOnlyToolNames.has(tool.name));
-}
-
-function mcpFunctionName(serverId: string, toolName: string, usedNames: ReadonlySet<string>): string {
-  const server = safeToolNameSegment(serverId).slice(0, 18) || "server";
-  const tool = safeToolNameSegment(toolName).slice(0, 36) || "tool";
-  const base = `mcp__${server}__${tool}`.slice(0, 64);
-  if (!usedNames.has(base)) {
-    return base;
-  }
-  for (let index = 2; index < 1000; index++) {
-    const suffix = `_${index}`;
-    const candidate = `${base.slice(0, 64 - suffix.length)}${suffix}`;
-    if (!usedNames.has(candidate)) {
-      return candidate;
-    }
-  }
-  return `${base.slice(0, 55)}_${Date.now().toString(36).slice(-8)}`;
-}
-
-function safeToolNameSegment(value: string): string {
-  return value.trim().replace(/[^a-zA-Z0-9_-]+/g, "_").replace(/^_+|_+$/g, "");
-}
-
-function mcpToolParameters(inputSchema: unknown): Record<string, unknown> {
-  if (isRecord(inputSchema) && inputSchema.type === "object") {
-    return inputSchema;
-  }
-  return {
-    type: "object",
-    additionalProperties: true
-  };
-}
-
-function discoveredCodeForgeToolNames(messages: readonly ChatMessage[]): ReadonlySet<string> {
-  const names = new Set<string>();
-  for (const message of messages) {
-    for (const match of message.content.matchAll(new RegExp(`${escapeRegExp(codeForgeToolSchemaMarker)}\\s*([a-zA-Z0-9_]+)`, "g"))) {
-      names.add(match[1]);
-    }
-  }
-  return names;
-}
-
-function discoveredMcpToolNames(messages: readonly ChatMessage[]): ReadonlySet<string> {
-  const names = new Set<string>();
-  for (const message of messages) {
-    for (const match of message.content.matchAll(new RegExp(`${escapeRegExp(mcpToolSchemaMarker)}\\s*([a-zA-Z0-9_]+)`, "g"))) {
-      names.add(match[1]);
-    }
-  }
-  return names;
-}
-
-function searchCodeForgeTools(query: string, allowedToolNames: ReadonlySet<string>): readonly ToolSchemaSearchResult[] {
-  const selected = selectedToolNames(query);
-  return codeForgeTools
-    .filter((tool) => allowedToolNames.has(tool.name))
-    .map((tool): ToolSchemaSearchResult => ({
-      name: tool.name,
-      score: scoreToolSearch(query, selected, tool.name, tool.description, [tool.searchHint ?? "", tool.risk, tool.requiresApproval ? "approval" : "auto"]),
-      content: formatCodeForgeToolSchemaSearchResult(tool)
-    }))
-    .filter((result) => result.score > 0)
-    .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
-}
-
-function selectedToolNames(query: string): ReadonlySet<string> {
-  const selected = new Set<string>();
-  for (const match of query.matchAll(/select:([a-zA-Z0-9_,\-\s]+)/g)) {
-    for (const name of match[1].split(/[,\s]+/)) {
-      const normalized = name.trim();
-      if (normalized) {
-        selected.add(normalized);
-      }
-    }
-  }
-  return selected;
-}
-
-function scoreToolSearch(query: string, selected: ReadonlySet<string>, name: string, description: string | undefined, tags: readonly string[]): number {
-  if (selected.size > 0) {
-    return selected.has(name) ? 1000 : 0;
-  }
-
-  const normalizedQuery = query.toLowerCase().replace(/select:[^\s]+/g, " ");
-  const terms = normalizedQuery.split(/[^a-z0-9_/-]+/).map((term) => term.trim()).filter((term) => term.length >= 2);
-  if (terms.length === 0) {
-    return 0;
-  }
-
-  const haystack = [name, description ?? "", ...tags].join(" ").toLowerCase();
-  let score = 0;
-  for (const term of terms) {
-    if (name.toLowerCase() === term) {
-      score += 80;
-    } else if (name.toLowerCase().includes(term)) {
-      score += 45;
-    } else if (haystack.includes(term)) {
-      score += 15;
-    }
-  }
-  return score;
-}
-
-function formatCodeForgeToolSchemaSearchResult(tool: (typeof codeForgeTools)[number]): string {
-  return [
-    `${codeForgeToolSchemaMarker} ${tool.name}`,
-    `Name: ${tool.name}`,
-    `Risk: ${tool.risk}`,
-    `Approval: ${tool.requiresApproval ? "required when policy asks" : "not required"}`,
-    `Concurrency: ${tool.concurrencySafe ? "safe" : "serial"}`,
-    tool.searchHint ? `Search hint: ${tool.searchHint}` : undefined,
-    `Description: ${tool.description}`,
-    "Schema:",
-    JSON.stringify({
-      name: tool.name,
-      description: tool.description,
-      parameters: tool.parameters
-    }, null, 2)
-  ].filter((line): line is string => line !== undefined).join("\n");
-}
-
-function formatMcpToolSchemaSearchResult(functionName: string, serverId: string, tool: McpToolSummary): string {
-  return [
-    `${mcpToolSchemaMarker} ${functionName}`,
-    `Name: ${functionName}`,
-    `Server: ${serverId}`,
-    `MCP tool: ${tool.name}`,
-    tool.description ? `Description: ${tool.description}` : undefined,
-    "Schema:",
-    JSON.stringify({
-      name: functionName,
-      description: `Call MCP tool ${tool.name} on configured server ${serverId}. ${tool.description ?? ""}`.trim(),
-      parameters: mcpToolParameters(tool.inputSchema)
-    }, null, 2)
-  ].filter((line): line is string => line !== undefined).join("\n");
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 function agentModeInstructions(mode: AgentMode): string {
   if (mode === "agent") {
     return [
@@ -3253,28 +3072,6 @@ function agentModeInstructions(mode: AgentMode): string {
     "When the plan is ready, present the intended edits clearly and tell the user to switch to Agent mode before implementation."
   ].join("\n");
 }
-
-const readOnlyToolNames = new Set([
-  "list_files",
-  "glob_files",
-  "read_file",
-  "search_text",
-  "grep_text",
-  "list_diagnostics",
-  "tool_search",
-  "ask_user_question",
-  "tool_list",
-  "task_list",
-  "task_get",
-  "code_hover",
-  "code_definition",
-  "code_references",
-  "code_symbols",
-  "mcp_list_resources",
-  "mcp_read_resource",
-  "notebook_read"
-]);
-
 
 // Heuristic: does this endpoint error mean the prompt exceeded the model's context window? Covers the
 // common phrasings from vLLM, llama.cpp, LM Studio, LiteLLM, and OpenAI-style gateways.
