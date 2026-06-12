@@ -3,6 +3,7 @@ import { CodeForgeConfigService, MemorySettings } from "../../src/adapters/vscod
 import { DiffService } from "../../src/adapters/diffService";
 import { TerminalRunner } from "../../src/adapters/terminalRunner";
 import { CodeIntelAction, CodeIntelPort } from "../../src/core/codeIntel";
+import { GitCommandResult, GitPort } from "../../src/core/git";
 import { memoryMatchesFilter, MemoryEntry, MemoryListFilter, MemoryStore, MemoryWriteOptions } from "../../src/core/memory";
 import { SkillIo } from "../../src/core/skillIo";
 import { MemoryProvider } from "../../src/core/memoryProvider";
@@ -264,6 +265,16 @@ export class FakeDiffService {
   }
 }
 
+export class FakeGitPort implements GitPort {
+  readonly calls: string[][] = [];
+  result: GitCommandResult = { ok: true, exitCode: 0, stdout: "", stderr: "" };
+
+  async run(args: readonly string[]): Promise<GitCommandResult> {
+    this.calls.push([...args]);
+    return this.result;
+  }
+}
+
 export class FakeTerminalRunner {
   readonly commands: RunCommandAction[] = [];
 
@@ -365,6 +376,7 @@ export interface ControllerHarness {
   readonly terminal: FakeTerminalRunner;
   readonly codeIntel: FakeCodeIntelPort;
   readonly memory: FakeMemoryStore;
+  readonly git: FakeGitPort;
   readonly events: AgentUiEvent[];
 }
 
@@ -383,6 +395,7 @@ export interface ControllerHarnessOptions {
   // list and a selected/configured model that may or may not be in it.
   readonly inspection?: OpenAiEndpointInspection;
   readonly configuredModel?: string;
+  readonly gitResult?: GitCommandResult;
   // Live-test hooks: drive the controller with a real LLM provider and a (fake) skill store so the
   // full memory/skills/review loop runs end-to-end against a real endpoint.
   readonly liveProvider?: LlmProvider;
@@ -435,6 +448,10 @@ export function createControllerHarness(options: ControllerHarnessOptions): Cont
     getProfiles: () => [fakeProfile]
   } as unknown as CodeForgeConfigService;
   const events: AgentUiEvent[] = [];
+  const git = new FakeGitPort();
+  if (options.gitResult) {
+    git.result = options.gitResult;
+  }
   const controller = new AgentController(
     config,
     workspace,
@@ -447,10 +464,11 @@ export function createControllerHarness(options: ControllerHarnessOptions): Cont
     () => provider,
     undefined,
     options.skillIo,
-    options.externalMemoryProvider
+    options.externalMemoryProvider,
+    git
   );
   controller.onEvent((event) => events.push(event));
-  return { controller, provider, workspace, diff, terminal, codeIntel, memory, events };
+  return { controller, provider, workspace, diff, terminal, codeIntel, memory, git, events };
 }
 
 export async function waitForEvent(events: readonly AgentUiEvent[], predicate: (event: AgentUiEvent) => boolean): Promise<void> {

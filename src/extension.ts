@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { AgentController, AgentSessionSummary, AgentUiState } from "./agent/agentController";
 import { DiffPreviewProvider, DiffService } from "./adapters/diffService";
+import { GitService } from "./adapters/gitService";
 import { TerminalRunner } from "./adapters/terminalRunner";
 import { CodeForgeConfigService } from "./adapters/vscodeConfig";
 import { VsCodeCodeIntelPort } from "./adapters/vscodeCodeIntel";
@@ -20,6 +21,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const terminal = new TerminalRunner();
   const previewProvider = new DiffPreviewProvider();
   const diff = new DiffService(previewProvider);
+  const git = new GitService();
   const sessions = new VsCodeSessionStore(context);
   const memories = new VsCodeMemoryStore(context);
   const endpointCapabilities = new VsCodeEndpointCapabilityStore(context);
@@ -29,7 +31,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const externalMemory = createExternalMemoryProvider(config.getMemoryProviderName(), {
     holographicPersistence: new VsCodeBlobStore(context, "holographic.sqlite")
   });
-  const controller = new AgentController(config, workspace, terminal, diff, sessions, memories, codeIntel, notebooks, undefined, endpointCapabilities, skills, externalMemory);
+  const controller = new AgentController(config, workspace, terminal, diff, sessions, memories, codeIntel, notebooks, undefined, endpointCapabilities, skills, externalMemory, git);
   const viewProvider = new CodeForgeViewProvider(context.extensionUri, controller);
   const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   statusBar.name = "CodeForge";

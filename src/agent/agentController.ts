@@ -2,6 +2,7 @@ import { EventEmitter } from "events";
 import { actionProtocolInstructions, parseActionsFromAssistantText, parseToolActionDetailed, ToolActionParseResult, toolDefinitions } from "../core/actionProtocol";
 import { ApprovalQueue } from "../core/approvals";
 import { CodeIntelPort, UnavailableCodeIntelPort } from "../core/codeIntel";
+import { GitPort, UnavailableGitPort } from "../core/git";
 import { ContextBuilder } from "../core/contextBuilder";
 import { compactOldToolResults } from "../core/contextCompaction";
 import { buildContextUsage, ContextUsage, formatBytes } from "../core/contextUsage";
@@ -66,6 +67,7 @@ import {
   AgentAction,
   AgentMode,
   ApprovalRequest,
+  GitAction,
   ChatMessage,
   CodeForgeTask,
   CommandResult,
@@ -296,6 +298,7 @@ const queuedWorkLimit = 20;
 // large to snapshot safely (restoring a truncated copy would corrupt it).
 const undoStackLimit = 25;
 const undoSnapshotMaxBytes = 5_000_000;
+const gitOutputLimitBytes = 200_000;
 const codeForgeToolSchemaMarker = "CODEFORGE_TOOL_SCHEMA_LOADED:";
 const mcpToolSchemaMarker = "CODEFORGE_MCP_TOOL_SCHEMA_LOADED:";
 
@@ -378,6 +381,7 @@ export class AgentController {
   private readonly workspace: WorkspacePort;
   private readonly terminal: TerminalRunner;
   private readonly diff: DiffService;
+  private readonly gitPort: GitPort;
   private readonly sessionStore: SessionStore | undefined;
   private readonly memoryStore: MemoryStore | undefined;
   private readonly codeIntel: CodeIntelPort;
@@ -453,12 +457,14 @@ export class AgentController {
     providerFactory?: () => LlmProvider | Promise<LlmProvider>,
     endpointCapabilityStore?: EndpointCapabilityStore,
     skillIo?: SkillIo,
-    externalMemoryProvider?: MemoryProvider
+    externalMemoryProvider?: MemoryProvider,
+    gitPort: GitPort = new UnavailableGitPort()
   ) {
     this.config = config;
     this.workspace = workspace;
     this.terminal = terminal;
     this.diff = diff;
+    this.gitPort = gitPort;
     this.sessionStore = sessionStore;
     this.memoryStore = memoryStore;
     this.codeIntel = codeIntel;
@@ -2339,6 +2345,21 @@ export class AgentController {
     }));
   }
 
+  private async executeGitAction(action: GitAction): Promise<string> {
+    const argv = buildGitArgv(action);
+    if (!argv) {
+      return toolError(`git ${action.operation}: unsupported or unsafe arguments. Allowed extras are a ref, a repo-relative path, or a safe flag (--cached, --stat, --name-only, -p, -n <count>).`);
+    }
+    const result = await this.gitPort.run(argv, this.runningAbort?.signal);
+    const raw = result.ok
+      ? (result.stdout.trim() || "(no output)")
+      : `git ${action.operation} failed (exit ${result.exitCode}).\n${(result.stderr || result.stdout).trim() || "no output"}`;
+    const clipped = Buffer.byteLength(raw, "utf8") > gitOutputLimitBytes
+      ? `${Buffer.from(raw, "utf8").subarray(0, gitOutputLimitBytes).toString("utf8")}\n…[git output clipped]`
+      : raw;
+    return `git ${action.operation}${action.args ? ` ${action.args}` : ""}\n\n${clipped}`;
+  }
+
   private async executePermittedAction(action: AgentAction, toolCallId: string | undefined): Promise<string> {
     await this.runLocalHooks("preTool", action);
     let transcriptResult: string;
@@ -2372,6 +2393,12 @@ export class AgentController {
         await this.workers.waitFor(action.workerId, workerJoinTimeoutMs, this.runningAbort?.signal);
       }
       transcriptResult = this.workers.output(action.workerId) ?? `worker_output ${action.workerId}\n\nNo worker found.`;
+      await this.runLocalHooks("postTool", action);
+      return transcriptResult;
+    }
+
+    if (action.type === "git") {
+      transcriptResult = await this.executeGitAction(action);
       await this.runLocalHooks("postTool", action);
       return transcriptResult;
     }
@@ -5348,6 +5375,67 @@ interface UndoSnapshot {
   readonly files: ReadonlyArray<{ readonly path: string; readonly previousContent: string | null; readonly restorable: boolean }>;
 }
 
+// Safe flags the read-only git tool may forward. Everything else starting with "-" is rejected so the
+// model cannot smuggle dangerous options (e.g. --output, --upload-pack) through the git port.
+const gitFlagAllowlist = new Set([
+  "--cached", "--staged", "--stat", "--name-only", "--name-status", "-p", "--patch", "--decorate", "--oneline", "--graph", "-n"
+]);
+
+// Build the exact argv for a read-only git operation from a fixed safe base plus validated extras.
+// Returns undefined when an argument is unsafe, so the caller surfaces a tool error instead of running.
+// Exported for unit testing the argument-safety logic.
+export function buildGitArgv(action: GitAction): readonly string[] | undefined {
+  const extra = sanitizeGitArgs(action.args);
+  if (extra === undefined) {
+    return undefined;
+  }
+  switch (action.operation) {
+    case "status":
+      return ["status", "--short", "--branch", ...extra];
+    case "diff":
+      return ["diff", ...extra];
+    case "log":
+      return extra.length > 0 ? ["log", "--oneline", "--decorate", ...extra] : ["log", "--oneline", "--decorate", "-n", "30"];
+    case "show":
+      return ["show", "--stat", ...extra];
+    case "branch":
+      return ["branch", "--all", "--verbose", ...extra];
+  }
+}
+
+// Validate model-supplied extra git args token by token. Flags must be in the allowlist; other tokens
+// must be a plain ref / range / repo-relative path (no shell metacharacters — args are passed as argv,
+// and git bounds pathspecs to the repo). Returns the token list, or undefined if anything is unsafe.
+function sanitizeGitArgs(args: string | undefined): readonly string[] | undefined {
+  if (!args || !args.trim()) {
+    return [];
+  }
+  const tokens = args.trim().split(/\s+/);
+  if (tokens.length > 8) {
+    return undefined;
+  }
+  const safe: string[] = [];
+  for (const token of tokens) {
+    if (token.startsWith("-")) {
+      if (gitFlagAllowlist.has(token) || /^-n\d+$/.test(token)) {
+        safe.push(token);
+        continue;
+      }
+      return undefined;
+    }
+    if (/^\d+$/.test(token) && safe[safe.length - 1] === "-n") {
+      safe.push(token);
+      continue;
+    }
+    if (/^[A-Za-z0-9_./@^~-]+$/.test(token)) {
+      safe.push(token);
+      continue;
+    }
+    return undefined;
+  }
+  return safe;
+}
+
 // The repo-relative paths an action is about to modify, used to snapshot them for undo. Only the
 // file-mutating actions are covered; commands and reads return none.
 function undoTargetPaths(action: AgentAction): readonly string[] {
@@ -5525,6 +5613,8 @@ function approvalAcceptedText(action: AgentAction, transcriptResult: string): st
       return `Searched for ${action.query}.`;
     case "list_diagnostics":
       return action.path ? `Listed diagnostics for ${action.path}.` : "Listed workspace diagnostics.";
+    case "git":
+      return `Ran git ${action.operation}.`;
     case "spawn_agent":
       return `Launched agent ${action.agent || "implement"}.`;
     case "worker_output":

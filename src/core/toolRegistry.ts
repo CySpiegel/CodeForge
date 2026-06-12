@@ -9,6 +9,7 @@ import {
   CodeHoverAction,
   CodeReferencesAction,
   EditFileAction,
+  GitAction,
   GlobFilesAction,
   GrepTextAction,
   ListDiagnosticsAction,
@@ -34,6 +35,8 @@ export interface ToolValidationResult {
   readonly ok: boolean;
   readonly message?: string;
 }
+
+const gitOperations: readonly GitAction["operation"][] = ["status", "diff", "log", "show", "branch"];
 
 export interface CodeForgeTool {
   readonly name: AgentAction["type"];
@@ -1425,6 +1428,51 @@ export const codeForgeTools: readonly CodeForgeTool[] = [
     }
   },
   {
+    name: "git",
+    description: "Read-only git inspection of the open repo: status, diff (add args '--cached' for staged), log, show <ref>, or branch list. Use this to review uncommitted changes before editing or to write a commit message. To actually commit or stage, propose a `git commit`/`git add` through run_command (approval-gated).",
+    searchHint: "inspect git status, diff, log, branches",
+    risk: "read",
+    concurrencySafe: true,
+    requiresApproval: false,
+    parameters: {
+      type: "object",
+      properties: {
+        operation: { type: "string", enum: ["status", "diff", "log", "show", "branch"] },
+        args: { type: "string", description: "Optional: a ref, repo-relative path, or safe flag (e.g. --cached, --stat, --name-only, -n <count>)." },
+        reason: { type: "string" }
+      },
+      required: ["operation"],
+      additionalProperties: false
+    },
+    parse(input) {
+      const operation = optionalString(input.operation);
+      if (!operation || !gitOperations.includes(operation as GitAction["operation"])) {
+        return undefined;
+      }
+      return {
+        type: "git",
+        operation: operation as GitAction["operation"],
+        args: optionalString(input.args),
+        reason: optionalString(input.reason)
+      };
+    },
+    validate(action) {
+      if (action.type !== "git") {
+        return invalidToolType(action, "git");
+      }
+      if (!gitOperations.includes(action.operation)) {
+        return { ok: false, message: `git operation must be one of: ${gitOperations.join(", ")}.` };
+      }
+      if (action.args && (action.args.length > 200 || action.args.includes("\0"))) {
+        return { ok: false, message: "git args is invalid (too long or contains NUL)." };
+      }
+      return { ok: true };
+    },
+    summarize(action) {
+      return action.type === "git" ? `git ${action.operation}${action.args ? ` ${action.args}` : ""}` : "git";
+    }
+  },
+  {
     name: "mcp_call_tool",
     description: "Call a tool on an explicitly configured MCP server after permission approval.",
     searchHint: "call mcp tool",
@@ -1515,7 +1563,8 @@ export function isReadOnlyAction(action: AgentAction): boolean {
     || action.type === "notebook_read"
     || action.type === "open_diff"
     || action.type === "spawn_agent"
-    || action.type === "worker_output";
+    || action.type === "worker_output"
+    || action.type === "git";
 }
 
 export function isConcurrencySafeAction(action: AgentAction): boolean {

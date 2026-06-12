@@ -331,6 +331,24 @@ test("undo with nothing to revert reports it cleanly", async () => {
   assert.ok(harness.events.some((event) => event.type === "message" && /Nothing to undo/.test(event.text)));
 });
 
+test("git tool runs read-only and returns endpoint output without an approval prompt", async () => {
+  const harness = createControllerHarness({
+    mode: "agent",
+    gitResult: { ok: true, exitCode: 0, stdout: "## main\n M src/a.ts", stderr: "" },
+    responses: [
+      { toolCalls: [toolCall("git", { operation: "status" })] },
+      { content: "You have one modified file." }
+    ]
+  });
+
+  await harness.controller.sendPrompt("What changed?");
+  await waitForEvent(harness.events, (event) => event.type === "message" && event.role === "assistant" && /modified file/.test(event.text));
+
+  assert.deepEqual(harness.git.calls[0], ["status", "--short", "--branch"]);
+  assert.ok(harness.events.some((event) => event.type === "toolResult" && /M src\/a\.ts/.test(event.text)));
+  assert.equal(harness.events.some((event) => event.type === "approvalRequested"), false);
+});
+
 test("inspector and audit track denied side-effect tools", async () => {
   const harness = createControllerHarness({
     mode: "ask",

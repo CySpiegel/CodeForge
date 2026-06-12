@@ -77,6 +77,7 @@ function approvalKind(action: AgentAction): ApprovalKind {
     case "search_text":
     case "grep_text":
     case "list_diagnostics":
+    case "git":
       return "search";
     case "spawn_agent":
     case "worker_output":
@@ -132,6 +133,8 @@ function titleForAction(action: AgentAction): string {
     case "grep_text":
     case "list_diagnostics":
       return "Search workspace";
+    case "git":
+      return "Inspect git";
     case "spawn_agent":
       return "Launch agent";
     case "worker_output":
@@ -201,6 +204,7 @@ function riskForAction(action: AgentAction): string {
     case "search_text":
     case "grep_text":
     case "list_diagnostics":
+    case "git":
       return "read-only workspace access";
     case "spawn_agent":
     case "worker_output":

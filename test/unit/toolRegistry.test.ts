@@ -171,6 +171,7 @@ const validToolSamples: Record<AgentAction["type"], Record<string, unknown>> = {
   search_text: { query: "AgentController" },
   grep_text: { query: "AgentController", include: "src/**/*.ts", limit: 10 },
   list_diagnostics: { path: "src/core/types.ts", limit: 10 },
+  git: { operation: "status" },
   spawn_agent: { agent: "review", prompt: "Review src/core/types.ts" },
   worker_output: { workerId: "worker-1-a" },
   ask_user_question: {

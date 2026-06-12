@@ -145,6 +145,16 @@ export interface ContextItem {
   readonly content: string;
 }
 
+// Read-only git inspection surface. Writes (commit/add) intentionally stay on the approval-gated
+// run_command path; these operations never mutate the repo, so they run without a prompt. The GitPort
+// that executes them lives in ./git (kept vscode-free so the agent layer can default to it).
+export interface GitAction {
+  readonly type: "git";
+  readonly operation: "status" | "diff" | "log" | "show" | "branch";
+  readonly args?: string;
+  readonly reason?: string;
+}
+
 export interface WorkspacePort {
   listTextFiles(limit: number, signal?: AbortSignal): Promise<readonly string[]>;
   listFiles(pattern: string | undefined, limit: number, signal?: AbortSignal): Promise<readonly string[]>;
@@ -211,6 +221,7 @@ export type AgentAction =
   | EditFileAction
   | OpenDiffAction
   | RunCommandAction
+  | GitAction
   | McpCallToolAction;
 
 export interface ListFilesAction {
