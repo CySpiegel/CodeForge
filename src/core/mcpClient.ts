@@ -1,6 +1,7 @@
 import { spawn, ChildProcessWithoutNullStreams } from "child_process";
 import { createInterface, Interface as ReadlineInterface } from "readline";
-import { errorMessage, isRecord as isObject } from "./guards";
+import { errorMessage } from "./guards";
+import { mcpHttpHeaders } from "./mcp/httpHeaders";
 import { checkedResult, isJsonRpcResponseArray, parseJsonRpc, responseWithId } from "./mcp/jsonRpc";
 import { formatMcpResourceContents, formatMcpResult, mcpError, parseMcpResources, parseMcpTools } from "./mcp/responseFormat";
 import type { JsonRpcRequest, JsonRpcResponse, McpResourceReadResult, McpServerInspection, McpServerStatus, McpTransport } from "./mcp/types";
@@ -539,30 +540,5 @@ async function readSseResponse(response: Response, id: string): Promise<JsonRpcR
     }
   }
   throw new Error("MCP SSE response ended before the expected JSON-RPC response.");
-}
-
-function mcpHttpHeaders(server: McpServerConfig, method: string, params: unknown, sessionId?: string): Record<string, string> {
-  const name = mcpName(method, params);
-  return {
-    ...(server.headers ?? {}),
-    "content-type": "application/json",
-    accept: "application/json, text/event-stream",
-    "mcp-method": method,
-    ...(name ? { "mcp-name": name } : {}),
-    ...(sessionId ? { "mcp-session-id": sessionId } : {})
-  };
-}
-
-function mcpName(method: string, params: unknown): string | undefined {
-  if (!isObject(params)) {
-    return undefined;
-  }
-  if (method === "tools/call" || method === "prompts/get") {
-    return typeof params.name === "string" ? params.name : undefined;
-  }
-  if (method === "resources/read") {
-    return typeof params.uri === "string" ? params.uri : undefined;
-  }
-  return undefined;
 }
 
