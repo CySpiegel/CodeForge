@@ -7,6 +7,7 @@ import { runGitOperation, unsafeGitArgsMessage } from "./gitTool";
 import { LearningCoordinator } from "./learningCoordinator";
 import { ModelResolver } from "./modelResolver";
 import { DoctorService } from "./doctorService";
+import { McpCoordinator } from "./mcpCoordinator";
 // Re-exported so existing test imports (`from agentController`) keep working after the extraction.
 export { resolveConfiguredModelId } from "./modelResolver";
 import { errorMessage, isToolErrorText, toolError } from "./toolText";
@@ -46,11 +47,7 @@ import { SkillUsageTracker } from "../core/skillUsage";
 import { NotebookPort, UnavailableNotebookPort } from "../core/notebooks";
 import {
   callConfiguredMcpTool,
-  configuredMcpServerStatuses,
   inspectConfiguredMcpServers,
-  McpResourceSummary,
-  McpServerInspection,
-  McpServerStatus,
   McpToolSummary,
   readConfiguredMcpResource
 } from "../core/mcpClient";
@@ -104,11 +101,6 @@ import {
   AgentInspectorEntry,
   AgentInspectorSummary,
   AgentLocalCommandSummary,
-  AgentMcpInspectionSummary,
-  AgentMcpResourceContextSummary,
-  AgentMcpResourceSummary,
-  AgentMcpServerStatusSummary,
-  AgentMcpToolSummary,
   AgentMemorySummary,
   AgentModelSummary,
   AgentProfileSummary,
@@ -228,12 +220,12 @@ export class AgentController {
   // warnings. The controller reads/writes the cache through accessors and delegates resolution.
   private readonly models: ModelResolver;
   private readonly doctor: DoctorService;
+  private readonly mcp: McpCoordinator;
   private readonly readFileState = new Map<string, ReadFileSnapshot>();
   private readonly notebookReadState = new Set<string>();
   private messages: ChatMessage[] = [];
   private tasks = new Map<string, CodeForgeTask>();
   private lastContextItems: readonly ContextItem[] = [];
-  private mcpContextItems: ContextItem[] = [];
   private pinnedFiles = new Set<string>();
   private inspectorEntries: AgentInspectorEntry[] = [];
   private auditEntries: AgentAuditEntry[] = [];
@@ -320,7 +312,7 @@ export class AgentController {
       contextLimits: () => this.effectiveContextLimits(),
       maxConcurrentWorkers: () => this.config.getWorkersMaxConcurrent(),
       skillsDigest: (_definition, prompt) => this.workerSkillsDigest(prompt),
-      mcpResources: () => this.mcpContextItems,
+      mcpResources: () => this.mcp.getContextItems(),
       createProvider: () => this.createProvider(),
       resolveModel: (provider, signal) => this.models.resolveModel(provider, signal),
       capabilities: (provider, model, signal) => this.capabilities(provider, model, signal),
@@ -364,6 +356,13 @@ export class AgentController {
       hasSessionStore: () => Boolean(this.sessionStore),
       hasMemoryStore: () => Boolean(this.memoryStore)
     });
+    this.mcp = new McpCoordinator({
+      config,
+      emit: (event) => this.emit(event),
+      publishState: () => this.publishState(),
+      emitContextUsage: () => this.emitContextUsage(),
+      currentSignal: () => this.runningAbort?.signal
+    });
   }
 
   // Public delegate kept for the live curator smoke test and any external caller.
@@ -385,7 +384,7 @@ export class AgentController {
         this.messages = [];
         this.tasks.clear();
         this.lastContextItems = [];
-        this.mcpContextItems = [];
+        this.mcp.reset();
         this.pinnedFiles.clear();
         this.readFileState.clear();
         this.notebookReadState.clear();
@@ -666,15 +665,17 @@ export class AgentController {
     await this.refreshModels();
   }
 
+  // Public MCP surface (called from the webview bridge) — delegated to the MCP coordinator.
   async inspectMcpServers(serverId?: string, servers = this.config.getMcpServers()): Promise<void> {
-    const inspections = await inspectConfiguredMcpServers(
-      servers,
-      this.config.getNetworkPolicy(),
-      serverId,
-      this.runningAbort?.signal
-    );
-    this.emit({ type: "mcpProbe", inspections: inspections.map(toAgentMcpInspectionSummary) });
-    await this.publishState();
+    await this.mcp.inspectServers(serverId, servers);
+  }
+
+  async attachMcpResource(serverId: string, uri: string, servers = this.config.getMcpServers()): Promise<void> {
+    await this.mcp.attachResource(serverId, uri, servers);
+  }
+
+  detachMcpResource(serverId: string, uri: string): void {
+    this.mcp.detachResource(serverId, uri);
   }
 
   async compactContext(focus = ""): Promise<void> {
@@ -776,7 +777,7 @@ export class AgentController {
     this.messages = [];
     this.tasks.clear();
     this.lastContextItems = [];
-    this.mcpContextItems = [];
+    this.mcp.reset();
     this.pinnedFiles.clear();
     this.readFileState.clear();
     this.notebookReadState.clear();
@@ -881,7 +882,7 @@ export class AgentController {
       const provider = await this.createProvider();
       const model = await this.models.resolveModel(provider, abort.signal);
       await this.autoCompactContextIfNeeded(provider, model, abort, "before request");
-      const context = new ContextBuilder(this.workspace, this.effectiveContextLimits(), { mcpResources: this.mcpContextItems, pinnedFiles: [...this.pinnedFiles] });
+      const context = new ContextBuilder(this.workspace, this.effectiveContextLimits(), { mcpResources: this.mcp.getContextItems(), pinnedFiles: [...this.pinnedFiles] });
       const contextItems = await context.build(abort.signal);
       const contextText = context.format(contextItems);
       this.lastContextItems = contextItems;
@@ -1905,15 +1906,6 @@ export class AgentController {
     return task ? `task_get ${task.id}\n\n${formatTask(task)}` : toolError(`No task found for ${taskId}.`);
   }
 
-  private async listMcpResourcesForTool(serverId: string | undefined): Promise<string> {
-    const inspections = await inspectConfiguredMcpServers(
-      this.config.getMcpServers(),
-      this.config.getNetworkPolicy(),
-      serverId,
-      this.runningAbort?.signal
-    );
-    return `mcp_list_resources${serverId ? ` ${serverId}` : ""}\n\n${formatMcpInspectionReport(inspections, "resources")}`;
-  }
 
   private async recordTask(task: CodeForgeTask, event: "created" | "updated"): Promise<void> {
     await this.appendSessionRecord((sessionId) => ({
@@ -2029,7 +2021,7 @@ export class AgentController {
     }
 
     if (action.type === "mcp_list_resources") {
-      transcriptResult = await this.listMcpResourcesForTool(action.serverId);
+      transcriptResult = await this.mcp.listResourcesForTool(action.serverId);
       await this.runLocalHooks("postTool", action);
       return transcriptResult;
     }
@@ -2735,7 +2727,7 @@ export class AgentController {
     this.learning.onSessionRestored(snapshot.messages.length);
     this.restoreTasksFromSessionRecords(snapshot.records);
     this.lastContextItems = [];
-    this.mcpContextItems = [];
+    this.mcp.reset();
     this.pinnedFiles.clear();
     this.readFileState.clear();
     this.notebookReadState.clear();
@@ -2885,7 +2877,7 @@ export class AgentController {
         await this.showLocalCommands();
         return;
       case "/mcp":
-        await this.handleMcpCommand(rest);
+        await this.mcp.handleCommand(rest);
         return;
       case "/workers":
         this.showWorkers();
@@ -3028,122 +3020,6 @@ export class AgentController {
       default:
         this.emit({ type: "message", role: "system", text: workerCommandList() });
     }
-  }
-
-  private async handleMcpCommand(rest: string): Promise<void> {
-    const [subcommandRaw, serverIdRaw, ...tail] = rest.trim().split(/\s+/);
-    const subcommand = subcommandRaw?.toLowerCase() || "status";
-    const serverId = serverIdRaw || undefined;
-    switch (subcommand) {
-      case "status":
-      case "list":
-      case "servers":
-        this.showMcpServers();
-        return;
-      case "tools":
-        await this.showMcpInspection("tools", serverId);
-        return;
-      case "resources":
-        await this.showMcpInspection("resources", serverId);
-        return;
-      case "attach":
-      case "select": {
-        const uri = tail.join(" ").trim();
-        if (!serverId || !uri) {
-          this.emit({ type: "message", role: "system", text: "Usage: /mcp attach <server-id> <resource-uri>" });
-          return;
-        }
-        await this.attachMcpResource(serverId, uri);
-        return;
-      }
-      case "detach":
-      case "remove": {
-        const uri = tail.join(" ").trim();
-        if (!serverId) {
-          this.emit({ type: "message", role: "system", text: "Usage: /mcp detach <server-id> <resource-uri|all>" });
-          return;
-        }
-        this.detachMcpResource(serverId, uri || "all");
-        return;
-      }
-      case "clear":
-        this.mcpContextItems = [];
-        this.emit({ type: "message", role: "system", text: "Cleared attached MCP resources from this chat context." });
-        this.emitContextUsage();
-        await this.publishState();
-        return;
-      default:
-        this.emit({ type: "message", role: "system", text: "Usage: /mcp status, /mcp tools [server-id], /mcp resources [server-id], /mcp attach <server-id> <resource-uri>, /mcp detach <server-id> <resource-uri|all>, or /mcp clear." });
-    }
-  }
-
-  private showMcpServers(): void {
-    const statuses = configuredMcpServerStatuses(this.config.getMcpServers(), this.config.getNetworkPolicy());
-    if (statuses.length === 0) {
-      this.emit({ type: "message", role: "system", text: "No MCP servers are configured. Add explicit servers in CodeForge settings before using MCP tools." });
-      return;
-    }
-
-    const lines = statuses.map((server) => {
-      const state = server.enabled ? server.valid ? "ready" : "blocked" : "disabled";
-      const target = server.target ? ` ${server.target}` : "";
-      const reason = server.reason ? ` - ${server.reason}` : "";
-      return `- ${server.id} (${server.label}) ${server.transport}${target}: ${state}${reason}`;
-    });
-    this.emit({ type: "message", role: "system", text: `Configured MCP servers:\n${lines.join("\n")}` });
-  }
-
-  private async showMcpInspection(kind: "tools" | "resources", serverId: string | undefined): Promise<void> {
-    const inspections = await inspectConfiguredMcpServers(
-      this.config.getMcpServers(),
-      this.config.getNetworkPolicy(),
-      serverId,
-      this.runningAbort?.signal
-    );
-    this.emit({ type: "mcpProbe", inspections: inspections.map(toAgentMcpInspectionSummary) });
-    this.emit({ type: "message", role: "system", text: formatMcpInspectionReport(inspections, kind) });
-    await this.publishState();
-  }
-
-  async attachMcpResource(serverId: string, uri: string, servers = this.config.getMcpServers()): Promise<void> {
-    try {
-      const resource = await readConfiguredMcpResource(
-        servers,
-        this.config.getNetworkPolicy(),
-        serverId,
-        uri,
-        this.runningAbort?.signal
-      );
-      const label = `${resource.serverId}:${resource.uri}`;
-      this.mcpContextItems = [
-        ...this.mcpContextItems.filter((item) => item.label !== label),
-        {
-          kind: "mcpResource",
-          label,
-          content: resource.content
-        }
-      ];
-      this.emit({ type: "message", role: "system", text: `Attached MCP resource ${label} to this chat context.` });
-      this.emitContextUsage();
-      await this.publishState();
-    } catch (error) {
-      this.emit({ type: "error", text: errorMessage(error) });
-    }
-  }
-
-  detachMcpResource(serverId: string, uri: string): void {
-    const before = this.mcpContextItems.length;
-    this.mcpContextItems = uri === "all"
-      ? this.mcpContextItems.filter((item) => !item.label.startsWith(`${serverId}:`))
-      : this.mcpContextItems.filter((item) => item.label !== `${serverId}:${uri}`);
-    const removed = before - this.mcpContextItems.length;
-    this.emit({
-      type: "message",
-      role: "system",
-      text: removed > 0 ? `Detached ${removed} MCP resource(s).` : "No matching MCP resource was attached."
-    });
-    this.emitContextUsage();
-    void this.publishState();
   }
 
   private async showLocalSkills(): Promise<void> {
@@ -3543,8 +3419,8 @@ export class AgentController {
       modelInfo,
       contextUsage: this.currentContextUsage(),
       localCommands: await this.localCommandSummaries(),
-      mcpServers: configuredMcpServerStatuses(this.config.getMcpServers(), this.config.getNetworkPolicy()).map(toAgentMcpServerStatusSummary),
-      mcpContext: this.mcpContextItems.map(toAgentMcpResourceContextSummary),
+      mcpServers: this.mcp.serverStatusSummaries(),
+      mcpContext: this.mcp.resourceSummaries(),
       workers: this.workers.list(),
       activeContext: await this.activeContextSummary(),
       memories: await this.memorySummaries(),
@@ -3688,87 +3564,6 @@ function toAgentSessionSummary(session: SessionSummary): AgentSessionSummary {
     messageCount: session.messageCount,
     pendingApprovalCount: session.pendingApprovalCount
   };
-}
-
-function toAgentMcpServerStatusSummary(status: McpServerStatus): AgentMcpServerStatusSummary {
-  return {
-    id: status.id,
-    label: status.label,
-    enabled: status.enabled,
-    transport: status.transport,
-    target: status.target,
-    valid: status.valid,
-    reason: status.reason
-  };
-}
-
-function toAgentMcpInspectionSummary(inspection: McpServerInspection): AgentMcpInspectionSummary {
-  return {
-    server: toAgentMcpServerStatusSummary(inspection.status),
-    tools: inspection.tools.map(toAgentMcpToolSummary),
-    resources: inspection.resources.map(toAgentMcpResourceSummary),
-    error: inspection.error
-  };
-}
-
-function toAgentMcpToolSummary(tool: McpToolSummary): AgentMcpToolSummary {
-  return {
-    name: tool.name,
-    description: tool.description
-  };
-}
-
-function toAgentMcpResourceSummary(resource: McpResourceSummary): AgentMcpResourceSummary {
-  return {
-    uri: resource.uri,
-    name: resource.name,
-    description: resource.description,
-    mimeType: resource.mimeType
-  };
-}
-
-function toAgentMcpResourceContextSummary(item: ContextItem): AgentMcpResourceContextSummary {
-  const [serverId, ...uriParts] = item.label.split(":");
-  return {
-    serverId,
-    uri: uriParts.join(":"),
-    label: item.label,
-    bytes: Buffer.byteLength(item.content, "utf8")
-  };
-}
-
-function formatMcpInspectionReport(inspections: readonly McpServerInspection[], kind: "tools" | "resources"): string {
-  if (inspections.length === 0) {
-    return "No MCP servers are configured.";
-  }
-
-  const lines: string[] = [];
-  for (const inspection of inspections) {
-    const state = inspection.status.enabled ? inspection.status.valid ? "ready" : "blocked" : "disabled";
-    lines.push(`${inspection.status.id} (${inspection.status.label}) ${inspection.status.transport}: ${state}`);
-    if (inspection.error) {
-      lines.push(`  Error: ${inspection.error}`);
-      continue;
-    }
-    if (kind === "tools") {
-      if (inspection.tools.length === 0) {
-        lines.push("  No tools reported.");
-      } else {
-        for (const tool of inspection.tools) {
-          lines.push(`  - ${tool.name}${tool.description ? `: ${tool.description}` : ""}`);
-        }
-      }
-    } else if (inspection.resources.length === 0) {
-      lines.push("  No resources reported.");
-    } else {
-      for (const resource of inspection.resources) {
-        const details = [resource.name, resource.mimeType].filter(Boolean).join(" | ");
-        lines.push(`  - ${resource.uri}${details ? ` (${details})` : ""}`);
-      }
-      lines.push("  Use /mcp attach <server-id> <resource-uri> to add a resource to chat context.");
-    }
-  }
-  return `MCP ${kind}:\n${lines.join("\n")}`;
 }
 
 function formatWorkerList(workers: readonly WorkerSummary[]): string {
