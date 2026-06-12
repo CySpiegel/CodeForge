@@ -1,3 +1,4 @@
+import { isRecord } from "./guards";
 import {
   AgentAction,
   PermissionBehavior,
@@ -317,8 +318,4 @@ function isBehavior(value: unknown): value is PermissionBehavior {
 
 function isRuleScope(value: unknown): value is PermissionRule["scope"] {
   return value === "session" || value === "workspace" || value === "user";
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

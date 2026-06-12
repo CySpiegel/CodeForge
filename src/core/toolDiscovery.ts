@@ -1,4 +1,5 @@
 import { parseToolActionDetailed, ToolActionParseResult, toolDefinitions } from "./actionProtocol";
+import { isRecord } from "./guards";
 import { McpToolSummary } from "./mcpClient";
 import { codeForgeTools } from "./toolRegistry";
 import { AgentMode, ChatMessage, ToolCall } from "./types";
@@ -72,10 +73,6 @@ export interface ToolSchemaSearchResult {
   readonly name: string;
   readonly score: number;
   readonly content: string;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function escapeRegExp(value: string): string {

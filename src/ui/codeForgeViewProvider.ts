@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { errorMessage } from "../core/guards";
 import { AgentController, AgentUiEvent } from "../agent/agentController";
 import { normalizeMcpServerConfigs } from "../adapters/vscodeConfig";
 import { parsePermissionRules } from "../core/permissions";
@@ -396,9 +397,6 @@ function parseAgentMode(value: unknown): AgentMode | undefined {
   }
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 
 function getNonce(): string {
   const possible = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";

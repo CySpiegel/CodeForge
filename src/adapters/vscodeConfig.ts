@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { isRecord } from "../core/guards";
 import { allowlistEntryForUrl, assertUrlAllowed, isUrlAllowed } from "../core/networkPolicy";
 import { normalizePermissionPolicy, parsePermissionRules } from "../core/permissions";
 import { CuratorSettings } from "../core/curator";
@@ -436,10 +437,6 @@ function toMcpServerConfig(value: unknown): McpServerConfig | undefined {
     url: typeof value.url === "string" ? value.url.trim() : undefined,
     headers
   };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function secretKey(name: string): string {

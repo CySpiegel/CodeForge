@@ -1,3 +1,4 @@
+import { isRecord } from "./guards";
 import { parseAction, toolDefinitions } from "./toolRegistry";
 import { AgentAction } from "./types";
 
@@ -111,8 +112,4 @@ function normalizeAction(value: unknown): AgentAction | undefined {
   }
 
   return parseAction(value.type, value);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

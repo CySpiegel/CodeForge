@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { isRecord as isObject } from "../core/guards";
 import { createMemoryId, MemoryEntry, MemoryListFilter, MemoryStore, MemoryWriteOptions, memoryMatchesFilter, normalizeMemoryNamespace, normalizeMemoryScope, normalizeMemoryText } from "../core/memory";
 
 const memoryFileName = "memories.json";
@@ -156,6 +157,3 @@ function toMemoryEntry(value: unknown): MemoryEntry | undefined {
   };
 }
 
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}

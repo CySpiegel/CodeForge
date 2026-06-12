@@ -1,3 +1,4 @@
+import { isRecord } from "./guards";
 import { AgentAction, RunCommandAction, WorkspacePort } from "./types";
 
 const commandsGlob = ".codeforge/commands/*.md";
@@ -408,8 +409,4 @@ function wildcardMatch(pattern: string, value: string): boolean {
   }
   const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
   return new RegExp(`^${escaped}$`, "i").test(value);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { isRecord as isObject } from "../core/guards";
 import { CachedModelCapability, capabilityKey, EndpointCapabilityStore } from "../core/endpointCapabilityCache";
 
 const capabilityKeyName = "codeforge.endpointCapabilities";
@@ -80,6 +81,3 @@ function toCachedModelCapability(value: unknown): CachedModelCapability | undefi
   };
 }
 
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}

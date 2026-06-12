@@ -1,3 +1,4 @@
+import { isRecord as isObject } from "./guards";
 import { validateAction } from "./toolRegistry";
 import { AgentAction, ApprovalRequest, ChatMessage, CodeForgeTask, CodeForgeTaskStatus, ToolCall } from "./types";
 import { WorkerKind, WorkerSessionEvent, WorkerStatus, WorkerSummary, WorkerTranscriptEntry, WorkerTranscriptRole } from "./workerTypes";
@@ -251,6 +252,3 @@ function isLearningEvent(value: unknown): value is "proposed" | "accepted" | "re
   return value === "proposed" || value === "accepted" || value === "rejected" || value === "audited";
 }
 
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}

@@ -5,7 +5,7 @@ CodeForge uses a ports-and-adapters layout so the coding harness stays testable 
 ## Boundaries
 
 - `src/core`: provider contracts, network policy, SSE parsing, context budgeting, local memory contracts, action parsing, approval state, and patch parsing. This layer has no VS Code imports.
-  - Learning core (`learning.ts`, `skillProposal.ts`, `agentProposal.ts`, `learningAudit.ts`): pure lesson (de)serialization over `MemoryEntry`, extraction/proposal prompts with tolerant parsers, relevance ranking, the bounded context digest, and the self-audit dedup/prune plan. No VS Code imports — the agent layer drives the model calls and file writes.
+  - Learning/curation core (`curator.ts`, `backgroundReview.ts`): the deterministic skill-library lifecycle sweep plus the LLM umbrella-consolidation pass, and the self-review prompt builder over `MemoryEntry`/skill state. No VS Code imports — the agent layer (`learningCoordinator.ts`, `learningReview.ts`) orchestrates the model calls and file writes.
   - Sub-agent definitions (`workerAgents.ts`, `workerTypes.ts`): the built-in worker kinds (`explore`, `plan`, `review`, `verify`, `implement`) with their bounded toolsets, plus `custom` for `.codeforge/agents` definitions. No VS Code imports.
   - Persona/voice loading lives in `localExtensions.ts` (`loadLocalSoul`, alongside the loaders for local commands, skills, and agents).
 - `src/adapters`: VS Code, filesystem, terminal, configuration, secrets, local memory/session storage, and diff-preview adapters. `worktree.ts` (`GitWorktreeManager`) is a Git worktree isolation adapter for parallel editing sub-agents — built and tested, but not yet wired into the worker runtime.

@@ -1,3 +1,4 @@
+import { isRecord } from "./guards";
 import { ModelInfo, OpenAiBackendKind } from "./types";
 
 // Endpoint model-discovery parsing: turn a /v1/models response body into ModelInfo[] (with robust,
@@ -131,7 +132,7 @@ function findPositiveInteger(value: unknown, keys: readonly string[], bounds: In
 }
 
 function deepFindInteger(value: unknown, key: string, bounds: IntegerSearchBounds, depth: number): number | undefined {
-  if (depth > 4 || !isPlainObject(value)) {
+  if (depth > 4 || !isRecord(value)) {
     return undefined;
   }
 
@@ -241,14 +242,6 @@ function toBoolean(value: unknown): boolean | undefined {
   return undefined;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-// Like isRecord but excludes arrays, so deep integer search descends only into plain objects.
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function safeJson(value: unknown): string {
   try {

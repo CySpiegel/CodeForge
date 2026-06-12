@@ -1,5 +1,6 @@
 import { spawn, ChildProcessWithoutNullStreams } from "child_process";
 import { createInterface, Interface as ReadlineInterface } from "readline";
+import { errorMessage, isRecord as isObject } from "./guards";
 import { assertUrlAllowed } from "./networkPolicy";
 import { SseEvent, SseParser } from "./sseParser";
 import { McpCallToolAction, McpServerConfig, NetworkPolicy } from "./types";
@@ -772,17 +773,11 @@ function withoutUndefined<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 
 function isSafeId(value: string): boolean {
   return /^[A-Za-z0-9._-]{1,80}$/.test(value);
 }
 
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function mcpEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const allowed = [

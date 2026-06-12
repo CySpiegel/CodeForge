@@ -1,3 +1,4 @@
+import { isRecord } from "./guards";
 import { parseUnifiedDiff } from "./unifiedDiff";
 import { classifyShellCommand } from "./shellSemantics";
 import { FACT_FEEDBACK_SCHEMA, FACT_STORE_SCHEMA } from "./holographic/factTools";
@@ -1674,10 +1675,6 @@ function optionalStringArray(value: unknown): readonly string[] | undefined {
     return undefined;
   }
   return value.map((item) => typeof item === "string" ? item.trim() : "").filter(Boolean);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isSafeMcpName(value: string): boolean {
