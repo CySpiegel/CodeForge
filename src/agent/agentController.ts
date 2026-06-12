@@ -12,6 +12,7 @@ import { SessionService } from "./sessionService";
 import { ContextManager } from "./contextManager";
 import { InspectorLog } from "./inspectorLog";
 import { ProviderGateway } from "./providerGateway";
+import { TaskBoard } from "./taskBoard";
 import { UndoManager } from "./undoManager";
 import { approvalAcceptedText, approvalContinuationPrompt, approvalPermissionDecision, formatQuestionAnswers, invocationForApproval } from "./approvalText";
 import { SlashCommandRouter } from "./slashCommandRouter";
@@ -54,7 +55,7 @@ import {
   readConfiguredMcpResource
 } from "../core/mcpClient";
 import { evaluateActionPermission, permissionModeLabel } from "../core/permissions";
-import { SessionRecord, SessionSnapshot, SessionStore } from "../core/session";
+import { SessionSnapshot, SessionStore } from "../core/session";
 import { classifyShellCommand } from "../core/shellSemantics";
 import { normalizeWorkspacePathInput } from "../core/workspacePaths";
 import {
@@ -63,7 +64,6 @@ import {
   ApprovalRequest,
   GitAction,
   ChatMessage,
-  CodeForgeTask,
   ContextItem,
   ContextLimits,
   LlmRequest,
@@ -214,7 +214,8 @@ export class AgentController {
   private readonly readFileState = new Map<string, ReadFileSnapshot>();
   private readonly notebookReadState = new Set<string>();
   private messages: ChatMessage[] = [];
-  private tasks = new Map<string, CodeForgeTask>();
+  // Owns the model-facing task board (task_create/update/list/get) + its session persistence/restore.
+  private readonly taskBoard: TaskBoard;
   private lastContextItems: readonly ContextItem[] = [];
   private pinnedFiles = new Set<string>();
   private lastTokenUsage: TokenUsage | undefined;
@@ -271,6 +272,10 @@ export class AgentController {
       recordInspector: (level, category, summary, detail) => this.inspector.record(level, category, summary, detail),
       publishState: () => this.publishState(),
       isBusy: () => Boolean(this.runningAbort)
+    });
+    this.taskBoard = new TaskBoard({
+      record: (factory) => this.sessions.record(factory),
+      publishState: () => this.publishState()
     });
     this.models = new ModelResolver({
       config,
@@ -452,7 +457,7 @@ export class AgentController {
         this.applySession(latest);
       } else {
         this.messages = [];
-        this.tasks.clear();
+        this.taskBoard.reset();
         this.lastContextItems = [];
         this.mcp.reset();
         this.pinnedFiles.clear();
@@ -791,7 +796,7 @@ export class AgentController {
     this.runningAbort?.abort();
     this.runningAbort = undefined;
     this.messages = [];
-    this.tasks.clear();
+    this.taskBoard.reset();
     this.lastContextItems = [];
     this.mcp.reset();
     this.pinnedFiles.clear();
@@ -1857,80 +1862,6 @@ export class AgentController {
     }
   }
 
-  private async createTask(action: Extract<AgentAction, { readonly type: "task_create" }>): Promise<string> {
-    const now = Date.now();
-    const task: CodeForgeTask = {
-      id: `task-${now}-${Math.random().toString(16).slice(2)}`,
-      subject: action.subject.trim(),
-      description: action.description?.trim() || undefined,
-      activeForm: action.activeForm?.trim() || undefined,
-      status: "pending",
-      owner: action.owner?.trim() || undefined,
-      blocks: uniqueStrings(action.blocks),
-      blockedBy: uniqueStrings(action.blockedBy),
-      metadata: action.metadata,
-      createdAt: now,
-      updatedAt: now
-    };
-    this.tasks.set(task.id, task);
-    await this.recordTask(task, "created");
-    await this.publishState();
-    return `task_create ${task.id}\n\n${formatTask(task)}`;
-  }
-
-  private async updateTask(action: Extract<AgentAction, { readonly type: "task_update" }>): Promise<string> {
-    const existing = this.tasks.get(action.taskId);
-    if (!existing) {
-      return toolError(`No task found for ${action.taskId}.`);
-    }
-    const now = Date.now();
-    const nextStatus = action.status ?? existing.status;
-    const task: CodeForgeTask = {
-      ...existing,
-      subject: action.subject?.trim() || existing.subject,
-      description: action.description !== undefined ? action.description.trim() || undefined : existing.description,
-      activeForm: action.activeForm !== undefined ? action.activeForm.trim() || undefined : existing.activeForm,
-      status: nextStatus,
-      owner: action.owner !== undefined ? action.owner.trim() || undefined : existing.owner,
-      blocks: action.blocks !== undefined ? uniqueStrings(action.blocks) : existing.blocks,
-      blockedBy: action.blockedBy !== undefined ? uniqueStrings(action.blockedBy) : existing.blockedBy,
-      metadata: action.metadata !== undefined ? { ...(existing.metadata ?? {}), ...action.metadata } : existing.metadata,
-      updatedAt: now,
-      completedAt: nextStatus === "completed" ? existing.completedAt ?? now : nextStatus === "cancelled" ? existing.completedAt ?? now : existing.completedAt
-    };
-    this.tasks.set(task.id, task);
-    await this.recordTask(task, "updated");
-    await this.publishState();
-    return `task_update ${task.id}\n\n${formatTask(task)}`;
-  }
-
-  private listTasks(action: Extract<AgentAction, { readonly type: "task_list" }>): string {
-    const tasks = [...this.tasks.values()]
-      .filter((task) => !action.status || task.status === action.status)
-      .filter((task) => !action.owner || task.owner === action.owner)
-      .sort((a, b) => a.createdAt - b.createdAt);
-    if (tasks.length === 0) {
-      return "task_list\n\nNo tasks.";
-    }
-    return `task_list\n\n${tasks.map(formatTaskLine).join("\n")}`;
-  }
-
-  private getTask(taskId: string): string {
-    const task = this.tasks.get(taskId);
-    return task ? `task_get ${task.id}\n\n${formatTask(task)}` : toolError(`No task found for ${taskId}.`);
-  }
-
-
-  private async recordTask(task: CodeForgeTask, event: "created" | "updated"): Promise<void> {
-    await this.sessions.record((sessionId) => ({
-      type: "task",
-      sessionId,
-      createdAt: Date.now(),
-      event,
-      task
-    }));
-  }
-
   private async executeGitAction(action: GitAction): Promise<string> {
     const result = await runGitOperation(this.gitPort, action, this.runningAbort?.signal);
     return result ?? toolError(unsafeGitArgsMessage(action));
@@ -1998,25 +1929,25 @@ export class AgentController {
     }
 
     if (action.type === "task_create") {
-      transcriptResult = await this.createTask(action);
+      transcriptResult = await this.taskBoard.createTask(action);
       await this.runLocalHooks("postTool", action);
       return transcriptResult;
     }
 
     if (action.type === "task_update") {
-      transcriptResult = await this.updateTask(action);
+      transcriptResult = await this.taskBoard.updateTask(action);
       await this.runLocalHooks("postTool", action);
       return transcriptResult;
     }
 
     if (action.type === "task_list") {
-      transcriptResult = this.listTasks(action);
+      transcriptResult = this.taskBoard.listTasks(action);
       await this.runLocalHooks("postTool", action);
       return transcriptResult;
     }
 
     if (action.type === "task_get") {
-      transcriptResult = this.getTask(action.taskId);
+      transcriptResult = this.taskBoard.getTask(action.taskId);
       await this.runLocalHooks("postTool", action);
       return transcriptResult;
     }
@@ -2532,7 +2463,7 @@ export class AgentController {
     this.userTurnCount = snapshot.messages.filter((message) => message.role === "user").length;
     this.toolIterationCount = 0;
     this.learning.onSessionRestored(snapshot.messages.length);
-    this.restoreTasksFromSessionRecords(snapshot.records);
+    this.taskBoard.restoreFromSessionRecords(snapshot.records);
     this.lastContextItems = [];
     this.mcp.reset();
     this.pinnedFiles.clear();
@@ -2543,15 +2474,6 @@ export class AgentController {
     this.approvals.restore(snapshot.pendingApprovals);
     this.workerApprovalWaiters.clear();
     this.workers.restoreFromSessionRecords(snapshot.records);
-  }
-
-  private restoreTasksFromSessionRecords(records: readonly SessionRecord[]): void {
-    this.tasks.clear();
-    for (const record of records) {
-      if (record.type === "task") {
-        this.tasks.set(record.task.id, record.task);
-      }
-    }
   }
 
   private emit(event: AgentUiEvent): void {
@@ -2743,29 +2665,6 @@ function toAgentModelSummary(model: ModelInfo): AgentModelSummary {
 
 function uniqueStrings(values: readonly string[] | undefined): readonly string[] {
   return [...new Set((values ?? []).map((value) => value.trim()).filter(Boolean))];
-}
-
-function formatTaskLine(task: CodeForgeTask): string {
-  const owner = task.owner ? ` owner=${task.owner}` : "";
-  const blockedBy = task.blockedBy.length > 0 ? ` blockedBy=${task.blockedBy.join(",")}` : "";
-  return `- ${task.id} [${task.status}]${owner}${blockedBy} ${task.subject}`;
-}
-
-function formatTask(task: CodeForgeTask): string {
-  return [
-    `ID: ${task.id}`,
-    `Status: ${task.status}`,
-    `Subject: ${task.subject}`,
-    task.description ? `Description: ${task.description}` : undefined,
-    task.activeForm ? `Active: ${task.activeForm}` : undefined,
-    task.owner ? `Owner: ${task.owner}` : undefined,
-    task.blocks.length > 0 ? `Blocks: ${task.blocks.join(", ")}` : undefined,
-    task.blockedBy.length > 0 ? `Blocked by: ${task.blockedBy.join(", ")}` : undefined,
-    task.metadata && Object.keys(task.metadata).length > 0 ? `Metadata: ${JSON.stringify(task.metadata)}` : undefined,
-    `Created: ${new Date(task.createdAt).toISOString()}`,
-    `Updated: ${new Date(task.updatedAt).toISOString()}`,
-    task.completedAt ? `Completed: ${new Date(task.completedAt).toISOString()}` : undefined
-  ].filter((line): line is string => Boolean(line)).join("\n");
 }
 
 const localAgentReadTools = ["list_files", "glob_files", "read_file", "search_text", "grep_text", "list_diagnostics", "tool_search", "tool_list"] as const;
