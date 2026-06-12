@@ -1,20 +1,22 @@
 import { abortableDelay, fetchWithRateLimitRetry, isRetryableHttpStatus, rateLimitDelayMs, resolveMaxRateLimitRetries } from "./httpRetry";
 import { assertUrlAllowed } from "./networkPolicy";
+import { ensureOpenAiToolResultPairing, toOpenAiMessage, toOpenAiTool } from "./openaiMessageMapper";
 import { backendLabel, detectBackend, isEmbeddingModel, modelsFromBody } from "./openaiModelDiscovery";
 import { SseParser } from "./sseParser";
+// Re-exported so existing import paths (contextManager, openaiAdapter.test) keep working after the split.
+export { sanitizeToolArgumentsJson } from "./openaiToolArgs";
+export { resolveRequestMaxTokens } from "./openaiMaxTokens";
+export { ensureOpenAiToolResultPairing } from "./openaiMessageMapper";
 import {
-  ChatMessage,
   LlmProvider,
   LlmRequest,
   LlmStreamEvent,
-  ModelInfo,
   NetworkPolicy,
   OpenAiEndpointInspection,
   ProviderCapabilities,
   ProviderProfile,
   TokenUsage,
-  ToolCall,
-  ToolDefinition
+  ToolCall
 } from "./types";
 
 interface OpenAiStreamChunk {
@@ -391,225 +393,6 @@ export class OpenAiCompatibleProvider implements LlmProvider {
       signal: request.signal
     });
   }
-}
-
-function toOpenAiMessage(message: ChatMessage): Record<string, unknown> {
-  if (message.role === "tool") {
-    return {
-      role: "tool",
-      content: message.content,
-      tool_call_id: message.toolCallId ?? message.name ?? "tool"
-    };
-  }
-
-  const result: Record<string, unknown> = {
-    role: message.role,
-    content: message.content,
-    ...(message.name ? { name: message.name } : {})
-  };
-
-  if (message.role === "assistant" && message.toolCalls && message.toolCalls.length > 0) {
-    result.tool_calls = message.toolCalls.map((toolCall) => ({
-      id: toolCall.id,
-      type: "function",
-      function: {
-        name: toolCall.name,
-        arguments: sanitizeToolArgumentsJson(toolCall.argumentsJson)
-      }
-    }));
-  }
-
-  return result;
-}
-
-// Local models frequently truncate tool-call arguments mid-string (server-side max_tokens
-// cutoff or a quiet-stream timeout). The raw, malformed `argumentsJson` is still recorded on the
-// assistant turn so the parse failure surfaces to the model, but it must never be replayed verbatim:
-// OpenAI-compatible backends (e.g. LiteLLM) `json.loads` the `arguments` string and reject the whole
-// request with HTTP 400 "Unterminated string". Sanitize to valid JSON at the serialization boundary
-// so every outbound request is well-formed regardless of how the tool call entered history.
-export function sanitizeToolArgumentsJson(raw: string | undefined): string {
-  const text = (raw ?? "").trim();
-  if (!text) {
-    return "{}";
-  }
-  if (isJsonObjectString(text)) {
-    return text;
-  }
-  const repaired = repairTruncatedJsonObject(text);
-  if (repaired && isJsonObjectString(repaired)) {
-    return repaired;
-  }
-  return "{}";
-}
-
-function isJsonObjectString(text: string): boolean {
-  try {
-    const parsed = JSON.parse(text);
-    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed);
-  } catch {
-    return false;
-  }
-}
-
-// Best-effort completion of a truncated JSON object: close an open string, drop a dangling escape or
-// trailing separator, and balance the remaining brackets. Returns undefined when there is nothing to
-// repair. Callers must re-validate the result; on failure they fall back to "{}".
-function repairTruncatedJsonObject(text: string): string | undefined {
-  const closers: string[] = [];
-  let inString = false;
-  let escaped = false;
-
-  for (const ch of text) {
-    if (inString) {
-      if (escaped) {
-        escaped = false;
-      } else if (ch === "\\") {
-        escaped = true;
-      } else if (ch === "\"") {
-        inString = false;
-      }
-      continue;
-    }
-    if (ch === "\"") {
-      inString = true;
-    } else if (ch === "{") {
-      closers.push("}");
-    } else if (ch === "[") {
-      closers.push("]");
-    } else if (ch === "}" || ch === "]") {
-      closers.pop();
-    }
-  }
-
-  let result = escaped ? text.slice(0, -1) : text;
-  if (inString) {
-    result += "\"";
-  }
-  // A trailing object/array separator or dangling key (e.g. `{"a":1,` or `{"a":1,"b"`) cannot be
-  // completed into a valid value, so trim it back to the last complete entry before balancing.
-  result = result.replace(/,\s*$/, "").replace(/(:\s*|,\s*"[^"]*"\s*)$/, "");
-  for (let i = closers.length - 1; i >= 0; i--) {
-    result += closers[i];
-  }
-  return result === text ? undefined : result;
-}
-
-export function ensureOpenAiToolResultPairing(messages: readonly ChatMessage[]): readonly ChatMessage[] {
-  const repaired: ChatMessage[] = [];
-  const seenToolCallIds = new Set<string>();
-  let index = 0;
-
-  while (index < messages.length) {
-    const message = messages[index];
-    if (!message) {
-      index++;
-      continue;
-    }
-
-    if (message.role === "tool") {
-      index++;
-      continue;
-    }
-
-    if (message.role !== "assistant" || !message.toolCalls || message.toolCalls.length === 0) {
-      repaired.push(message);
-      index++;
-      continue;
-    }
-
-    const toolCalls = message.toolCalls.filter((toolCall) => {
-      if (seenToolCallIds.has(toolCall.id)) {
-        return false;
-      }
-      seenToolCallIds.add(toolCall.id);
-      return true;
-    });
-
-    if (toolCalls.length === 0) {
-      repaired.push({
-        role: "assistant",
-        content: message.content.trim() ? message.content : "[Duplicate tool calls removed before OpenAI request.]"
-      });
-      index++;
-      continue;
-    }
-
-    repaired.push(toolCalls.length === message.toolCalls.length ? message : { ...message, toolCalls });
-
-    const toolMessages: ChatMessage[] = [];
-    let nextIndex = index + 1;
-    while (nextIndex < messages.length && messages[nextIndex]?.role === "tool") {
-      toolMessages.push(messages[nextIndex]);
-      nextIndex++;
-    }
-
-    const usedToolMessageIndexes = new Set<number>();
-    for (const toolCall of toolCalls) {
-      const matchingIndex = toolMessages.findIndex((toolMessage, toolMessageIndex) =>
-        !usedToolMessageIndexes.has(toolMessageIndex) && toolMessage.toolCallId === toolCall.id
-      );
-      if (matchingIndex >= 0) {
-        usedToolMessageIndexes.add(matchingIndex);
-        repaired.push(toolMessages[matchingIndex]);
-      } else {
-        repaired.push({
-          role: "tool",
-          name: toolCall.name,
-          toolCallId: toolCall.id,
-          content: `<tool_use_error>Error: Tool call ${toolCall.name} was interrupted before CodeForge produced a result. Continue by inspecting current state before retrying.</tool_use_error>`
-        });
-      }
-    }
-
-    index = nextIndex;
-  }
-
-  return repaired;
-}
-
-// Default per-turn output cap (tokens), matching Claude Code's ~32k generous default. Used when
-// codeforge.model.maxOutputTokens is left at its default. Must stay in sync with the package.json
-// default for that setting.
-const DEFAULT_MAX_OUTPUT_TOKENS = 32_000;
-const MIN_OUTPUT_TOKENS = 512;
-
-// Decide the max_tokens to send for a model turn from the user's preference:
-//   preference <= 0 -> no limit: return undefined so no max_tokens is sent and the endpoint/model
-//                      decides (on vLLM, up to the remaining context window).
-//   preference > 0  -> cap output at that many tokens, but never above half the context window (so
-//                      the prompt always has room) nor above the model's reported output limit.
-//                      The default (DEFAULT_MAX_OUTPUT_TOKENS) flows through this same safe bounding,
-//                      which keeps it sane on small-context models and overrides the tiny built-in
-//                      defaults of some vLLM/LiteLLM deployments that truncate tool-call JSON.
-export function resolveRequestMaxTokens(
-  model: ModelInfo | undefined,
-  contextLimitMaxTokens?: number,
-  preference = DEFAULT_MAX_OUTPUT_TOKENS
-): number | undefined {
-  if (preference <= 0) {
-    return undefined;
-  }
-  const bounds = [Math.floor(preference)];
-  const context = model?.contextLength ?? contextLimitMaxTokens;
-  if (context && context > 0) {
-    bounds.push(Math.floor(context / 2));
-  }
-  if (model?.maxOutputTokens && model.maxOutputTokens > 0) {
-    bounds.push(model.maxOutputTokens);
-  }
-  return Math.max(MIN_OUTPUT_TOKENS, Math.min(...bounds));
-}
-
-function toOpenAiTool(tool: ToolDefinition): Record<string, unknown> {
-  return {
-    type: "function",
-    function: {
-      name: tool.name,
-      description: tool.description,
-      parameters: tool.parameters
-    }
-  };
 }
 
 function toUsage(usage: OpenAiUsage | null | undefined): TokenUsage | undefined {
