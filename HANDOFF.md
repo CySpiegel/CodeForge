@@ -32,20 +32,20 @@ Core product (Phases 0–11) is unchanged and described in the git history. Seve
 
 6. **agentController.ts decomposition** (this session, post-v0.1.15) — pure structural refactor, described next.
 
-**Tests: 278 pass / 0 fail.** `tsc` clean, extension compiles. Run:
+**Tests: 283 pass / 0 fail.** `tsc` clean, extension compiles. Run:
 ```bash
 npm run compile && npm run compile:tests && node --test out-test/test/unit/*.test.js out-test/test/integration/*.test.js
 ```
 
 ## agentController.ts decomposition (this session — structural, behavior-preserving)
 
-Goal (user directive): "one function does one thing", "we should never be doing huge monolithic code files", proper design patterns. `agentController.ts` went from **5,763 → 2,869 lines (≈50%)** by lifting every *separable* concern into its own SRP module, while the **run engine stays cohesive** (run loop, tool execution, approval flow, streaming, system-message/context wiring, collaborator orchestration). No behavior change — verified by an 8-agent adversarial workflow (byte-level diffs vs pre-refactor `f0155f4`) reporting **zero regressions**, plus the full suite green at every commit.
+Goal (user directive): "one function does one thing", "we should never be doing huge monolithic code files", proper design patterns. `agentController.ts` went from **5,763 → 2,416 lines (≈58%)** by lifting every *separable* concern into its own SRP module, while the **run engine stays cohesive** (run loop, tool execution, approval flow, streaming, system-message/context wiring, collaborator orchestration). No behavior change — verified by three adversarial workflows (byte-level diffs vs the pre-refactor controller) reporting **zero regressions**, plus the full suite green at every commit (206 → 283 tests). **The decomposition is complete: every candidate from the analysis passes is extracted.**
 
 **Extraction pattern (follow it for any future split):** each module declares an `XxxDeps`/host interface; the controller constructs it with arrow closures bound to its own methods/state (same DI shape as the pre-existing `WorkerManager`/`SessionService`/`ContextManager`). Type-only cross-imports use `import type`. Backward-compatible test imports preserved via re-export (e.g. `export { isContextOverflowError } from "./toolText"`). A *wide* interface on a top-level dispatcher (the slash router) is inherent, not a smell — do not force-split a cohesive flow just to shrink an interface.
 
-**Modules extracted this session (commits `f0155f4`..`0731c89`):**
+**Round 1 modules (commits `f0155f4`..`0731c89`):**
 - `src/agent/slashCommandRouter.ts` (673) — the entire `/command` surface: parse + dispatch + all report/list builders. `SlashCommandHost` is intentionally wide.
-- `src/core/toolDiscovery.ts` (231) — pure tool discovery + schema search + `parseNativeToolCall` + markers/`readOnlyToolNames`/`McpToolBinding`/`ToolSchemaSearchResult`. Core (no `vscode`), shared by the run engine. Unit-tested.
+- `src/core/toolDiscovery.ts` (231+) — pure tool discovery + schema search + `parseNativeToolCall` + markers/`readOnlyToolNames`/`coreAgentToolNames`/`coreReadOnlyToolNames`/`McpToolBinding`/`ToolSchemaSearchResult`. Core (no `vscode`), shared by the run engine. Unit-tested.
 - `src/agent/taskBoard.ts` (131) — model-facing task board (task_create/update/list/get) + session persist/restore. `getState` does **not** project tasks. Unit-tested.
 - `src/agent/undoManager.ts` (119) — undo snapshot stack + `/undo` restore. Public `AgentController.undo()` delegate kept for the view provider.
 - `src/agent/approvalText.ts` (118) — pure approval presentation builders (incl. the exhaustive `approvalAcceptedText` switch).
@@ -54,7 +54,18 @@ Goal (user directive): "one function does one thing", "we should never be doing 
 - `src/agent/commandResultText.ts` (37) — command/hook result rendering.
 - **Consolidated into existing cohesive homes (not a new junk-drawer module):** error-classification helpers (`isContextOverflowError`, `isRecoverableEditPreflightError`, `modelRecoverableToolError`, `isMissingFileError`, `isRecord`) → `src/agent/toolText.ts`; action-visibility predicates (`isInternal{Automation,State,Read}Action`) → `src/core/toolRegistry.ts` beside the other action predicates.
 
-This builds on the earlier decomposition phases (also in git history): `sessionService.ts`, `contextManager.ts`, `modelResolver.ts`, `mcpCoordinator.ts`, `doctorService.ts`, `learningCoordinator.ts`, `learningReview.ts`, `modelStream.ts`, `agentUiTypes.ts`, `core/git.ts` + `gitTool.ts`. The controller is now a thin orchestrator over ~25 focused modules.
+**Round 2+3 modules (commits `a9c95cc`..`25d0ee7`):**
+- `src/agent/spawnAgentService.ts` (~190) — `spawn_agent` impl: worker launch + the local-agent→worker-definition mapping (12 capability tool-name consts). Constructed **after** WorkerManager (holds a direct `this.workers` ref).
+- `src/agent/toolSchemaService.ts` (~115) — `tool_list` / `tool_search` impl (catalog + CodeForge/MCP schema search). Dispatcher delegates.
+- `src/agent/taskBoard.ts`, `toolSchemaService.ts`, `spawnAgentService.ts` follow the same precedent: **move a tool's implementation out, the `executePermittedAction` dispatcher just delegates** — this is *not* splitting the run engine.
+- `src/agent/localHookRunner.ts` (~70) — pre/post/failure local shell-hook execution (~26 dispatcher call sites delegate to `localHooks.run`).
+- `src/agent/readStateTracker.ts` (~60) — **pure, Deps-free** state store behind the stale-read guard (read-file snapshots + read-notebook set, path-normalized). The guard logic (`preflightWritableAction`) and file I/O (`readWorkspaceFileIfExists`) **stay** in the controller and call the tracker. Unit-tested.
+- `src/agent/memoryCommands.ts` (~90) — curated-memory CRUD + summary (sole owner of the raw `MemoryStore`; distinct from the tool-facing `MemoryManager`). 4 public delegates kept for the view provider/tests.
+- `src/agent/pinnedFiles.ts` (~65) — pinned-context-file set + `/pin` surface. 3 public delegates kept.
+- `src/agent/systemPrompt.ts` (~75) — `SystemPromptBuilder.build()` + `agentModeLabel` + mode-instruction prose. `ensureSystemMessage` (in-place message-log updater) stays.
+- `src/agent/changeVerifier.ts` (~50) — post-edit diagnostics "Verification:" footer.
+
+This builds on the earlier decomposition phases (also in git history): `sessionService.ts`, `contextManager.ts`, `modelResolver.ts`, `mcpCoordinator.ts`, `doctorService.ts`, `learningCoordinator.ts`, `learningReview.ts`, `modelStream.ts`, `agentUiTypes.ts`, `core/git.ts` + `gitTool.ts`. The controller is now a thin orchestrator over ~30 focused modules. What remains in it is intentional: the run loop, tool dispatch, approval flow, streaming, session lifecycle, the constructor DI assembly, and thin public delegates for the view provider. **`ReadStateTracker` was the final candidate** — extracted as a pure state container while its correctness-critical stale-read guard logic stayed in the controller.
 
 **Two near-misses caught by verification (already fixed before their commits):** (1) the view provider calls `controller.undo()` directly — the full-project typecheck caught it; preserved via a thin public delegate. (2) a hand-written `formatTask` in `taskBoard.ts` diverged from the original (`Active:` vs `Active form:`, `toISOString` vs `toLocaleString`, the metadata key-count guard) — corrected to byte-match. **Lesson: when re-typing a moved body, diff it against `git show <base>:<file>` rather than trusting memory.**
 
