@@ -10,6 +10,7 @@ import { DoctorService } from "./doctorService";
 import { McpCoordinator } from "./mcpCoordinator";
 import { SessionService } from "./sessionService";
 import { ContextManager } from "./contextManager";
+import { ChangeVerifier } from "./changeVerifier";
 import { InspectorLog } from "./inspectorLog";
 import { MemoryCommandsService } from "./memoryCommands";
 import { PinnedFiles } from "./pinnedFiles";
@@ -78,7 +79,6 @@ import {
   TokenUsage,
   ToolCall,
   ToolDefinition,
-  WorkspaceDiagnostic,
   WorkspacePort
 } from "../core/types";
 import { codeForgeTools, isApprovalAction, isConcurrencySafeAction, isInternalAutomationAction, isInternalReadAction, isInternalStateAction, isLocalReadOnlyAction, isReadOnlyAction, ToolInvocation, toolSummary, validateAction } from "../core/toolRegistry";
@@ -217,6 +217,8 @@ export class AgentController {
   private readonly memoryCommands: MemoryCommandsService;
   // Builds the system message from persona + curated memory + agent-mode instructions.
   private readonly systemPrompt: SystemPromptBuilder;
+  // Post-edit diagnostics footer for changed files.
+  private readonly changeVerifier: ChangeVerifier;
   private readonly readFileState = new Map<string, ReadFileSnapshot>();
   private readonly notebookReadState = new Set<string>();
   private messages: ChatMessage[] = [];
@@ -299,6 +301,11 @@ export class AgentController {
       getSoulText: () => this.soulText,
       getMemoryBlock: () => this.memoryManager?.buildSystemPrompt() ?? "",
       getAgentMode: () => this.config.getAgentMode()
+    });
+    this.changeVerifier = new ChangeVerifier({
+      getDiagnostics: (path, limit, signal) => this.workspace.getDiagnostics(path, limit, signal),
+      recordInspector: (level, category, summary, detail) => this.inspector.record(level, category, summary, detail),
+      signal: () => this.runningAbort?.signal
     });
     this.models = new ModelResolver({
       config,
@@ -2013,7 +2020,7 @@ export class AgentController {
     if (action.type === "propose_patch") {
       await this.recordCheckpoint(action, "Before applying proposed patch.");
       const changed = await this.diff.applyPatch(action.patch);
-      transcriptResult = `propose_patch\n\nApplied changes to ${changed.join(", ")}.${await this.verifyChangedFiles(changed)}`;
+      transcriptResult = `propose_patch\n\nApplied changes to ${changed.join(", ")}.${await this.changeVerifier.verify(changed)}`;
       await this.runLocalHooks("postTool", action);
       return transcriptResult;
     }
@@ -2022,7 +2029,7 @@ export class AgentController {
       await this.preflightWritableAction(action);
       await this.recordCheckpoint(action, `Before writing ${action.path}.`);
       const changed = await this.diff.applyWriteFile(action);
-      transcriptResult = `write_file ${action.path}\n\nWrote ${changed.join(", ")}.${await this.verifyChangedFiles(changed)}`;
+      transcriptResult = `write_file ${action.path}\n\nWrote ${changed.join(", ")}.${await this.changeVerifier.verify(changed)}`;
       this.rememberReadFile(action.path, action.content, Math.max(48000, Buffer.byteLength(action.content, "utf8")), "tool");
       await this.runLocalHooks("postTool", action);
       return transcriptResult;
@@ -2032,7 +2039,7 @@ export class AgentController {
       await this.preflightWritableAction(action);
       await this.recordCheckpoint(action, `Before editing ${action.path}.`);
       const changed = await this.diff.applyEditFile(action);
-      transcriptResult = `edit_file ${action.path}\n\nEdited ${changed.join(", ")}.${await this.verifyChangedFiles(changed)}`;
+      transcriptResult = `edit_file ${action.path}\n\nEdited ${changed.join(", ")}.${await this.changeVerifier.verify(changed)}`;
       await this.rememberCurrentFile(action.path);
       await this.runLocalHooks("postTool", action);
       return transcriptResult;
@@ -2060,7 +2067,7 @@ export class AgentController {
       await this.preflightWritableAction(action);
       await this.recordCheckpoint(action, `Before editing notebook ${action.path} cell ${action.index}.`);
       transcriptResult = await this.notebooks.execute(action, this.runningAbort?.signal);
-      transcriptResult = `${transcriptResult}${await this.verifyChangedFiles([action.path])}`;
+      transcriptResult = `${transcriptResult}${await this.changeVerifier.verify([action.path])}`;
       this.notebookReadState.add(readStateKey(action.path));
       await this.runLocalHooks("postTool", action);
       return transcriptResult;
@@ -2078,38 +2085,6 @@ export class AgentController {
     transcriptResult = formatCommandResult(action, result);
     await this.runLocalHooks("postTool", action);
     return transcriptResult;
-  }
-
-  private async verifyChangedFiles(paths: readonly string[]): Promise<string> {
-    const uniquePaths = uniqueStrings(paths).filter((path) => path && path !== "/dev/null");
-    if (uniquePaths.length === 0) {
-      return "";
-    }
-
-    const diagnostics: WorkspaceDiagnostic[] = [];
-    for (const path of uniquePaths.slice(0, 12)) {
-      try {
-        diagnostics.push(...await this.workspace.getDiagnostics(path, 20, this.runningAbort?.signal));
-      } catch {
-        // Diagnostics are best-effort after edits; failed reads should not mask a successful write.
-      }
-    }
-
-    const relevant = diagnostics
-      .filter((diagnostic) => diagnostic.severity === "error" || diagnostic.severity === "warning")
-      .slice(0, 30);
-    const detail = relevant.length > 0
-      ? relevant.map((diagnostic) => `${diagnostic.severity} ${diagnostic.path}:${diagnostic.line}:${diagnostic.character} ${diagnostic.message}`).join("\n")
-      : `No VS Code errors or warnings reported for ${uniquePaths.join(", ")}.`;
-    this.inspector.record(relevant.length > 0 ? "warn" : "info", "verification", `Checked diagnostics for ${uniquePaths.length} changed file(s).`, detail);
-    return [
-      "",
-      "",
-      "Verification:",
-      relevant.length > 0
-        ? relevant.map((diagnostic) => `- ${diagnostic.severity} ${diagnostic.path}:${diagnostic.line}:${diagnostic.character} ${diagnostic.message}`).join("\n")
-        : `- No VS Code errors or warnings reported for ${uniquePaths.join(", ")}.`
-    ].join("\n");
   }
 
   private async runLocalHooks(event: LocalHook["event"], action: AgentAction): Promise<void> {
@@ -2598,10 +2573,6 @@ function toAgentModelSummary(model: ModelInfo): AgentModelSummary {
   };
 }
 
-
-function uniqueStrings(values: readonly string[] | undefined): readonly string[] {
-  return [...new Set((values ?? []).map((value) => value.trim()).filter(Boolean))];
-}
 
 const localAgentReadTools = ["list_files", "glob_files", "read_file", "search_text", "grep_text", "list_diagnostics", "tool_search", "tool_list"] as const;
 const localAgentCodeIntelTools = ["code_hover", "code_definition", "code_references", "code_symbols"] as const;
