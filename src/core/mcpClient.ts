@@ -1,8 +1,10 @@
 import { spawn, ChildProcessWithoutNullStreams } from "child_process";
 import { createInterface, Interface as ReadlineInterface } from "readline";
 import { errorMessage, isRecord as isObject } from "./guards";
-import type { JsonRpcRequest, JsonRpcResponse, McpResourceReadResult, McpResourceSummary, McpServerInspection, McpServerStatus, McpToolSummary, McpTransport } from "./mcp/types";
-import { combinedSignal, isSafeId, mcpEnvironment, requestId, safeJson, safeResponseText, throwIfAborted, truncate, withoutUndefined } from "./mcp/util";
+import { checkedResult, isJsonRpcResponseArray, parseJsonRpc, responseWithId } from "./mcp/jsonRpc";
+import { formatMcpResourceContents, formatMcpResult, mcpError, parseMcpResources, parseMcpTools } from "./mcp/responseFormat";
+import type { JsonRpcRequest, JsonRpcResponse, McpResourceReadResult, McpServerInspection, McpServerStatus, McpTransport } from "./mcp/types";
+import { combinedSignal, isSafeId, mcpEnvironment, requestId, safeResponseText, throwIfAborted, truncate, withoutUndefined } from "./mcp/util";
 import { assertUrlAllowed } from "./networkPolicy";
 import { SseEvent, SseParser } from "./sseParser";
 import { McpCallToolAction, McpServerConfig, NetworkPolicy } from "./types";
@@ -537,111 +539,6 @@ async function readSseResponse(response: Response, id: string): Promise<JsonRpcR
     }
   }
   throw new Error("MCP SSE response ended before the expected JSON-RPC response.");
-}
-
-function responseWithId(parsed: JsonRpcResponse | readonly JsonRpcResponse[], id: string): JsonRpcResponse | undefined {
-  if (isJsonRpcResponseArray(parsed)) {
-    return parsed.find((item) => String(item.id) === id);
-  }
-  return String(parsed.id) === id ? parsed : undefined;
-}
-
-function isJsonRpcResponseArray(value: JsonRpcResponse | readonly JsonRpcResponse[]): value is readonly JsonRpcResponse[] {
-  return Array.isArray(value);
-}
-
-function checkedResult(response: JsonRpcResponse): unknown {
-  if (response.error) {
-    const code = response.error.code === undefined ? "" : ` ${response.error.code}`;
-    throw new Error(`MCP tool error${code}: ${response.error.message ?? "Unknown MCP error"}${response.error.data === undefined ? "" : `\n${safeJson(response.error.data)}`}`);
-  }
-  return response.result;
-}
-
-function parseJsonRpc(text: string): JsonRpcResponse | readonly JsonRpcResponse[] {
-  try {
-    const parsed = JSON.parse(text) as JsonRpcResponse | readonly JsonRpcResponse[];
-    if (Array.isArray(parsed)) {
-      return parsed;
-    }
-    return parsed && typeof parsed === "object" ? parsed : { error: { message: "MCP response was not a JSON-RPC object." } };
-  } catch (error) {
-    return { error: { message: `MCP response was not valid JSON: ${errorMessage(error)}` } };
-  }
-}
-
-function parseMcpTools(result: unknown): readonly McpToolSummary[] {
-  if (!isObject(result) || !Array.isArray(result.tools)) {
-    return [];
-  }
-  return result.tools
-    .map((tool): McpToolSummary | undefined => {
-      if (!isObject(tool) || typeof tool.name !== "string" || !tool.name.trim()) {
-        return undefined;
-      }
-      return {
-        name: tool.name,
-        description: typeof tool.description === "string" ? tool.description : undefined,
-        inputSchema: tool.inputSchema
-      };
-    })
-    .filter((tool): tool is McpToolSummary => Boolean(tool));
-}
-
-function parseMcpResources(result: unknown): readonly McpResourceSummary[] {
-  if (!isObject(result) || !Array.isArray(result.resources)) {
-    return [];
-  }
-  return result.resources
-    .map((resource): McpResourceSummary | undefined => {
-      if (!isObject(resource) || typeof resource.uri !== "string" || !resource.uri.trim()) {
-        return undefined;
-      }
-      return {
-        uri: resource.uri,
-        name: typeof resource.name === "string" ? resource.name : undefined,
-        description: typeof resource.description === "string" ? resource.description : undefined,
-        mimeType: typeof resource.mimeType === "string" ? resource.mimeType : undefined
-      };
-    })
-    .filter((resource): resource is McpResourceSummary => Boolean(resource));
-}
-
-function formatMcpResult(result: unknown): string {
-  if (isObject(result) && Array.isArray(result.content)) {
-    const text = result.content
-      .map((item) => isObject(item) && item.type === "text" && typeof item.text === "string" ? item.text : safeJson(item))
-      .join("\n");
-    return truncate(text || safeJson(result), 50000);
-  }
-  return truncate(safeJson(result), 50000);
-}
-
-function formatMcpResourceContents(result: unknown): string {
-  if (!isObject(result) || !Array.isArray(result.contents)) {
-    return truncate(safeJson(result), 50000);
-  }
-
-  const parts = result.contents.map((item): string => {
-    if (!isObject(item)) {
-      return safeJson(item);
-    }
-    const uri = typeof item.uri === "string" ? item.uri : undefined;
-    const mime = typeof item.mimeType === "string" ? item.mimeType : undefined;
-    const header = [uri, mime].filter(Boolean).join(" | ");
-    if (typeof item.text === "string") {
-      return `${header ? `${header}\n` : ""}${item.text}`;
-    }
-    if (typeof item.blob === "string") {
-      return `${header ? `${header}\n` : ""}[Binary MCP resource omitted: ${item.blob.length} base64 characters]`;
-    }
-    return safeJson(item);
-  });
-  return truncate(parts.join("\n\n"), 50000);
-}
-
-function mcpError(action: McpCallToolAction, message: string): string {
-  return `mcp_call_tool ${action.serverId}/${action.toolName}\n\n<tool_use_error>Error: ${message}</tool_use_error>`;
 }
 
 function mcpHttpHeaders(server: McpServerConfig, method: string, params: unknown, sessionId?: string): Record<string, string> {
