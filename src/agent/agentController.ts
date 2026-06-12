@@ -6,6 +6,7 @@ import { GitPort, UnavailableGitPort } from "../core/git";
 import { runGitOperation, unsafeGitArgsMessage } from "./gitTool";
 import { LearningCoordinator } from "./learningCoordinator";
 import { ModelResolver } from "./modelResolver";
+import { DoctorService } from "./doctorService";
 // Re-exported so existing test imports (`from agentController`) keep working after the extraction.
 export { resolveConfiguredModelId } from "./modelResolver";
 import { errorMessage, isToolErrorText, toolError } from "./toolText";
@@ -53,7 +54,6 @@ import {
   McpToolSummary,
   readConfiguredMcpResource
 } from "../core/mcpClient";
-import { isUrlAllowed } from "../core/networkPolicy";
 import { OpenAiCompatibleProvider, resolveRequestMaxTokens } from "../core/openaiAdapter";
 import { evaluateActionPermission, permissionModeLabel } from "../core/permissions";
 import { parseUnifiedDiff, targetPath } from "../core/unifiedDiff";
@@ -74,7 +74,6 @@ import {
   LlmProvider,
   LlmStreamEvent,
   ModelInfo,
-  OpenAiEndpointInspection,
   PermissionDecision,
   PermissionMode,
   ProviderCapabilities,
@@ -228,6 +227,7 @@ export class AgentController {
   // Owns endpoint discovery caches + which model is selected/served per profile, and the availability
   // warnings. The controller reads/writes the cache through accessors and delegates resolution.
   private readonly models: ModelResolver;
+  private readonly doctor: DoctorService;
   private readonly readFileState = new Map<string, ReadFileSnapshot>();
   private readonly notebookReadState = new Set<string>();
   private messages: ChatMessage[] = [];
@@ -353,6 +353,16 @@ export class AgentController {
       getUserTurnCount: () => this.userTurnCount,
       getToolIterationCount: () => this.toolIterationCount,
       getLastRunErrored: () => this.lastRunErrored
+    });
+    this.doctor = new DoctorService({
+      config,
+      workspace: this.workspace,
+      createProvider: () => this.createProvider(),
+      capabilities: (provider, model, signal) => this.capabilities(provider, model, signal),
+      cacheInspection: (profileId, inspection) => this.models.cacheInspection(profileId, inspection),
+      selectedModelFor: (profile, inspection) => this.models.selectedModelFor(profile, inspection),
+      hasSessionStore: () => Boolean(this.sessionStore),
+      hasMemoryStore: () => Boolean(this.memoryStore)
     });
   }
 
@@ -501,47 +511,12 @@ export class AgentController {
     }
 
     const abort = new AbortController();
-    const checks: DoctorCheck[] = [];
     this.runningAbort = abort;
     this.emit({ type: "status", text: "Running CodeForge Doctor." });
 
+    let checks: DoctorCheck[];
     try {
-      const profile = await this.config.getActiveProfile();
-      const networkPolicy = this.config.getNetworkPolicy();
-      const endpointPolicy = isUrlAllowed(profile.baseUrl, networkPolicy);
-      checks.push({
-        category: "Endpoint",
-        name: "Network policy",
-        status: endpointPolicy.allowed ? "pass" : "fail",
-        detail: endpointPolicy.allowed
-          ? `${originLabel(profile.baseUrl)} is allowed by the local/offline endpoint policy.`
-          : endpointPolicy.reason ?? `${profile.baseUrl} is blocked by the local/offline endpoint policy.`,
-        recommendation: endpointPolicy.allowed ? undefined : "Save the endpoint URL in CodeForge settings to allow that exact origin."
-      });
-
-      if (endpointPolicy.allowed) {
-        await this.addEndpointDoctorChecks(checks, abort.signal);
-      } else {
-        checks.push({
-          category: "Endpoint",
-          name: "Endpoint inspection",
-          status: "fail",
-          detail: "Skipped because the active OpenAI API endpoint is blocked by network policy."
-        });
-      }
-
-      await this.addWorkspaceDoctorChecks(checks, abort.signal);
-      this.addPermissionDoctorChecks(checks);
-      this.addMcpDoctorChecks(checks);
-      this.addPersistenceDoctorChecks(checks);
-      this.addToolingDoctorChecks(checks);
-    } catch (error) {
-      checks.push({
-        category: "Doctor",
-        name: "Unexpected error",
-        status: "fail",
-        detail: errorMessage(error)
-      });
+      checks = await this.doctor.buildChecks(abort.signal);
     } finally {
       this.clearRunningAbort(abort);
       this.drainQueuedWork();
@@ -555,184 +530,6 @@ export class AgentController {
     });
     this.emitContextUsage();
     await this.publishState();
-  }
-
-  private async addEndpointDoctorChecks(checks: DoctorCheck[], signal: AbortSignal): Promise<void> {
-    let provider: LlmProvider;
-    let inspection: OpenAiEndpointInspection;
-    try {
-      provider = await this.createProvider();
-      inspection = await provider.inspectEndpoint(signal);
-      this.models.cacheInspection(provider.profile.id, inspection);
-      checks.push({
-        category: "Endpoint",
-        name: "Backend detection",
-        status: "pass",
-        detail: `${inspection.backendLabel} at ${originLabel(provider.profile.baseUrl)}.`
-      });
-    } catch (error) {
-      checks.push({
-        category: "Endpoint",
-        name: "Endpoint inspection",
-        status: "fail",
-        detail: errorMessage(error),
-        recommendation: "Confirm the OpenAI API compatible endpoint is running and reachable from VS Code."
-      });
-      return;
-    }
-
-    checks.push({
-      category: "Endpoint",
-      name: "Model discovery",
-      status: inspection.models.length > 0 ? "pass" : "fail",
-      detail: inspection.models.length > 0
-        ? `${inspection.models.length} model(s) returned by /v1/models.`
-        : "The endpoint returned no models from /v1/models.",
-      recommendation: inspection.models.length > 0 ? undefined : "Load a model in the selected OpenAI API compatible server."
-    });
-
-    if (inspection.models.length === 0) {
-      return;
-    }
-
-    const configuredModel = this.config.getConfiguredModel() || provider.profile.defaultModel || "";
-    const selectedModel = this.models.selectedModelFor(provider.profile, inspection);
-    const selectedModelInfo = inspection.models.find((model) => model.id === selectedModel);
-    const configuredModelFound = !configuredModel || inspection.models.some((model) => model.id === configuredModel);
-    checks.push({
-      category: "Endpoint",
-      name: "Selected model",
-      status: selectedModel && configuredModelFound ? "pass" : "warn",
-      detail: configuredModelFound
-        ? `Using ${selectedModel}.`
-        : `Configured model ${configuredModel} was not returned by /v1/models; using ${selectedModel}.`,
-      recommendation: configuredModelFound ? undefined : "Select a model returned by the active endpoint."
-    });
-
-    checks.push({
-      category: "Endpoint",
-      name: "Context metadata",
-      status: selectedModelInfo?.contextLength ? "pass" : "warn",
-      detail: selectedModelInfo?.contextLength
-        ? `${selectedModel} reports ${selectedModelInfo.contextLength.toLocaleString("en-US")} context tokens${selectedModelInfo.supportsReasoning ? " and thinking/reasoning support" : ""}.`
-        : `${selectedModel} did not expose context length metadata in /v1/models.`,
-      recommendation: selectedModelInfo?.contextLength ? undefined : "Expose a context-length field from the OpenAI API compatible endpoint when possible — e.g. max_model_len (vLLM), n_ctx or n_ctx_train (llama.cpp, under meta), context_length (OpenRouter/Together), context_window (Groq), max_context_length (LM Studio/Mistral), or max_input_tokens/max_tokens (LiteLLM). CodeForge detects any of these, at the top level or nested."
-    });
-
-    try {
-      const capabilities = await this.capabilities(provider, selectedModel, signal);
-      checks.push({
-        category: "Endpoint",
-        name: "Native tool calls",
-        status: capabilities.nativeToolCalls ? "pass" : "warn",
-        detail: capabilities.nativeToolCalls
-          ? `${selectedModel} accepted OpenAI-style tool calls.`
-          : `${selectedModel} did not accept native tool calls; CodeForge will use JSON action fallback.`,
-        recommendation: capabilities.nativeToolCalls ? undefined : "Use a model/server combination with OpenAI tool-call support for the most reliable agent loop."
-      });
-      checks.push({
-        category: "Endpoint",
-        name: "Streaming",
-        status: capabilities.streaming ? "pass" : "warn",
-        detail: capabilities.streaming ? "Streaming chat responses are available." : "Streaming responses were not confirmed."
-      });
-    } catch (error) {
-      checks.push({
-        category: "Endpoint",
-        name: "Capability probe",
-        status: "fail",
-        detail: errorMessage(error),
-        recommendation: "Check that /v1/chat/completions accepts the selected model and OpenAI-compatible request bodies."
-      });
-    }
-  }
-
-  private async addWorkspaceDoctorChecks(checks: DoctorCheck[], signal: AbortSignal): Promise<void> {
-    try {
-      const files = await this.workspace.listTextFiles(5, signal);
-      checks.push({
-        category: "Repo Folder",
-        name: "File discovery",
-        status: files.length > 0 ? "pass" : "warn",
-        detail: files.length > 0
-          ? `Repo search can see files including ${files.slice(0, 3).join(", ")}.`
-          : "No repo text files were returned.",
-        recommendation: files.length > 0 ? undefined : "Open the repo folder before asking CodeForge to inspect code."
-      });
-    } catch (error) {
-      checks.push({
-        category: "Repo Folder",
-        name: "File discovery",
-        status: "fail",
-        detail: errorMessage(error),
-        recommendation: "Check VS Code trust and filesystem access for the open repo folder."
-      });
-    }
-  }
-
-  private addPermissionDoctorChecks(checks: DoctorCheck[]): void {
-    const policy = this.config.getPermissionPolicy();
-    const readDecision = evaluateActionPermission({ type: "read_file", path: "README.md" }, policy);
-    const writeDecision = evaluateActionPermission({ type: "write_file", path: "codeforge-doctor.txt", content: "diagnostic\n" }, policy);
-    const commandDecision = evaluateActionPermission({ type: "run_command", command: "npm test" }, policy);
-    checks.push({
-      category: "Permissions",
-      name: "Approval mode",
-      status: readDecision.behavior === "deny" ? "fail" : "pass",
-      detail: `${permissionModeLabel(policy.mode)} mode: read_file=${readDecision.behavior}, write_file=${writeDecision.behavior}, run_command=${commandDecision.behavior}.`,
-      recommendation: readDecision.behavior === "deny" ? "Remove deny rules that block read_file if the model should understand the codebase." : undefined
-    });
-  }
-
-  private addMcpDoctorChecks(checks: DoctorCheck[]): void {
-    const statuses = configuredMcpServerStatuses(this.config.getMcpServers(), this.config.getNetworkPolicy());
-    if (statuses.length === 0) {
-      checks.push({
-        category: "MCP",
-        name: "Configured servers",
-        status: "pass",
-        detail: "No MCP servers configured. MCP is optional and only uses explicitly configured servers."
-      });
-      return;
-    }
-
-    for (const status of statuses) {
-      checks.push({
-        category: "MCP",
-        name: status.label,
-        status: !status.enabled || status.valid ? "pass" : "fail",
-        detail: status.enabled
-          ? status.valid
-            ? `${status.transport} ${status.target} is configured.`
-            : status.reason ?? `${status.transport} ${status.target} is invalid.`
-          : `${status.transport} ${status.target} is disabled.`,
-        recommendation: status.enabled && !status.valid ? "Fix or remove this MCP server configuration." : undefined
-      });
-    }
-  }
-
-  private addPersistenceDoctorChecks(checks: DoctorCheck[]): void {
-    checks.push({
-      category: "Persistence",
-      name: "Repo chat history",
-      status: this.sessionStore ? "pass" : "warn",
-      detail: this.sessionStore ? "Repo-scoped chat sessions are available." : "Session storage is not available in this environment."
-    });
-    checks.push({
-      category: "Persistence",
-      name: "Local memory",
-      status: this.memoryStore ? "pass" : "warn",
-      detail: this.memoryStore ? "Persistent local memory is available." : "Persistent local memory is not available in this environment."
-    });
-  }
-
-  private addToolingDoctorChecks(checks: DoctorCheck[]): void {
-    checks.push({
-      category: "Tooling",
-      name: "Internal tools",
-      status: "pass",
-      detail: `${codeForgeTools.length} internal tools are registered with deferred schema loading via tool_search.`
-    });
   }
 
   async selectProfile(profileId: string): Promise<void> {
@@ -3881,13 +3678,6 @@ function toAgentModelSummary(model: ModelInfo): AgentModelSummary {
   };
 }
 
-function originLabel(rawUrl: string): string {
-  try {
-    return new URL(rawUrl).origin;
-  } catch {
-    return rawUrl;
-  }
-}
 
 function toAgentSessionSummary(session: SessionSummary): AgentSessionSummary {
   return {
