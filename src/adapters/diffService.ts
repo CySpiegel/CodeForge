@@ -105,6 +105,21 @@ export class DiffService {
     return [action.path];
   }
 
+  // Undo support: restore a file to a prior snapshot. A null previousContent means the file did not
+  // exist before the change, so undo deletes it.
+  async restoreFile(path: string, previousContent: string | null): Promise<void> {
+    if (previousContent === null) {
+      const edit = new vscode.WorkspaceEdit();
+      edit.deleteFile(resolveWorkspaceUri(path), { ignoreIfNotExists: true });
+      const applied = await vscode.workspace.applyEdit(edit);
+      if (!applied) {
+        throw new Error("VS Code rejected the file deletion.");
+      }
+      return;
+    }
+    await this.applyTextChange(path, previousContent);
+  }
+
   private async previewTextChange(path: string, proposed: string, title: string): Promise<void> {
     const originalUri = resolveWorkspaceUri(path);
     const previewUri = vscode.Uri.parse(`codeforge-preview:/${encodeURIComponent(path)}?${Date.now()}`);

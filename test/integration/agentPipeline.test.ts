@@ -286,6 +286,51 @@ test("recovers from a context-window overflow by compacting and retrying once", 
   assert.equal(harness.provider.requests.length, 3);
 });
 
+test("undo restores a file to its pre-change content", async () => {
+  const harness = createControllerHarness({
+    mode: "agent",
+    permissionMode: "fullAuto",
+    files: { "notes.txt": "original" },
+    responses: [
+      { toolCalls: [toolCall("read_file", { path: "notes.txt" }), toolCall("write_file", { path: "notes.txt", content: "changed" })] },
+      { content: "Done." }
+    ]
+  });
+
+  await harness.controller.sendPrompt("Rewrite notes.");
+  await waitForEvent(harness.events, (event) => event.type === "message" && event.role === "assistant" && /Done/.test(event.text));
+  assert.equal(harness.workspace.files.get("notes.txt"), "changed");
+
+  await harness.controller.undo();
+  assert.equal(harness.workspace.files.get("notes.txt"), "original");
+  assert.ok(harness.events.some((event) => event.type === "message" && event.role === "system" && /Undid/.test(event.text)));
+});
+
+test("undo removes a file that the change newly created", async () => {
+  const harness = createControllerHarness({
+    mode: "agent",
+    permissionMode: "fullAuto",
+    files: {},
+    responses: [
+      { toolCalls: [toolCall("write_file", { path: "new.txt", content: "fresh" })] },
+      { content: "Created." }
+    ]
+  });
+
+  await harness.controller.sendPrompt("Make a file.");
+  await waitForEvent(harness.events, (event) => event.type === "message" && event.role === "assistant" && /Created/.test(event.text));
+  assert.equal(harness.workspace.files.get("new.txt"), "fresh");
+
+  await harness.controller.undo();
+  assert.equal(harness.workspace.files.has("new.txt"), false);
+});
+
+test("undo with nothing to revert reports it cleanly", async () => {
+  const harness = createControllerHarness({ mode: "agent", responses: [] });
+  await harness.controller.undo();
+  assert.ok(harness.events.some((event) => event.type === "message" && /Nothing to undo/.test(event.text)));
+});
+
 test("inspector and audit track denied side-effect tools", async () => {
   const harness = createControllerHarness({
     mode: "ask",

@@ -254,6 +254,14 @@ export class FakeDiffService {
     this.workspace.edit(action);
     return [action.path];
   }
+
+  async restoreFile(path: string, previousContent: string | null): Promise<void> {
+    if (previousContent === null) {
+      this.workspace.files.delete(normalizePath(path));
+      return;
+    }
+    this.workspace.write(path, previousContent);
+  }
 }
 
 export class FakeTerminalRunner {

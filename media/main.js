@@ -19,6 +19,7 @@
     inspectorContent: document.getElementById("inspectorContent"),
     refreshInspector: document.getElementById("refreshInspector"),
     runInspector: document.getElementById("runInspector"),
+    undoChange: document.getElementById("undoChange"),
     pinActiveFile: document.getElementById("pinActiveFile"),
     clearPinnedFiles: document.getElementById("clearPinnedFiles"),
     memoryText: document.getElementById("memoryText"),
@@ -96,6 +97,7 @@
   let currentRunStatusBusy = false;
   const builtInSlashCommands = [
     { name: "compact", description: "Compact the current session context", argumentHint: "[focus]" },
+    { name: "undo", description: "Undo the last applied file change" },
     { name: "curator", description: "Maintain the skill library", argumentHint: "[status|run|pause|resume|pin|unpin|archive|restore|backup|rollback]" },
     { name: "context", description: "Show context usage and attached local context" },
     { name: "doctor", description: "Check endpoint, model, workspace, permissions, and MCP status" },
@@ -336,6 +338,9 @@
     vscode.postMessage({ type: "compactContext" });
   });
 
+  on(elements.undoChange, "click", () => {
+    vscode.postMessage({ type: "requestUndo" });
+  });
   on(elements.pinActiveFile, "click", () => {
     vscode.postMessage({ type: "pinActiveFile" });
   });

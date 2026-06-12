@@ -58,6 +58,7 @@ import {
 import { isUrlAllowed } from "../core/networkPolicy";
 import { OpenAiCompatibleProvider, resolveRequestMaxTokens } from "../core/openaiAdapter";
 import { evaluateActionPermission, permissionModeLabel } from "../core/permissions";
+import { parseUnifiedDiff, targetPath } from "../core/unifiedDiff";
 import { SessionRecord, SessionSnapshot, SessionStore, SessionSummary } from "../core/session";
 import { classifyShellCommand } from "../core/shellSemantics";
 import { normalizeWorkspacePathInput } from "../core/workspacePaths";
@@ -291,6 +292,10 @@ const contextAttachmentRatio = 0.55;
 const contextToolResultTargetRatio = 0.6;
 const defaultModelStreamIdleTimeoutMs = 300_000;
 const queuedWorkLimit = 20;
+// Undo: how many prior-change snapshots to keep, and the per-file byte cap above which a file is too
+// large to snapshot safely (restoring a truncated copy would corrupt it).
+const undoStackLimit = 25;
+const undoSnapshotMaxBytes = 5_000_000;
 const codeForgeToolSchemaMarker = "CODEFORGE_TOOL_SCHEMA_LOADED:";
 const mcpToolSchemaMarker = "CODEFORGE_MCP_TOOL_SCHEMA_LOADED:";
 
@@ -425,6 +430,9 @@ export class AgentController {
   // Did the most recent run surface an error? Feeds assessRunOutcome so the learning loop won't distil
   // durable lessons from a failed run.
   private lastRunErrored = false;
+  // Bounded stack of pre-change file snapshots, captured at each checkpoint, so the user can /undo the
+  // last applied edit/write/patch. Cleared on reset.
+  private undoStack: UndoSnapshot[] = [];
   // Cadence counters for the background self-improvement review (memory ~every N user turns, skills
   // ~every N tool iterations). Cumulative counters + last-reviewed markers avoid reset races.
   private userTurnCount = 0;
@@ -1195,6 +1203,7 @@ export class AgentController {
     this.continueAfterCurrentRun = false;
     this.pendingContinuation = undefined;
     this.queuedWork = [];
+    this.undoStack = [];
     this.memoryInitialized = false;
     this.reviewInFlight = false;
     this.userTurnCount = 0;
@@ -3508,6 +3517,7 @@ export class AgentController {
   }
 
   private async recordCheckpoint(action: AgentAction, summary: string): Promise<void> {
+    await this.captureUndoSnapshot(action, summary);
     await this.appendSessionRecord((sessionId) => ({
       type: "checkpoint",
       sessionId,
@@ -3515,6 +3525,68 @@ export class AgentController {
       action,
       summary
     }));
+  }
+
+  // Snapshot the current content of every file an edit/write/patch is about to change, so /undo can
+  // restore it. Called from recordCheckpoint (before the change applies). Best-effort and never throws.
+  private async captureUndoSnapshot(action: AgentAction, summary: string): Promise<void> {
+    const paths = undoTargetPaths(action);
+    if (paths.length === 0) {
+      return;
+    }
+    const files = await Promise.all(paths.map(async (path) => {
+      try {
+        const content = await this.workspace.readTextFile(path, undoSnapshotMaxBytes, this.runningAbort?.signal);
+        // If we hit the cap the snapshot is truncated; restoring it would corrupt the file, so mark it
+        // unrestorable rather than silently losing data.
+        const restorable = Buffer.byteLength(content, "utf8") < undoSnapshotMaxBytes;
+        return { path, previousContent: content, restorable };
+      } catch {
+        // The file does not exist yet — the action creates it, so undo deletes it.
+        return { path, previousContent: null, restorable: true };
+      }
+    }));
+    this.undoStack.push({ summary, createdAt: Date.now(), files });
+    if (this.undoStack.length > undoStackLimit) {
+      this.undoStack.shift();
+    }
+  }
+
+  async undo(): Promise<void> {
+    if (this.runningAbort) {
+      this.emit({ type: "status", text: "Finish or stop the current request before undoing." });
+      return;
+    }
+    const snapshot = this.undoStack.pop();
+    if (!snapshot) {
+      this.emit({ type: "message", role: "system", text: "Nothing to undo — no file changes have been applied this session." });
+      return;
+    }
+    const restored: string[] = [];
+    const skipped: string[] = [];
+    for (const file of snapshot.files) {
+      if (!file.restorable) {
+        skipped.push(`${file.path} (too large to snapshot)`);
+        continue;
+      }
+      try {
+        await this.diff.restoreFile(file.path, file.previousContent);
+        this.readFileState.delete(file.path);
+        restored.push(file.previousContent === null ? `${file.path} (removed new file)` : file.path);
+      } catch (error) {
+        skipped.push(`${file.path} (${errorMessage(error)})`);
+      }
+    }
+    const parts = [`↩️ Undid: ${snapshot.summary}`];
+    if (restored.length > 0) {
+      parts.push(`Restored ${restored.join(", ")}.`);
+    }
+    if (skipped.length > 0) {
+      parts.push(`Could not restore ${skipped.join(", ")}.`);
+    }
+    this.recordInspector("info", "tool", "Undo applied.", parts.join(" "));
+    this.emit({ type: "message", role: "system", text: parts.join(" ") });
+    void this.publishState();
   }
 
   private persistSessionRecord(factory: (sessionId: string) => SessionRecord): void {
@@ -3689,6 +3761,9 @@ export class AgentController {
       case "/compact":
         await this.compactContext(rest);
         return;
+      case "/undo":
+        await this.undo();
+        return;
       case "/curator":
         await this.handleCuratorCommand(rest);
         return;
@@ -3796,7 +3871,7 @@ export class AgentController {
         this.emit({
           type: "message",
           role: "system",
-          text: `Unknown command ${command}. Available commands: /new, /compact, /curator, /context, /doctor, /index, /pin, /unpin, /pins, /inspect, /audit, /capabilities, /commands, /mcp, /workers, /worker, /agents, /review, /skills, /skill, /memory, /clear, /stop, /history, /resume, /fork, /diff, /export, /model, /models, /agent, /ask, /plan, /manual, /smart, /full-auto, /config.`
+          text: `Unknown command ${command}. Available commands: /new, /compact, /undo, /curator, /context, /doctor, /index, /pin, /unpin, /pins, /inspect, /audit, /capabilities, /commands, /mcp, /workers, /worker, /agents, /review, /skills, /skill, /memory, /clear, /stop, /history, /resume, /fork, /diff, /export, /model, /models, /agent, /ask, /plan, /manual, /smart, /full-auto, /config.`
         });
     }
   }
@@ -5265,6 +5340,28 @@ interface ReviewToolOutcome {
   readonly output: string;
   readonly summary: string;
   readonly notice: string;
+}
+
+interface UndoSnapshot {
+  readonly summary: string;
+  readonly createdAt: number;
+  readonly files: ReadonlyArray<{ readonly path: string; readonly previousContent: string | null; readonly restorable: boolean }>;
+}
+
+// The repo-relative paths an action is about to modify, used to snapshot them for undo. Only the
+// file-mutating actions are covered; commands and reads return none.
+function undoTargetPaths(action: AgentAction): readonly string[] {
+  if (action.type === "write_file" || action.type === "edit_file") {
+    return [action.path];
+  }
+  if (action.type === "propose_patch") {
+    try {
+      return parseUnifiedDiff(action.patch).map(targetPath).filter((path) => path !== "/dev/null");
+    } catch {
+      return [];
+    }
+  }
+  return [];
 }
 
 function reviewWriteSucceeded(output: string): boolean {

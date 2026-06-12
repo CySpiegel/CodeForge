@@ -98,6 +98,8 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
       if (permissionMode) {
         await this.controller.setPermissionMode(permissionMode);
       }
+    } else if (message.type === "requestUndo") {
+      await this.controller.undo();
     } else if (message.type === "compactContext") {
       await this.controller.compactContext();
     } else if (message.type === "pinActiveFile") {
@@ -318,6 +320,7 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
           <button id="compactContext" class="context-ring" type="button" aria-label="Compact context" aria-describedby="contextTooltip">
             <span id="contextValue">0%</span>
           </button>
+          <button id="undoChange" class="context-action" type="button" title="Undo the last applied file change" aria-label="Undo last change">Undo</button>
           <button id="pinActiveFile" class="context-action" type="button" title="Pin focused file" aria-label="Pin focused file">Pin</button>
           <button id="clearPinnedFiles" class="context-action" type="button" title="Clear pinned files" aria-label="Clear pinned files">Clear pins</button>
           <button id="runInspector" class="context-action" type="button" title="Show run inspector" aria-label="Show run inspector">Run</button>
