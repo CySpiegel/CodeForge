@@ -821,6 +821,34 @@ textarea {
   padding: 8px;
 }
 
+.message.reasoning {
+  padding: 0;
+  color: var(--vscode-descriptionForeground);
+  background: transparent;
+  border-color: var(--vscode-panel-border);
+  border-style: dashed;
+}
+
+.message.reasoning summary {
+  min-height: 28px;
+  padding: 6px 8px;
+  cursor: pointer;
+  font-size: 11px;
+  font-style: italic;
+  letter-spacing: 0.02em;
+  opacity: 0.85;
+}
+
+.message.reasoning[open] summary {
+  border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+.message.reasoning .reasoning-content {
+  padding: 8px;
+  font-size: 12px;
+  opacity: 0.8;
+}
+
 .message .role {
   color: var(--vscode-descriptionForeground);
   font-size: 10px;

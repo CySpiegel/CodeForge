@@ -78,6 +78,7 @@
 
   let state;
   let streamingMessage;
+  let streamingReasoning;
   let isCreatingProfile = false;
   let pendingProfileCreate = false;
   let slashCommandItems = [];
@@ -448,6 +449,7 @@
       elements.inspectorPanel?.classList.add("hidden");
       elements.approvals?.replaceChildren();
       streamingMessage = undefined;
+      streamingReasoning = undefined;
     } else if (message.type === "state") {
       state = message.state;
       if (pendingProfileCreate) {
@@ -493,8 +495,20 @@
         return;
       }
       addMessage(message.role, message.text);
+    } else if (message.type === "assistantReasoningDelta") {
+      setRunStatus("Thinking");
+      const block = ensureReasoningBlock();
+      const body = block.querySelector(".reasoning-content");
+      if (body) {
+        const nextText = `${block.dataset.rawText || ""}${message.text || ""}`;
+        block.dataset.rawText = nextText;
+        renderMarkdown(body, nextText);
+      }
+      scrollMessages();
     } else if (message.type === "assistantDelta") {
       setRunStatus("Generating");
+      // The model moved from thinking to answering: collapse the reasoning block so the answer leads.
+      finalizeReasoningBlock();
       if (!streamingMessage) {
         streamingMessage = addMessage("assistant", "");
       }
@@ -511,6 +525,7 @@
     } else if (message.type === "toolResult") {
       addToolResult(message.text);
     } else if (message.type === "toolUse") {
+      finalizeReasoningBlock();
       updateRunStatusFromToolUse(message.toolUse);
       upsertToolUse(message.toolUse);
     } else if (message.type === "sessions") {
@@ -527,6 +542,7 @@
       addMessage("system error", `Error: ${message.text}`);
     } else if (message.type === "runComplete") {
       streamingMessage = undefined;
+      finalizeReasoningBlock();
       if (message.reason === "awaitingApproval") {
         setRunStatus("Waiting for approval");
       } else {
@@ -683,6 +699,12 @@
     }
     if (/^Generating$/.test(text)) {
       return { label: "Generating", busy: true };
+    }
+    if (/^Thinking$/.test(text)) {
+      return { label: "Thinking", busy: true };
+    }
+    if (/^Rate limit reached/.test(text)) {
+      return { label: text, busy: true };
     }
     if (/^Continuing after /.test(text)) {
       return { label: "Generating", busy: true };
@@ -2286,6 +2308,37 @@
     elements.messages?.append(item);
     scrollMessages();
     return item;
+  }
+
+  function ensureReasoningBlock() {
+    if (streamingReasoning && streamingReasoning.isConnected) {
+      return streamingReasoning;
+    }
+    const block = document.createElement("details");
+    block.className = "message reasoning";
+    block.open = true;
+    block.dataset.rawText = "";
+    const summary = document.createElement("summary");
+    summary.className = "reasoning-summary";
+    summary.textContent = "Thinking…";
+    const body = document.createElement("div");
+    body.className = "reasoning-content markdown-body";
+    block.append(summary, body);
+    elements.messages?.append(block);
+    streamingReasoning = block;
+    return block;
+  }
+
+  function finalizeReasoningBlock() {
+    if (!streamingReasoning) {
+      return;
+    }
+    streamingReasoning.open = false;
+    const summary = streamingReasoning.querySelector(".reasoning-summary");
+    if (summary) {
+      summary.textContent = "Thoughts";
+    }
+    streamingReasoning = undefined;
   }
 
   function addToolResult(text) {

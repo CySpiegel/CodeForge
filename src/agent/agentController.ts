@@ -101,6 +101,7 @@ export type AgentUiEvent =
   | { readonly type: "status"; readonly text: string }
   | { readonly type: "message"; readonly role: "user" | "assistant" | "system"; readonly text: string }
   | { readonly type: "assistantDelta"; readonly text: string }
+  | { readonly type: "assistantReasoningDelta"; readonly text: string }
   | { readonly type: "toolResult"; readonly text: string }
   | { readonly type: "toolUse"; readonly toolUse: AgentToolUse }
   | { readonly type: "sessions"; readonly sessions: readonly AgentSessionSummary[] }
@@ -1143,6 +1144,16 @@ export class AgentController {
         }
         lastActivityAt = Date.now();
         nextResult = iterator.next();
+        if (result.value.type === "rateLimit") {
+          // The adapter is backing off a 429 (tokens-per-minute) / transient error. Surface it so the
+          // user knows the run paused on purpose and will resume — not that it hung.
+          const seconds = Math.max(1, Math.round(result.value.waitMs / 1000));
+          this.emit({
+            type: "status",
+            text: `Rate limit reached (tokens/min) — waiting ${seconds}s, then retrying (attempt ${result.value.attempt}).`
+          });
+          continue;
+        }
         yield result.value;
       }
     } catch (error) {
@@ -1509,6 +1520,10 @@ export class AgentController {
         if (event.type === "content") {
           assistantText += event.text;
           this.emit({ type: "assistantDelta", text: event.text });
+        } else if (event.type === "reasoning") {
+          // Display-only thinking stream — surfaced to the user but never appended to assistantText,
+          // so it is not echoed back into the model transcript on the next turn.
+          this.emit({ type: "assistantReasoningDelta", text: event.text });
         } else if (event.type === "toolCalls") {
           for (const toolCall of event.toolCalls) {
             nativeToolCalls.push(toolCall);

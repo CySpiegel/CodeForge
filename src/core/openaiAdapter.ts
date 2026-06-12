@@ -96,8 +96,8 @@ export class OpenAiCompatibleProvider implements LlmProvider {
       if (isRetryableHttpStatus(response.status) && rateLimitRetries < maxRateLimitRetries && !request.signal?.aborted) {
         rateLimitRetries++;
         const waitMs = rateLimitDelayMs(response.headers, rateLimitRetries);
-        // Keep the run visibly alive while we wait out the rate-limit window.
-        yield { type: "progress" };
+        // Tell the UI we hit the limit and are waiting, so the user sees why the run paused.
+        yield { type: "rateLimit", waitMs, attempt: rateLimitRetries };
         await abortableDelay(waitMs, request.signal);
         continue;
       }
@@ -326,7 +326,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
         yield { type: "content", text: content };
       }
       if (choice.delta?.reasoning_content) {
-        yield { type: "progress" };
+        yield { type: "reasoning", text: choice.delta.reasoning_content };
       }
 
       for (const delta of choice.delta?.tool_calls ?? []) {
