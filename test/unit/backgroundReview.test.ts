@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildReviewPrompt, MEMORY_REVIEW_PROMPT, SKILL_REVIEW_PROMPT } from "../../src/core/backgroundReview";
+import { buildReviewPrompt, FAILED_RUN_CAUTION, MEMORY_REVIEW_PROMPT, SKILL_REVIEW_PROMPT } from "../../src/core/backgroundReview";
 
 test("selects the memory review prompt", () => {
   const prompt = buildReviewPrompt(true, false);
@@ -20,4 +20,17 @@ test("combines both reviews when both cadences fire", () => {
   assert.match(prompt, /## Skill review/);
   assert.match(prompt, /consider saving to memory/);
   assert.match(prompt, /update the skill library/);
+});
+
+test("a successful run carries no failed-run caution", () => {
+  assert.equal(buildReviewPrompt(true, true, "ok").includes(FAILED_RUN_CAUTION), false);
+});
+
+test("a failed run prepends the anti-poisoning caution that forbids skills and reusable lessons", () => {
+  const prompt = buildReviewPrompt(true, false, "failed");
+  assert.ok(prompt.startsWith(FAILED_RUN_CAUTION), "caution should lead the prompt");
+  assert.match(prompt, /Do NOT create or patch skills/);
+  assert.match(prompt, /reusable techniques/);
+  // The underlying memory review is still present so persona facts / verified corrections can be saved.
+  assert.match(prompt, /consider saving to memory/);
 });

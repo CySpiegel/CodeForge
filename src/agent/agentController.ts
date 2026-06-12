@@ -419,6 +419,12 @@ export class AgentController {
   // marked curator-eligible (created_by: "agent").
   private inBackgroundReview = false;
   private reviewInFlight = false;
+  // True while reviewing a failed/abandoned run — blocks skill writes so a wrong approach can't poison
+  // the skill library. Set per-review in maybeRunBackgroundReview.
+  private reviewSkillWritesBlocked = false;
+  // Did the most recent run surface an error? Feeds assessRunOutcome so the learning loop won't distil
+  // durable lessons from a failed run.
+  private lastRunErrored = false;
   // Cadence counters for the background self-improvement review (memory ~every N user turns, skills
   // ~every N tool iterations). Cumulative counters + last-reviewed markers avoid reset races.
   private userTurnCount = 0;
@@ -1274,6 +1280,7 @@ export class AgentController {
     this.recordInspector("info", "run", `Started ${agentModeLabel(this.config.getAgentMode())} request.`, visiblePrompt);
     this.emit({ type: "message", role: "user", text: visiblePrompt });
     this.userTurnCount += 1;
+    this.lastRunErrored = false;
 
     try {
       const provider = await this.createProvider();
@@ -1305,6 +1312,7 @@ export class AgentController {
       await this.runModelLoopWithOverflowRecovery(provider, model, abort);
       await this.autoCompactContextIfNeeded(provider, model, abort, "after request");
     } catch (error) {
+      this.lastRunErrored = true;
       this.recordInspector("error", "run", "Request failed.", errorMessage(error));
       this.emit({ type: "error", text: error instanceof Error ? error.message : String(error) });
     } finally {
@@ -2666,8 +2674,9 @@ export class AgentController {
       if (!completedPendingTools || abort.signal.aborted) {
         return;
       }
-      await this.runModelLoop(provider, model, abort);
+      await this.runModelLoopWithOverflowRecovery(provider, model, abort);
     } catch (error) {
+      this.lastRunErrored = true;
       this.emit({ type: "error", text: error instanceof Error ? error.message : String(error) });
     } finally {
       this.clearRunningAbort(abort);
@@ -2766,11 +2775,20 @@ export class AgentController {
       return;
     }
 
+    // Anti-poisoning: never distil a SKILL or reusable lesson from a run that failed — a wrong approach
+    // must not become durable guidance the agent follows forever. A failed run is restricted to
+    // outcome-independent persona facts and verified corrections (enforced by the prompt and the
+    // skill-write block below).
+    const outcome = this.assessRunOutcome(slice);
+    const reviewSkills = skillsDue && outcome === "ok";
+    this.recordInspector("info", "memory", `Self-improvement review on a ${outcome === "ok" ? "successful" : "failed/abandoned"} run.`, `memory=${memoryDue}, skills=${reviewSkills}`);
+
     this.reviewInFlight = true;
     this.inBackgroundReview = true;
+    this.reviewSkillWritesBlocked = outcome !== "ok";
     try {
       await this.ensureMemoryInitialized();
-      const summary = await this.runBackgroundReview(memoryDue, skillsDue, slice);
+      const summary = await this.runBackgroundReview(memoryDue, reviewSkills, slice, outcome);
       this.lastReviewedMessageCount = this.messages.length;
       if (summary) {
         // Per-update "learning" notices are emitted live inside runBackgroundReview as each memory,
@@ -2783,17 +2801,41 @@ export class AgentController {
     } finally {
       this.inBackgroundReview = false;
       this.reviewInFlight = false;
+      this.reviewSkillWritesBlocked = false;
     }
   }
 
-  private async runBackgroundReview(reviewMemory: boolean, reviewSkills: boolean, slice: readonly ChatMessage[]): Promise<string> {
+  // Classify the reviewed slice so the learning loop can refuse to harvest durable skills/lessons from
+  // a run that went wrong. Conservative: a run is "failed" only on a clear signal (an error surfaced
+  // during the run, or tool calls were dominated by errors).
+  private assessRunOutcome(slice: readonly ChatMessage[]): "ok" | "failed" {
+    if (this.lastRunErrored) {
+      return "failed";
+    }
+    let toolResults = 0;
+    let toolErrors = 0;
+    for (const message of slice) {
+      if (message.role === "tool") {
+        toolResults++;
+        if (isToolErrorText(message.content)) {
+          toolErrors++;
+        }
+      }
+    }
+    if (toolResults >= 3 && toolErrors / toolResults >= 0.5) {
+      return "failed";
+    }
+    return "ok";
+  }
+
+  private async runBackgroundReview(reviewMemory: boolean, reviewSkills: boolean, slice: readonly ChatMessage[], outcome: "ok" | "failed" = "ok"): Promise<string> {
     const transcript = slice
       .filter((message) => message.role !== "system")
       .map((message) => `${message.role.toUpperCase()}:\n${message.content}`)
       .join("\n\n")
       .slice(-12000);
     const messages: ChatMessage[] = [
-      { role: "system", content: `${buildReviewPrompt(reviewMemory, reviewSkills)}\n\n${REVIEW_TOOL_HINT}` },
+      { role: "system", content: `${buildReviewPrompt(reviewMemory, reviewSkills, outcome)}\n\n${REVIEW_TOOL_HINT}` },
       {
         role: "user",
         content: `--- Conversation to review ---\n${transcript}\n\n--- End conversation ---\n\nReview now using only the memory and skill tools. If nothing is worth saving, reply 'Nothing to save.' and stop.`
@@ -2877,6 +2919,14 @@ export class AgentController {
         return { output, summary: ok ? describeMemoryWrite(args) : "", notice: ok ? learningNotice("memory", args) : "" };
       }
       if (name === "skill_manage" && this.skillManager) {
+        if (this.reviewSkillWritesBlocked) {
+          // Anti-poisoning hard gate: a failed/abandoned run may not create or change skills.
+          return {
+            output: JSON.stringify({ success: false, error: "Skill changes are disabled for this review because the run did not succeed. Save only a durable user fact or a verified corrective note." }),
+            summary: "",
+            notice: ""
+          };
+        }
         const output = await this.skillManager.handleManage(args, { markAgentCreated: true });
         const ok = reviewWriteSucceeded(output);
         return {

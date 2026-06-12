@@ -87,13 +87,25 @@ export const REVIEW_TOOL_HINT = [
   "Use only the action types shown above. If nothing is worth saving, reply exactly: Nothing to save."
 ].join("\n");
 
-/** Select the review prompt for the cadence(s) that fired. */
-export function buildReviewPrompt(reviewMemory: boolean, reviewSkills: boolean): string {
-  if (reviewMemory && reviewSkills) {
-    return `${COMBINED_PREAMBLE}\n\n## Memory review\n${MEMORY_REVIEW_PROMPT}\n\n## Skill review\n${SKILL_REVIEW_PROMPT}`;
-  }
-  if (reviewSkills) {
-    return SKILL_REVIEW_PROMPT;
-  }
-  return MEMORY_REVIEW_PROMPT;
+// Prepended when the reviewed run ended badly. Anti-poisoning: an approach that failed must not be
+// distilled into durable guidance the agent will follow forever. A failed run is restricted to
+// outcome-independent facts and verified corrections only.
+export const FAILED_RUN_CAUTION = [
+  "IMPORTANT — the run you are reviewing ended with errors or was abandoned. An approach that did NOT",
+  "work must never become durable guidance. For THIS review:",
+  "  • Do NOT create or patch skills, and do NOT save reusable techniques, workflows, or 'how-to' notes.",
+  "  • You MAY save ONLY: (a) a durable fact about the user's persona or preferences (target 'user'),",
+  "    which is true regardless of whether the task succeeded; or (b) a SINGLE corrective note",
+  "    (target 'memory') and ONLY if the root cause is now clearly understood and the fix was verified.",
+  "  • If neither applies, reply exactly: Nothing to save."
+].join("\n");
+
+/** Select the review prompt for the cadence(s) that fired. A failed-run outcome restricts what may be saved. */
+export function buildReviewPrompt(reviewMemory: boolean, reviewSkills: boolean, outcome: "ok" | "failed" = "ok"): string {
+  const base = reviewMemory && reviewSkills
+    ? `${COMBINED_PREAMBLE}\n\n## Memory review\n${MEMORY_REVIEW_PROMPT}\n\n## Skill review\n${SKILL_REVIEW_PROMPT}`
+    : reviewSkills
+      ? SKILL_REVIEW_PROMPT
+      : MEMORY_REVIEW_PROMPT;
+  return outcome === "failed" ? `${FAILED_RUN_CAUTION}\n\n${base}` : base;
 }
