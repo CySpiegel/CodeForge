@@ -16,7 +16,7 @@ import { SkillManager } from "../core/skillManager";
 import { SkillUsageReportRow, SkillUsageTracker } from "../core/skillUsage";
 import { codeForgeTools } from "../core/toolRegistry";
 import { ChatMessage, LlmProvider, LlmRequest, LlmStreamEvent, ProviderCapabilities, ToolCall, ToolDefinition } from "../core/types";
-import type { AgentUiEvent } from "./agentController";
+import type { AgentUiEvent } from "./agentUiTypes";
 import { describeMemoryWrite, learningNotice, ReviewToolOutcome, reviewActionsFromText, reviewWriteSucceeded, summarizeReviewActions } from "./learningReview";
 import { MemoryManager } from "./memoryManager";
 import { errorMessage, isToolErrorText, safeParseArgs } from "./toolText";

@@ -1,6 +1,6 @@
 import type { CodeForgeConfigService } from "../adapters/vscodeConfig";
 import { LlmProvider, ModelInfo, OpenAiEndpointInspection, ProviderProfile } from "../core/types";
-import type { AgentUiEvent } from "./agentController";
+import type { AgentUiEvent } from "./agentUiTypes";
 
 export interface ModelResolverDeps {
   readonly config: CodeForgeConfigService;
