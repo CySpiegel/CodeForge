@@ -12,6 +12,7 @@ import { SessionService } from "./sessionService";
 import { ContextManager } from "./contextManager";
 import { ChangeVerifier } from "./changeVerifier";
 import { InspectorLog } from "./inspectorLog";
+import { LocalHookRunner } from "./localHookRunner";
 import { ToolSchemaService } from "./toolSchemaService";
 import { MemoryCommandsService } from "./memoryCommands";
 import { PinnedFiles } from "./pinnedFiles";
@@ -37,11 +38,8 @@ import { EndpointCapabilityStore } from "../core/endpointCapabilityCache";
 import {
   loadLocalCommands,
   loadLocalAgents,
-  loadLocalHooks,
   loadLocalSkills,
-  loadLocalSoul,
-  LocalHook,
-  localHookMatches
+  loadLocalSoul
 } from "../core/localExtensions";
 import { executeLocalReadOnlyTools, LocalToolProgress } from "../core/localToolExecutor";
 import { formatSkillsDigest } from "../core/skills";
@@ -83,7 +81,7 @@ import {
   WorkspacePort
 } from "../core/types";
 import { isApprovalAction, isConcurrencySafeAction, isInternalAutomationAction, isInternalReadAction, isInternalStateAction, isLocalReadOnlyAction, isReadOnlyAction, ToolInvocation, toolSummary, validateAction } from "../core/toolRegistry";
-import { formatCommandResult, hookFailureStatus } from "./commandResultText";
+import { formatCommandResult } from "./commandResultText";
 import {
   coreAgentToolNames,
   coreReadOnlyToolNames,
@@ -188,6 +186,8 @@ export class AgentController {
   private readonly toolSchemas: ToolSchemaService;
   // Implements the spawn_agent tool (worker launch + local-agent definition mapping).
   private readonly spawnAgent: SpawnAgentService;
+  // Runs workspace-local pre/post/failure shell hooks for tool events.
+  private readonly localHooks: LocalHookRunner;
   private readonly readFileState = new Map<string, ReadFileSnapshot>();
   private readonly notebookReadState = new Set<string>();
   private messages: ChatMessage[] = [];
@@ -281,6 +281,15 @@ export class AgentController {
       getMcpServers: () => this.config.getMcpServers(),
       getNetworkPolicy: () => this.config.getNetworkPolicy(),
       signal: () => this.runningAbort?.signal
+    });
+    this.localHooks = new LocalHookRunner({
+      workspace,
+      terminal,
+      getPermissionPolicy: () => this.config.getPermissionPolicy(),
+      getCommandTimeoutSeconds: () => this.config.getCommandTimeoutSeconds(),
+      getCommandOutputLimitBytes: () => this.config.getCommandOutputLimitBytes(),
+      signal: () => this.runningAbort?.signal,
+      emit: (event) => this.emit(event)
     });
     this.models = new ModelResolver({
       config,
@@ -1374,7 +1383,7 @@ export class AgentController {
       const content = toolError(errorMessage(error));
       this.inspector.record("error", "tool", `${action.type} failed.`, errorMessage(error));
       try {
-        await this.runLocalHooks("postToolFailure", action);
+        await this.localHooks.run("postToolFailure", action);
         return content;
       } catch (hookError) {
         return `${content}\n${toolError(`postToolFailure hook failed: ${errorMessage(hookError)}`)}`;
@@ -1737,7 +1746,7 @@ export class AgentController {
   }
 
   private async executePermittedAction(action: AgentAction, toolCallId: string | undefined): Promise<string> {
-    await this.runLocalHooks("preTool", action);
+    await this.localHooks.run("preTool", action);
     let transcriptResult: string;
     if (isLocalReadOnlyAction(action)) {
       const [result] = await executeLocalReadOnlyTools(
@@ -1754,13 +1763,13 @@ export class AgentController {
       if (!result.isError && action.type === "read_file") {
         this.rememberReadFile(action.path, readFileContentFromToolResult(transcriptResult, action.path), 48000, "tool");
       }
-      await this.runLocalHooks("postTool", action);
+      await this.localHooks.run("postTool", action);
       return transcriptResult;
     }
 
     if (action.type === "spawn_agent") {
       transcriptResult = await this.spawnAgent.execute(action);
-      await this.runLocalHooks("postTool", action);
+      await this.localHooks.run("postTool", action);
       return transcriptResult;
     }
 
@@ -1769,74 +1778,74 @@ export class AgentController {
         await this.workers.waitFor(action.workerId, workerJoinTimeoutMs, this.runningAbort?.signal);
       }
       transcriptResult = this.workers.output(action.workerId) ?? `worker_output ${action.workerId}\n\nNo worker found.`;
-      await this.runLocalHooks("postTool", action);
+      await this.localHooks.run("postTool", action);
       return transcriptResult;
     }
 
     if (action.type === "git") {
       transcriptResult = await this.executeGitAction(action);
-      await this.runLocalHooks("postTool", action);
+      await this.localHooks.run("postTool", action);
       return transcriptResult;
     }
 
     if (action.type === "ask_user_question") {
       transcriptResult = toolError("ask_user_question requires a user answer and cannot be auto-approved.");
-      await this.runLocalHooks("postTool", action);
+      await this.localHooks.run("postTool", action);
       return transcriptResult;
     }
 
     if (action.type === "tool_list") {
       transcriptResult = this.toolSchemas.formatList();
-      await this.runLocalHooks("postTool", action);
+      await this.localHooks.run("postTool", action);
       return transcriptResult;
     }
 
     if (action.type === "tool_search") {
       transcriptResult = await this.toolSchemas.search(action);
-      await this.runLocalHooks("postTool", action);
+      await this.localHooks.run("postTool", action);
       return transcriptResult;
     }
 
     if (action.type === "task_create") {
       transcriptResult = await this.taskBoard.createTask(action);
-      await this.runLocalHooks("postTool", action);
+      await this.localHooks.run("postTool", action);
       return transcriptResult;
     }
 
     if (action.type === "task_update") {
       transcriptResult = await this.taskBoard.updateTask(action);
-      await this.runLocalHooks("postTool", action);
+      await this.localHooks.run("postTool", action);
       return transcriptResult;
     }
 
     if (action.type === "task_list") {
       transcriptResult = this.taskBoard.listTasks(action);
-      await this.runLocalHooks("postTool", action);
+      await this.localHooks.run("postTool", action);
       return transcriptResult;
     }
 
     if (action.type === "task_get") {
       transcriptResult = this.taskBoard.getTask(action.taskId);
-      await this.runLocalHooks("postTool", action);
+      await this.localHooks.run("postTool", action);
       return transcriptResult;
     }
 
     if (action.type === "code_hover" || action.type === "code_definition" || action.type === "code_references" || action.type === "code_symbols") {
       transcriptResult = await this.codeIntel.execute(action, this.runningAbort?.signal);
-      await this.runLocalHooks("postTool", action);
+      await this.localHooks.run("postTool", action);
       return transcriptResult;
     }
 
     if (action.type === "notebook_read") {
       transcriptResult = await this.notebooks.execute(action, this.runningAbort?.signal);
       this.notebookReadState.add(readStateKey(action.path));
-      await this.runLocalHooks("postTool", action);
+      await this.localHooks.run("postTool", action);
       return transcriptResult;
     }
 
     if (action.type === "mcp_list_resources") {
       transcriptResult = await this.mcp.listResourcesForTool(action.serverId);
-      await this.runLocalHooks("postTool", action);
+      await this.localHooks.run("postTool", action);
       return transcriptResult;
     }
 
@@ -1849,7 +1858,7 @@ export class AgentController {
         this.runningAbort?.signal
       );
       transcriptResult = `mcp_read_resource ${resource.serverId}:${resource.uri}\n\n${resource.content}`;
-      await this.runLocalHooks("postTool", action);
+      await this.localHooks.run("postTool", action);
       return transcriptResult;
     }
 
@@ -1864,7 +1873,7 @@ export class AgentController {
         content: action.content,
         old_text: action.oldText
       });
-      await this.runLocalHooks("postTool", action);
+      await this.localHooks.run("postTool", action);
       return transcriptResult;
     }
 
@@ -1886,7 +1895,7 @@ export class AgentController {
         },
         { markAgentCreated: this.learning.isInBackgroundReview() }
       );
-      await this.runLocalHooks("postTool", action);
+      await this.localHooks.run("postTool", action);
       return transcriptResult;
     }
 
@@ -1913,7 +1922,7 @@ export class AgentController {
         ? { action: action.action, content: action.content, category: action.category, tags: action.tags, query: action.query, entity: action.entity, entities: action.entities, id: action.id, limit: action.limit }
         : { id: action.id, helpful: action.helpful };
       transcriptResult = await this.memoryManager.handleToolCall(action.type, args);
-      await this.runLocalHooks("postTool", action);
+      await this.localHooks.run("postTool", action);
       return transcriptResult;
     }
 
@@ -1921,7 +1930,7 @@ export class AgentController {
       await this.recordCheckpoint(action, "Before applying proposed patch.");
       const changed = await this.diff.applyPatch(action.patch);
       transcriptResult = `propose_patch\n\nApplied changes to ${changed.join(", ")}.${await this.changeVerifier.verify(changed)}`;
-      await this.runLocalHooks("postTool", action);
+      await this.localHooks.run("postTool", action);
       return transcriptResult;
     }
 
@@ -1931,7 +1940,7 @@ export class AgentController {
       const changed = await this.diff.applyWriteFile(action);
       transcriptResult = `write_file ${action.path}\n\nWrote ${changed.join(", ")}.${await this.changeVerifier.verify(changed)}`;
       this.rememberReadFile(action.path, action.content, Math.max(48000, Buffer.byteLength(action.content, "utf8")), "tool");
-      await this.runLocalHooks("postTool", action);
+      await this.localHooks.run("postTool", action);
       return transcriptResult;
     }
 
@@ -1941,14 +1950,14 @@ export class AgentController {
       const changed = await this.diff.applyEditFile(action);
       transcriptResult = `edit_file ${action.path}\n\nEdited ${changed.join(", ")}.${await this.changeVerifier.verify(changed)}`;
       await this.rememberCurrentFile(action.path);
-      await this.runLocalHooks("postTool", action);
+      await this.localHooks.run("postTool", action);
       return transcriptResult;
     }
 
     if (action.type === "open_diff") {
       await this.diff.previewPatch(action.patch);
       transcriptResult = "open_diff\n\nOpened VS Code diff preview.";
-      await this.runLocalHooks("postTool", action);
+      await this.localHooks.run("postTool", action);
       return transcriptResult;
     }
 
@@ -1959,7 +1968,7 @@ export class AgentController {
         action,
         this.runningAbort?.signal
       );
-      await this.runLocalHooks("postTool", action);
+      await this.localHooks.run("postTool", action);
       return transcriptResult;
     }
 
@@ -1969,7 +1978,7 @@ export class AgentController {
       transcriptResult = await this.notebooks.execute(action, this.runningAbort?.signal);
       transcriptResult = `${transcriptResult}${await this.changeVerifier.verify([action.path])}`;
       this.notebookReadState.add(readStateKey(action.path));
-      await this.runLocalHooks("postTool", action);
+      await this.localHooks.run("postTool", action);
       return transcriptResult;
     }
 
@@ -1983,54 +1992,8 @@ export class AgentController {
       this.emit({ type: "toolResult", text: `${stream}: ${text}` });
     });
     transcriptResult = formatCommandResult(action, result);
-    await this.runLocalHooks("postTool", action);
+    await this.localHooks.run("postTool", action);
     return transcriptResult;
-  }
-
-  private async runLocalHooks(event: LocalHook["event"], action: AgentAction): Promise<void> {
-    const hooks = (await loadLocalHooks(this.workspace, this.runningAbort?.signal))
-      .filter((hook) => localHookMatches(hook, event, action));
-    for (const hook of hooks) {
-      await this.runLocalHook(hook, event, action);
-    }
-  }
-
-  private async runLocalHook(hook: LocalHook, event: LocalHook["event"], action: AgentAction): Promise<void> {
-    const validation = validateAction(hook.command);
-    if (!validation.ok) {
-      throw new Error(`Local hook ${hook.name} is invalid: ${validation.message ?? "Command validation failed."}`);
-    }
-
-    const decision = evaluateActionPermission(hook.command, this.config.getPermissionPolicy());
-    if (decision.behavior !== "allow") {
-      throw new Error(`Local hook ${hook.name} cannot run because it is not explicitly allowed by the permission policy. ${decision.reason}`);
-    }
-
-    this.emit({
-      type: "status",
-      text: `Running local ${event} hook ${hook.name} for ${action.type}.`
-    });
-    const result = await this.terminal.run(hook.command, {
-      timeoutSeconds: hook.timeoutSeconds ?? this.config.getCommandTimeoutSeconds(),
-      outputLimitBytes: Math.min(this.config.getCommandOutputLimitBytes(), 200000),
-      signal: this.runningAbort?.signal
-    }, (stream, text) => {
-      this.emit({ type: "toolResult", text: `${event} hook ${hook.name} ${stream}: ${text}` });
-    });
-    const formatted = [
-      `local_hook ${hook.name}`,
-      "",
-      `Event: ${event}`,
-      `Tool: ${action.type}`,
-      `Path: ${hook.path}`,
-      hook.description ? `Description: ${hook.description}` : undefined,
-      formatCommandResult(hook.command, result)
-    ].filter((line): line is string => Boolean(line)).join("\n");
-    this.emit({ type: "toolResult", text: formatted });
-
-    if (result.timedOut || result.cancelled || result.exitCode !== 0) {
-      throw new Error(`Local hook ${hook.name} failed for ${action.type}. ${hookFailureStatus(result)}`);
-    }
   }
 
   private async continueAfterToolResult(continuationPrompt?: string, statusText = "Continuing after tool result.", remainingInvocations?: readonly ToolInvocation[]): Promise<void> {
