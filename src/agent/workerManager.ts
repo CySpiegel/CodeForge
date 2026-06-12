@@ -17,7 +17,9 @@ import {
   WorkspacePort
 } from "../core/types";
 import { isLocalReadOnlyAction, toolDefinitions, ToolInvocation, validateAction } from "../core/toolRegistry";
+import { discoveredCodeForgeToolNames } from "../core/toolDiscovery";
 import { findWorkerDefinition, isWorkerKind, workerDefinitions } from "../core/workerAgents";
+import { readFileContentFromToolResult } from "./readStateTracker";
 import { toolError } from "./toolText";
 import { WorkerDefinition, WorkerKind, WorkerSessionEvent, WorkerStatus, WorkerSummary, WorkerTranscriptEntry } from "../core/workerTypes";
 
@@ -66,7 +68,6 @@ interface WorkerInvocationParseResult {
   readonly hadInvalidNativeToolCalls: boolean;
 }
 
-const codeForgeToolSchemaMarker = "CODEFORGE_TOOL_SCHEMA_LOADED:";
 const workerCoreToolNames = new Set([
   "list_files",
   "glob_files",
@@ -687,7 +688,7 @@ export class WorkerManager {
 
 function toolsForWorker(definition: WorkerDefinition, messages: readonly ChatMessage[]): readonly ToolDefinition[] {
   const loadedToolNames = new Set(workerCoreToolNames);
-  for (const toolName of discoveredWorkerToolNames(messages)) {
+  for (const toolName of discoveredCodeForgeToolNames(messages)) {
     loadedToolNames.add(toolName);
   }
   return toolDefinitions.filter((tool) => definition.allowedToolNames.includes(tool.name) && loadedToolNames.has(tool.name));
@@ -717,20 +718,6 @@ function workerToolInstruction(definition: WorkerDefinition): string {
 
 function toolAllowedForWorker(definition: WorkerDefinition, toolName: AgentAction["type"]): boolean {
   return definition.allowedToolNames.includes(toolName);
-}
-
-function discoveredWorkerToolNames(messages: readonly ChatMessage[]): ReadonlySet<string> {
-  const names = new Set<string>();
-  for (const message of messages) {
-    for (const match of message.content.matchAll(new RegExp(`${escapeRegExp(codeForgeToolSchemaMarker)}\\s*([a-zA-Z0-9_]+)`, "g"))) {
-      names.add(match[1]);
-    }
-  }
-  return names;
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function restoredWorkerDefinition(worker: WorkerSummary): WorkerDefinition | undefined {
@@ -791,10 +778,6 @@ function trackResultPaths(task: WorkerTask, content: string): void {
 }
 
 
-function readFileContentFromToolResult(result: string, path: string): string {
-  const prefix = `read_file ${path}\n\n`;
-  return result.startsWith(prefix) ? result.slice(prefix.length) : result.replace(/^read_file[^\n]*\n\n/, "");
-}
 
 function finalSummary(assistantText: string, fallback: string | undefined): string {
   const trimmed = assistantText.trim();
