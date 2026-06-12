@@ -10,6 +10,7 @@ import { DoctorService } from "./doctorService";
 import { McpCoordinator } from "./mcpCoordinator";
 import { SessionService } from "./sessionService";
 import { ContextManager } from "./contextManager";
+import { InspectorLog } from "./inspectorLog";
 import { SlashCommandRouter } from "./slashCommandRouter";
 // Re-exported so existing test imports (`from agentController`) keep working after the extraction.
 export { resolveConfiguredModelId } from "./modelResolver";
@@ -92,10 +93,7 @@ import { WorkerDefinition, WorkerSummary } from "../core/workerTypes";
 export * from "./agentUiTypes";
 import {
   AgentActiveContextSummary,
-  AgentAuditEntry,
   AgentCapabilitySummary,
-  AgentInspectorEntry,
-  AgentInspectorSummary,
   AgentLocalCommandSummary,
   AgentMemorySummary,
   AgentModelSummary,
@@ -215,14 +213,14 @@ export class AgentController {
   private readonly doctor: DoctorService;
   private readonly mcp: McpCoordinator;
   private readonly context: ContextManager;
+  // Owns the run-inspector + permission-audit ring buffers and their UI event.
+  private readonly inspector: InspectorLog;
   private readonly readFileState = new Map<string, ReadFileSnapshot>();
   private readonly notebookReadState = new Set<string>();
   private messages: ChatMessage[] = [];
   private tasks = new Map<string, CodeForgeTask>();
   private lastContextItems: readonly ContextItem[] = [];
   private pinnedFiles = new Set<string>();
-  private inspectorEntries: AgentInspectorEntry[] = [];
-  private auditEntries: AgentAuditEntry[] = [];
   private lastTokenUsage: TokenUsage | undefined;
   private runningAbort: AbortController | undefined;
   private continueAfterCurrentRun = false;
@@ -267,10 +265,13 @@ export class AgentController {
     gitPort: GitPort = new UnavailableGitPort()
   ) {
     this.config = config;
+    this.inspector = new InspectorLog({
+      emit: (event) => this.emit(event)
+    });
     this.models = new ModelResolver({
       config,
       emit: (event) => this.emit(event),
-      recordInspector: (level, category, summary, detail) => this.recordInspector(level, category, summary, detail)
+      recordInspector: (level, category, summary, detail) => this.inspector.record(level, category, summary, detail)
     });
     this.workspace = workspace;
     this.terminal = terminal;
@@ -336,7 +337,7 @@ export class AgentController {
       ensureMemoryInitialized: () => this.ensureMemoryInitialized(),
       publishState: () => this.publishState(),
       emit: (event) => this.emit(event),
-      recordInspector: (level, category, summary, detail) => this.recordInspector(level, category, summary, detail),
+      recordInspector: (level, category, summary, detail) => this.inspector.record(level, category, summary, detail),
       getMessages: () => this.messages,
       getUserTurnCount: () => this.userTurnCount,
       getToolIterationCount: () => this.toolIterationCount,
@@ -414,13 +415,13 @@ export class AgentController {
         this.approvals.clear();
         this.workerApprovalWaiters.clear();
       },
-      emitInspector: () => this.emitInspector(),
+      emitInspector: () => this.inspector.emit(),
       capabilitySummaries: (profileId) => this.capabilitySummaries(profileId),
       getMessages: () => this.messages,
       getLastContextItems: () => this.lastContextItems,
       getPinnedFiles: () => [...this.pinnedFiles],
-      getInspectorEntries: () => this.inspectorEntries,
-      getAuditEntries: () => this.auditEntries,
+      getInspectorEntries: () => this.inspector.inspectorLog(),
+      getAuditEntries: () => this.inspector.auditLog(),
       currentSignal: () => this.runningAbort?.signal
     });
   }
@@ -448,8 +449,7 @@ export class AgentController {
         this.pinnedFiles.clear();
         this.readFileState.clear();
         this.notebookReadState.clear();
-        this.inspectorEntries = [];
-        this.auditEntries = [];
+        this.inspector.reset();
         this.lastTokenUsage = undefined;
         this.sessions.clearSession();
         this.memoryInitialized = false;
@@ -460,7 +460,7 @@ export class AgentController {
       this.continueAfterCurrentRun = false;
       this.pendingContinuation = undefined;
       this.emit({ type: "sessionReset" });
-      this.emitInspector();
+      this.inspector.emit();
       this.emitContextUsage();
       await this.publishState();
     } catch (error) {
@@ -667,7 +667,7 @@ export class AgentController {
     }
     try {
       const memory = await this.memoryStore.add(text, { scope, namespace });
-      this.recordInspector("info", "memory", `Saved ${scope} memory ${memory.id}.`, memory.text);
+      this.inspector.record("info", "memory", `Saved ${scope} memory ${memory.id}.`, memory.text);
       this.emit({ type: "status", text: `Saved local memory ${memory.id}.` });
       await this.publishState();
     } catch (error) {
@@ -686,7 +686,7 @@ export class AgentController {
         this.emit({ type: "error", text: `No local memory found for ${id}.` });
         return;
       }
-      this.recordInspector("info", "memory", `Updated ${scope} memory ${memory.id}.`, memory.text);
+      this.inspector.record("info", "memory", `Updated ${scope} memory ${memory.id}.`, memory.text);
       this.emit({ type: "status", text: `Updated local memory ${memory.id}.` });
       await this.publishState();
     } catch (error) {
@@ -788,8 +788,7 @@ export class AgentController {
     this.pinnedFiles.clear();
     this.readFileState.clear();
     this.notebookReadState.clear();
-    this.inspectorEntries = [];
-    this.auditEntries = [];
+    this.inspector.reset();
     this.lastTokenUsage = undefined;
     this.sessions.clearSession();
     this.workers.clear();
@@ -805,7 +804,7 @@ export class AgentController {
     this.toolIterationCount = 0;
     this.learning.reset();
     this.emit({ type: "sessionReset" });
-    this.emitInspector();
+    this.inspector.emit();
     this.emitContextUsage();
     void this.publishState();
   }
@@ -879,7 +878,7 @@ export class AgentController {
     const abort = new AbortController();
     this.runningAbort = abort;
     this.lastTokenUsage = undefined;
-    this.recordInspector("info", "run", `Started ${agentModeLabel(this.config.getAgentMode())} request.`, visiblePrompt);
+    this.inspector.record("info", "run", `Started ${agentModeLabel(this.config.getAgentMode())} request.`, visiblePrompt);
     this.emit({ type: "message", role: "user", text: visiblePrompt });
     this.userTurnCount += 1;
     this.lastRunErrored = false;
@@ -892,7 +891,7 @@ export class AgentController {
       const contextItems = await context.build(abort.signal);
       const contextText = context.format(contextItems);
       this.lastContextItems = contextItems;
-      this.recordInspector("info", "context", `Attached ${contextItems.length} context item(s).`, contextItems.map((item) => `${contextItemKindLabel(item.kind)}: ${item.label}`).join("\n"));
+      this.inspector.record("info", "context", `Attached ${contextItems.length} context item(s).`, contextItems.map((item) => `${contextItemKindLabel(item.kind)}: ${item.label}`).join("\n"));
       this.soulText = await loadLocalSoul(this.workspace, abort.signal);
       // Build the curated-notes snapshot once per session before the system prompt is assembled, so
       // it stays byte-stable (prefix cache) for the whole session.
@@ -915,7 +914,7 @@ export class AgentController {
       await this.context.autoCompactIfNeeded(provider, model, abort, "after request");
     } catch (error) {
       this.lastRunErrored = true;
-      this.recordInspector("error", "run", "Request failed.", errorMessage(error));
+      this.inspector.record("error", "run", "Request failed.", errorMessage(error));
       this.emit({ type: "error", text: error instanceof Error ? error.message : String(error) });
     } finally {
       this.clearRunningAbort(abort);
@@ -979,8 +978,8 @@ export class AgentController {
     }
 
     await this.recordApprovalResolved(id, true, "Accepted.");
-    this.recordAudit(approval.action, approvalPermissionDecision(approval), "accepted");
-    this.recordInspector("info", "approval", `Approved ${approval.action.type}.`, approval.summary);
+    this.inspector.recordAudit(approval.action, approvalPermissionDecision(approval), "accepted");
+    this.inspector.record("info", "approval", `Approved ${approval.action.type}.`, approval.summary);
     this.emitToolUseForInvocation(approvalInvocation, "running", false);
     try {
       const transcriptResult = await this.executePermittedAction(approval.action, approval.toolCallId);
@@ -1019,8 +1018,8 @@ export class AgentController {
       const message = errorMessage(error);
       const text = toolError(message);
       this.emitToolUseForInvocation(approvalInvocation, "failed", false);
-      this.recordAudit(approval.action, approvalPermissionDecision(approval), "failed");
-      this.recordInspector("error", "approval", `Approved ${approval.action.type} failed.`, message);
+      this.inspector.recordAudit(approval.action, approvalPermissionDecision(approval), "failed");
+      this.inspector.record("error", "approval", `Approved ${approval.action.type} failed.`, message);
       if (workerWaiter) {
         this.workerApprovalWaiters.delete(id);
         workerWaiter.resolve(text);
@@ -1073,8 +1072,8 @@ export class AgentController {
       const text = `${approval.action.type}\n\nUser rejected this tool request. Treat this as a failed approach, do not stop the task, and look for an alternative way to satisfy the user's goal within the current permissions.`;
       const workerWaiter = this.workerApprovalWaiters.get(id);
       await this.recordApprovalResolved(id, false, "Rejected.");
-      this.recordAudit(approval.action, approvalPermissionDecision(approval), "rejected");
-      this.recordInspector("warn", "approval", `Rejected ${approval.action.type}.`, approval.summary);
+      this.inspector.recordAudit(approval.action, approvalPermissionDecision(approval), "rejected");
+      this.inspector.record("warn", "approval", `Rejected ${approval.action.type}.`, approval.summary);
       if (approval.origin === "worker" && !workerWaiter) {
         this.emit({ type: "approvalResolved", id, accepted: false, text: "Rejected." });
         this.emit({ type: "toolResult", text });
@@ -1111,7 +1110,7 @@ export class AgentController {
       if (abort.signal.aborted || !isContextOverflowError(error)) {
         throw error;
       }
-      this.recordInspector("warn", "context", "Model context window exceeded — compacting and retrying.", errorMessage(error));
+      this.inspector.record("warn", "context", "Model context window exceeded — compacting and retrying.", errorMessage(error));
       this.emit({ type: "status", text: "Context window exceeded — compacting and retrying." });
       this.emit({
         type: "message",
@@ -1210,7 +1209,7 @@ export class AgentController {
           consecutiveInvalidIterations++;
           if (consecutiveInvalidIterations > maxInvalidRetries) {
             const stopMessage = `Stopped after ${consecutiveInvalidIterations} consecutive invalid tool-call iteration${consecutiveInvalidIterations === 1 ? "" : "s"} from the model.`;
-            this.recordInspector("error", "run", stopMessage, "Raise codeforge.agent.maxInvalidToolCallRetries if your model needs more retries, or check the model's tool-call format.");
+            this.inspector.record("error", "run", stopMessage, "Raise codeforge.agent.maxInvalidToolCallRetries if your model needs more retries, or check the model's tool-call format.");
             this.emit({ type: "error", text: stopMessage });
             this.emit({ type: "status", text: stopMessage });
             return;
@@ -1259,7 +1258,7 @@ export class AgentController {
 
         if (!isReadOnlyAction(invocation.action) && agentMode !== "agent") {
           const reason = `${agentModeLabel(agentMode)} mode is read-only. Use read-only repo context and switch to Agent mode before applying edits or running commands.`;
-          this.recordAudit(invocation.action, { behavior: "deny", source: "default", reason }, "denied");
+          this.inspector.recordAudit(invocation.action, { behavior: "deny", source: "default", reason }, "denied");
           this.appendDeniedOrInvalidToolResult(invocation, reason);
           continuedWithLocalContext = true;
           index++;
@@ -1268,14 +1267,14 @@ export class AgentController {
 
         const decision = evaluateActionPermission(invocation.action, permissionPolicy);
         if (decision.behavior === "deny") {
-          this.recordAudit(invocation.action, decision, "denied");
+          this.inspector.recordAudit(invocation.action, decision, "denied");
           this.appendDeniedOrInvalidToolResult(invocation, decision.reason);
           continuedWithLocalContext = true;
           index++;
           continue;
         }
         if (decision.behavior === "ask") {
-          this.recordAudit(invocation.action, decision, "approval");
+          this.inspector.recordAudit(invocation.action, decision, "approval");
           if (concurrentBatch.length > 0) {
             break;
           }
@@ -1290,7 +1289,7 @@ export class AgentController {
           return false;
         }
 
-        this.recordAudit(invocation.action, decision, "allowed");
+        this.inspector.recordAudit(invocation.action, decision, "allowed");
         concurrentBatch.push(invocation);
         index++;
       }
@@ -1316,7 +1315,7 @@ export class AgentController {
 
       if (!isReadOnlyAction(invocation.action) && agentMode !== "agent") {
         const reason = `${agentModeLabel(agentMode)} mode is read-only. Use read-only repo context and switch to Agent mode before applying edits or running commands.`;
-        this.recordAudit(invocation.action, { behavior: "deny", source: "default", reason }, "denied");
+        this.inspector.recordAudit(invocation.action, { behavior: "deny", source: "default", reason }, "denied");
         this.appendDeniedOrInvalidToolResult(invocation, reason);
         continuedWithLocalContext = true;
         index++;
@@ -1325,7 +1324,7 @@ export class AgentController {
 
       const decision = evaluateActionPermission(invocation.action, permissionPolicy);
       if (decision.behavior === "deny") {
-        this.recordAudit(invocation.action, decision, "denied");
+        this.inspector.recordAudit(invocation.action, decision, "denied");
         this.appendDeniedOrInvalidToolResult(invocation, decision.reason);
         continuedWithLocalContext = true;
         index++;
@@ -1333,7 +1332,7 @@ export class AgentController {
       }
 
       if (decision.behavior === "ask") {
-        this.recordAudit(invocation.action, decision, "approval");
+        this.inspector.recordAudit(invocation.action, decision, "approval");
         const approval = await this.requestApprovalOrReturnToolError(invocation, decision);
         if (!approval) {
           continuedWithLocalContext = true;
@@ -1345,7 +1344,7 @@ export class AgentController {
         return false;
       }
 
-      this.recordAudit(invocation.action, decision, "allowed");
+      this.inspector.recordAudit(invocation.action, decision, "allowed");
       if (isApprovalAction(invocation.action) || invocation.action.type === "open_diff" || invocation.action.type === "memory" || invocation.action.type === "skill_manage" || isInternalAutomationAction(invocation.action) || isInternalStateAction(invocation.action) || isInternalReadAction(invocation.action)) {
         await this.executePermittedInvocation(invocation);
       } else {
@@ -1402,14 +1401,14 @@ export class AgentController {
   }
 
   private async executeActionWithFailureHooks(action: AgentAction, toolCallId: string | undefined): Promise<string> {
-    this.recordInspector("info", "tool", `Running ${action.type}.`, toolSummary(action));
+    this.inspector.record("info", "tool", `Running ${action.type}.`, toolSummary(action));
     try {
       const result = await this.executePermittedAction(action, toolCallId);
-      this.recordInspector(isToolErrorText(result) ? "warn" : "info", "tool", `Finished ${action.type}.`, firstLines(result, 8));
+      this.inspector.record(isToolErrorText(result) ? "warn" : "info", "tool", `Finished ${action.type}.`, firstLines(result, 8));
       return result;
     } catch (error) {
       const content = toolError(errorMessage(error));
-      this.recordInspector("error", "tool", `${action.type} failed.`, errorMessage(error));
+      this.inspector.record("error", "tool", `${action.type} failed.`, errorMessage(error));
       try {
         await this.runLocalHooks("postToolFailure", action);
         return content;
@@ -1435,7 +1434,7 @@ export class AgentController {
         throw error;
       }
       const previewError = `Diff preview unavailable: ${errorMessage(error)}`;
-      this.recordInspector("warn", "approval", `Preview failed for ${action.type}.`, previewError);
+      this.inspector.record("warn", "approval", `Preview failed for ${action.type}.`, previewError);
       approvalMetadata = {
         ...approvalMetadata,
         detail: [approvalMetadata.detail, previewError].filter((item): item is string => Boolean(item)).join("\n\n")
@@ -1443,7 +1442,7 @@ export class AgentController {
     }
     const approval = this.approvals.createForAction(action, decision, toolCallId, approvalMetadata);
     await this.recordApprovalRequested(approval);
-    this.recordInspector("warn", "approval", `Approval requested for ${action.type}.`, decision.reason);
+    this.inspector.record("warn", "approval", `Approval requested for ${action.type}.`, decision.reason);
     this.emit({ type: "approvalRequested", approval });
     return approval;
   }
@@ -1456,8 +1455,8 @@ export class AgentController {
         throw error;
       }
       const message = errorMessage(error);
-      this.recordAudit(invocation.action, decision, "failed");
-      this.recordInspector("warn", "approval", `${invocation.action.type} failed preflight.`, firstLines(message, 12));
+      this.inspector.recordAudit(invocation.action, decision, "failed");
+      this.inspector.record("warn", "approval", `${invocation.action.type} failed preflight.`, firstLines(message, 12));
       this.appendDeniedOrInvalidToolResult(invocation, message);
       return undefined;
     }
@@ -1662,12 +1661,12 @@ export class AgentController {
 
     const decision = evaluateActionPermission(action, this.config.getPermissionPolicy());
     if (decision.behavior === "deny") {
-      this.recordAudit(action, decision, "denied");
+      this.inspector.recordAudit(action, decision, "denied");
       return toolError(`${action.type} was denied by the parent permission policy. ${decision.reason}`);
     }
 
     if (decision.behavior === "ask") {
-      this.recordAudit(action, decision, "approval");
+      this.inspector.recordAudit(action, decision, "approval");
       let approval: ApprovalRequest;
       try {
         approval = await this.requestApproval(action, toolCallId, decision, this.workerApprovalMetadata(worker, action, decision));
@@ -1675,7 +1674,7 @@ export class AgentController {
         if (!isRecoverableEditPreflightError(error)) {
           throw error;
         }
-        this.recordAudit(action, decision, "failed");
+        this.inspector.recordAudit(action, decision, "failed");
         return toolError(errorMessage(error));
       }
       this.emit({
@@ -1693,7 +1692,7 @@ export class AgentController {
       });
     }
 
-    this.recordAudit(action, decision, "allowed");
+    this.inspector.recordAudit(action, decision, "allowed");
     return this.executePermittedAction(action, toolCallId);
   }
 
@@ -2200,7 +2199,7 @@ export class AgentController {
     const detail = relevant.length > 0
       ? relevant.map((diagnostic) => `${diagnostic.severity} ${diagnostic.path}:${diagnostic.line}:${diagnostic.character} ${diagnostic.message}`).join("\n")
       : `No VS Code errors or warnings reported for ${uniquePaths.join(", ")}.`;
-    this.recordInspector(relevant.length > 0 ? "warn" : "info", "verification", `Checked diagnostics for ${uniquePaths.length} changed file(s).`, detail);
+    this.inspector.record(relevant.length > 0 ? "warn" : "info", "verification", `Checked diagnostics for ${uniquePaths.length} changed file(s).`, detail);
     return [
       "",
       "",
@@ -2389,7 +2388,7 @@ export class AgentController {
     const persisted = await this.endpointCapabilityStore?.get(provider.profile.id, provider.profile.baseUrl, model);
     if (persisted && isFreshCapability(persisted)) {
       this.capabilityCache.set(key, persisted.capabilities);
-      this.recordInspector("info", "endpoint", `Loaded cached capabilities for ${model}.`, `Native tools: ${persisted.capabilities.nativeToolCalls ? "yes" : "no"}\nStreaming: ${persisted.capabilities.streaming ? "yes" : "no"}`);
+      this.inspector.record("info", "endpoint", `Loaded cached capabilities for ${model}.`, `Native tools: ${persisted.capabilities.nativeToolCalls ? "yes" : "no"}\nStreaming: ${persisted.capabilities.streaming ? "yes" : "no"}`);
       return persisted.capabilities;
     }
 
@@ -2405,7 +2404,7 @@ export class AgentController {
       capabilities,
       checkedAt: Date.now()
     });
-    this.recordInspector("info", "endpoint", `Probed capabilities for ${model}.`, `Native tools: ${capabilities.nativeToolCalls ? "yes" : "no"}\nStreaming: ${capabilities.streaming ? "yes" : "no"}`);
+    this.inspector.record("info", "endpoint", `Probed capabilities for ${model}.`, `Native tools: ${capabilities.nativeToolCalls ? "yes" : "no"}\nStreaming: ${capabilities.streaming ? "yes" : "no"}`);
     return capabilities;
   }
 
@@ -2641,7 +2640,7 @@ export class AgentController {
     if (skipped.length > 0) {
       parts.push(`Could not restore ${skipped.join(", ")}.`);
     }
-    this.recordInspector("info", "tool", "Undo applied.", parts.join(" "));
+    this.inspector.record("info", "tool", "Undo applied.", parts.join(" "));
     this.emit({ type: "message", role: "system", text: parts.join(" ") });
     void this.publishState();
   }
@@ -2661,8 +2660,7 @@ export class AgentController {
     this.pinnedFiles.clear();
     this.readFileState.clear();
     this.notebookReadState.clear();
-    this.inspectorEntries = [];
-    this.auditEntries = [];
+    this.inspector.reset();
     this.lastTokenUsage = undefined;
     this.approvals.restore(snapshot.pendingApprovals);
     this.workerApprovalWaiters.clear();
@@ -2680,45 +2678,6 @@ export class AgentController {
 
   private emit(event: AgentUiEvent): void {
     this.events.emit("event", event);
-  }
-
-  private recordInspector(level: AgentInspectorEntry["level"], category: string, summary: string, detail?: string): void {
-    const entry: AgentInspectorEntry = {
-      id: `inspect-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-      createdAt: Date.now(),
-      level,
-      category,
-      summary,
-      detail
-    };
-    this.inspectorEntries = [entry, ...this.inspectorEntries].slice(0, 200);
-    this.emitInspector();
-  }
-
-  private recordAudit(action: AgentAction, decision: PermissionDecision, outcome: AgentAuditEntry["outcome"]): void {
-    const entry: AgentAuditEntry = {
-      id: `audit-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-      createdAt: Date.now(),
-      action: action.type,
-      behavior: decision.behavior,
-      source: decision.source,
-      reason: decision.reason,
-      outcome,
-      summary: toolSummary(action)
-    };
-    this.auditEntries = [entry, ...this.auditEntries].slice(0, 200);
-    this.emitInspector();
-  }
-
-  private emitInspector(): void {
-    this.emit({ type: "inspector", inspector: this.inspectorSummary() });
-  }
-
-  private inspectorSummary(): AgentInspectorSummary {
-    return {
-      entries: this.inspectorEntries,
-      audit: this.auditEntries
-    };
   }
 
   private emitWorkerStarted(worker: WorkerSummary): void {
@@ -2817,7 +2776,7 @@ export class AgentController {
       activeContext: await this.activeContextSummary(),
       memories: await this.memorySummaries(),
       capabilityCache: await this.capabilitySummaries(activeProfile.id),
-      inspector: this.inspectorSummary(),
+      inspector: this.inspector.summary(),
       settings: {
         agentMode,
         allowlist: networkPolicy.allowlist,
