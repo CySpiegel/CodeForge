@@ -76,6 +76,7 @@ import {
   ModelInfo,
   PermissionDecision,
   PermissionMode,
+  PermissionPolicy,
   TokenUsage,
   ToolCall,
   ToolDefinition,
@@ -142,6 +143,13 @@ interface InvalidNativeToolCall {
   readonly toolCall: ToolCall;
   readonly message: string;
 }
+
+// The outcome of the shared permission gate (gatePermission): the action is invalid, denied by a
+// read-only agent mode, or the permission policy reached a decision (deny/ask/allow).
+type PermissionGateOutcome =
+  | { readonly kind: "invalid"; readonly message: string }
+  | { readonly kind: "modeDenied" }
+  | { readonly kind: "decided"; readonly decision: PermissionDecision };
 
 export class AgentController {
   private readonly config: CodeForgeConfigService;
@@ -1213,16 +1221,16 @@ export class AgentController {
       const concurrentBatch: ToolInvocation[] = [];
       while (index < invocations.length && isConcurrencySafeAction(invocations[index].action)) {
         const invocation = invocations[index];
-        const validation = validateAction(invocation.action);
-        if (!validation.ok) {
-          this.appendDeniedOrInvalidToolResult(invocation, validation.message ?? "Tool input failed validation.");
+        const gate = this.gatePermission(invocation.action, agentMode, permissionPolicy);
+        if (gate.kind === "invalid") {
+          this.appendDeniedOrInvalidToolResult(invocation, gate.message);
           continuedWithLocalContext = true;
           index++;
           continue;
         }
 
-        if (!isReadOnlyAction(invocation.action) && agentMode !== "agent") {
-          const reason = `${agentModeLabel(agentMode)} mode is read-only. Use read-only repo context and switch to Agent mode before applying edits or running commands.`;
+        if (gate.kind === "modeDenied") {
+          const reason = readOnlyModeReason(agentMode);
           this.inspector.recordAudit(invocation.action, { behavior: "deny", source: "default", reason }, "denied");
           this.appendDeniedOrInvalidToolResult(invocation, reason);
           continuedWithLocalContext = true;
@@ -1230,7 +1238,7 @@ export class AgentController {
           continue;
         }
 
-        const decision = evaluateActionPermission(invocation.action, permissionPolicy);
+        const decision = gate.decision;
         if (decision.behavior === "deny") {
           this.inspector.recordAudit(invocation.action, decision, "denied");
           this.appendDeniedOrInvalidToolResult(invocation, decision.reason);
@@ -1270,16 +1278,16 @@ export class AgentController {
       }
 
       const invocation = invocations[index];
-      const validation = validateAction(invocation.action);
-      if (!validation.ok) {
-        this.appendDeniedOrInvalidToolResult(invocation, validation.message ?? "Tool input failed validation.");
+      const gate = this.gatePermission(invocation.action, agentMode, permissionPolicy);
+      if (gate.kind === "invalid") {
+        this.appendDeniedOrInvalidToolResult(invocation, gate.message);
         continuedWithLocalContext = true;
         index++;
         continue;
       }
 
-      if (!isReadOnlyAction(invocation.action) && agentMode !== "agent") {
-        const reason = `${agentModeLabel(agentMode)} mode is read-only. Use read-only repo context and switch to Agent mode before applying edits or running commands.`;
+      if (gate.kind === "modeDenied") {
+        const reason = readOnlyModeReason(agentMode);
         this.inspector.recordAudit(invocation.action, { behavior: "deny", source: "default", reason }, "denied");
         this.appendDeniedOrInvalidToolResult(invocation, reason);
         continuedWithLocalContext = true;
@@ -1287,7 +1295,7 @@ export class AgentController {
         continue;
       }
 
-      const decision = evaluateActionPermission(invocation.action, permissionPolicy);
+      const decision = gate.decision;
       if (decision.behavior === "deny") {
         this.inspector.recordAudit(invocation.action, decision, "denied");
         this.appendDeniedOrInvalidToolResult(invocation, decision.reason);
@@ -1381,6 +1389,21 @@ export class AgentController {
         return `${content}\n${toolError(`postToolFailure hook failed: ${errorMessage(hookError)}`)}`;
       }
     }
+  }
+
+  // The single security gate shared by all three execution paths (concurrent batch, serial, and worker):
+  // validate the action, enforce read-only agent modes, then evaluate the permission policy. Pure — it
+  // performs no side effects (audit recording, denial text, the ask/allow handshake differ per path and
+  // stay at the call site), so the security DECISION can never drift between the three paths.
+  private gatePermission(action: AgentAction, agentMode: AgentMode, policy: PermissionPolicy): PermissionGateOutcome {
+    const validation = validateAction(action);
+    if (!validation.ok) {
+      return { kind: "invalid", message: validation.message ?? "Tool input failed validation." };
+    }
+    if (!isReadOnlyAction(action) && agentMode !== "agent") {
+      return { kind: "modeDenied" };
+    }
+    return { kind: "decided", decision: evaluateActionPermission(action, policy) };
   }
 
   private async requestApproval(action: AgentAction, toolCallId: string | undefined, decision: PermissionDecision, metadata?: { readonly detail?: string; readonly risk?: string; readonly origin?: ApprovalRequest["origin"] }): Promise<ApprovalRequest> {
@@ -1605,16 +1628,16 @@ export class AgentController {
   }
 
   private async executeWorkerAction(action: AgentAction, toolCallId: string | undefined, worker: WorkerSummary): Promise<string> {
-    const validation = validateAction(action);
-    if (!validation.ok) {
-      return toolError(validation.message ?? "Tool input failed validation.");
+    const gate = this.gatePermission(action, this.config.getAgentMode(), this.config.getPermissionPolicy());
+    if (gate.kind === "invalid") {
+      return toolError(gate.message);
     }
 
-    if (!isReadOnlyAction(action) && this.config.getAgentMode() !== "agent") {
+    if (gate.kind === "modeDenied") {
       return toolError(`${agentModeLabel(this.config.getAgentMode())} mode is read-only. Switch to Agent mode before allowing workers to edit files, run commands, or call local services.`);
     }
 
-    const decision = evaluateActionPermission(action, this.config.getPermissionPolicy());
+    const decision = gate.decision;
     if (decision.behavior === "deny") {
       this.inspector.recordAudit(action, decision, "denied");
       return toolError(`${action.type} was denied by the parent permission policy. ${decision.reason}`);
@@ -2364,6 +2387,12 @@ function transcriptEventForMessage(message: ChatMessage): AgentUiEvent | undefin
 
 function stripWorkspaceContext(content: string): string {
   return content.split("\n\nWorkspace context:\n\n", 1)[0];
+}
+
+// The denial reason shown when a non-read-only action is attempted in a read-only agent mode (ask/plan)
+// from the main run loop. (Worker actions use their own worker-specific phrasing.)
+function readOnlyModeReason(mode: AgentMode): string {
+  return `${agentModeLabel(mode)} mode is read-only. Use read-only repo context and switch to Agent mode before applying edits or running commands.`;
 }
 
 
