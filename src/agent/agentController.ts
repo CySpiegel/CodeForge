@@ -8,6 +8,7 @@ import { LearningCoordinator } from "./learningCoordinator";
 import { ModelResolver } from "./modelResolver";
 import { DoctorService } from "./doctorService";
 import { McpCoordinator } from "./mcpCoordinator";
+import { SessionService } from "./sessionService";
 // Re-exported so existing test imports (`from agentController`) keep working after the extraction.
 export { resolveConfiguredModelId } from "./modelResolver";
 import { errorMessage, isToolErrorText, toolError } from "./toolText";
@@ -54,7 +55,7 @@ import {
 import { OpenAiCompatibleProvider, resolveRequestMaxTokens } from "../core/openaiAdapter";
 import { evaluateActionPermission, permissionModeLabel } from "../core/permissions";
 import { parseUnifiedDiff, targetPath } from "../core/unifiedDiff";
-import { SessionRecord, SessionSnapshot, SessionStore, SessionSummary } from "../core/session";
+import { SessionRecord, SessionSnapshot, SessionStore } from "../core/session";
 import { classifyShellCommand } from "../core/shellSemantics";
 import { normalizeWorkspacePathInput } from "../core/workspacePaths";
 import {
@@ -234,8 +235,7 @@ export class AgentController {
   private continueAfterCurrentRun = false;
   private pendingContinuation: PendingContinuation | undefined;
   private queuedWork: QueuedWork[] = [];
-  private sessionId: string | undefined;
-  private sessionStartPromise: Promise<string | undefined> | undefined;
+  private readonly sessions: SessionService;
   private soulText: string | undefined;
   private memoryManager: MemoryManager | undefined;
   private memoryInitialized = false;
@@ -321,7 +321,7 @@ export class AgentController {
       permissionPolicy: () => this.config.getPermissionPolicy(),
       executeAction: (action, toolCallId, worker) => this.executeWorkerAction(action, toolCallId, worker),
       onReadFile: (path, content, maxBytes) => this.rememberReadFile(path, content, maxBytes, "worker"),
-      record: (factory) => this.persistSessionRecord(factory),
+      record: (factory) => this.sessions.persist(factory),
       onDidChange: (workers) => this.emit({ type: "workers", workers }),
       onNotice: (message) => this.emit({ type: "message", role: "system", text: message })
     });
@@ -363,6 +363,10 @@ export class AgentController {
       emitContextUsage: () => this.emitContextUsage(),
       currentSignal: () => this.runningAbort?.signal
     });
+    this.sessions = new SessionService({
+      store: sessionStore,
+      emit: (event) => this.emit(event)
+    });
   }
 
   // Public delegate kept for the live curator smoke test and any external caller.
@@ -391,8 +395,7 @@ export class AgentController {
         this.inspectorEntries = [];
         this.auditEntries = [];
         this.lastTokenUsage = undefined;
-        this.sessionId = undefined;
-        this.sessionStartPromise = undefined;
+        this.sessions.clearSession();
         this.memoryInitialized = false;
         this.workers.clear();
         this.approvals.clear();
@@ -430,14 +433,11 @@ export class AgentController {
   }
 
   async listSessions(limit = 50): Promise<readonly AgentSessionSummary[]> {
-    if (!this.sessionStore) {
-      return [];
-    }
-    return (await this.sessionStore.list(limit)).map(toAgentSessionSummary);
+    return this.sessions.listSummaries(limit);
   }
 
   getCurrentSessionId(): string | undefined {
-    return this.sessionId;
+    return this.sessions.currentSessionId();
   }
 
   async deleteSession(sessionId: string): Promise<boolean> {
@@ -449,7 +449,7 @@ export class AgentController {
       this.emit({ type: "error", text: "Select a CodeForge session to delete." });
       return false;
     }
-    if (this.runningAbort && this.sessionId === sessionId) {
+    if (this.runningAbort && this.sessions.currentSessionId() === sessionId) {
       this.emit({ type: "error", text: "Stop the current CodeForge request before deleting the active conversation." });
       return false;
     }
@@ -460,7 +460,7 @@ export class AgentController {
       return false;
     }
 
-    if (this.sessionId === sessionId) {
+    if (this.sessions.currentSessionId() === sessionId) {
       this.reset();
     } else {
       await this.publishState();
@@ -784,8 +784,7 @@ export class AgentController {
     this.inspectorEntries = [];
     this.auditEntries = [];
     this.lastTokenUsage = undefined;
-    this.sessionId = undefined;
-    this.sessionStartPromise = undefined;
+    this.sessions.clearSession();
     this.workers.clear();
     this.approvals.clear();
     this.workerApprovalWaiters.clear();
@@ -1908,7 +1907,7 @@ export class AgentController {
 
 
   private async recordTask(task: CodeForgeTask, event: "created" | "updated"): Promise<void> {
-    await this.appendSessionRecord((sessionId) => ({
+    await this.sessions.record((sessionId) => ({
       type: "task",
       sessionId,
       createdAt: Date.now(),
@@ -2540,13 +2539,13 @@ export class AgentController {
     if (!this.memoryManager || this.memoryInitialized) {
       return;
     }
-    await this.memoryManager.initializeAll({ sessionId: this.sessionId ?? "session", reset: false });
+    await this.memoryManager.initializeAll({ sessionId: this.sessions.currentSessionId() ?? "session", reset: false });
     this.memoryInitialized = true;
   }
 
   private appendMessage(message: ChatMessage): void {
     this.messages.push(message);
-    this.persistSessionRecord((sessionId) => ({
+    this.sessions.persist((sessionId) => ({
       type: "message",
       sessionId,
       createdAt: Date.now(),
@@ -2560,7 +2559,7 @@ export class AgentController {
       this.lastContextItems = [];
     }
     this.lastTokenUsage = undefined;
-    this.persistSessionRecord((sessionId) => ({
+    this.sessions.persist((sessionId) => ({
       type: "messages_replaced",
       sessionId,
       createdAt: Date.now(),
@@ -2570,7 +2569,7 @@ export class AgentController {
   }
 
   private async recordApprovalRequested(approval: ApprovalRequest): Promise<void> {
-    await this.appendSessionRecord((sessionId) => ({
+    await this.sessions.record((sessionId) => ({
       type: "approval_requested",
       sessionId,
       createdAt: Date.now(),
@@ -2579,7 +2578,7 @@ export class AgentController {
   }
 
   private async recordApprovalResolved(approvalId: string, accepted: boolean, text: string): Promise<void> {
-    await this.appendSessionRecord((sessionId) => ({
+    await this.sessions.record((sessionId) => ({
       type: "approval_resolved",
       sessionId,
       createdAt: Date.now(),
@@ -2591,7 +2590,7 @@ export class AgentController {
 
   private async recordCheckpoint(action: AgentAction, summary: string): Promise<void> {
     await this.captureUndoSnapshot(action, summary);
-    await this.appendSessionRecord((sessionId) => ({
+    await this.sessions.record((sessionId) => ({
       type: "checkpoint",
       sessionId,
       createdAt: Date.now(),
@@ -2662,62 +2661,8 @@ export class AgentController {
     void this.publishState();
   }
 
-  private persistSessionRecord(factory: (sessionId: string) => SessionRecord): void {
-    void this.appendSessionRecord(factory).catch((error) => {
-      this.emit({ type: "error", text: `Failed to persist session record: ${errorMessage(error)}` });
-    });
-  }
-
-  private async appendSessionRecord(factory: (sessionId: string) => SessionRecord): Promise<void> {
-    if (!this.sessionStore) {
-      return;
-    }
-    const sessionId = await this.ensureSessionId();
-    if (!sessionId) {
-      return;
-    }
-    await this.sessionStore.append(factory(sessionId));
-  }
-
-  private async ensureSessionId(): Promise<string | undefined> {
-    if (!this.sessionStore) {
-      return undefined;
-    }
-    if (this.sessionId) {
-      return this.sessionId;
-    }
-    if (this.sessionStartPromise) {
-      return this.sessionStartPromise;
-    }
-    return this.startNewSession("CodeForge session");
-  }
-
-  private async startNewSession(title: string): Promise<string | undefined> {
-    if (!this.sessionStore) {
-      this.sessionId = undefined;
-      this.sessionStartPromise = undefined;
-      return undefined;
-    }
-
-    this.sessionId = undefined;
-    const started = this.sessionStore.createSession(title).then(
-      (snapshot) => {
-        this.sessionId = snapshot.id;
-        this.sessionStartPromise = undefined;
-        return snapshot.id;
-      },
-      (error) => {
-        this.sessionStartPromise = undefined;
-        throw error;
-      }
-    );
-    this.sessionStartPromise = started;
-    return started;
-  }
-
   private applySession(snapshot: SessionSnapshot): void {
-    this.sessionId = snapshot.id;
-    this.sessionStartPromise = undefined;
+    this.sessions.adoptSession(snapshot.id);
     this.messages = [...snapshot.messages];
     this.memoryInitialized = false;
     // Hydrate the review cadence from prior user turns so resuming a session doesn't re-fire reviews
@@ -3113,13 +3058,13 @@ export class AgentController {
       return;
     }
 
-    const sessions = await this.sessionStore.list(10);
+    const sessions = await this.sessions.listSummaries(10);
     if (sessions.length === 0) {
       this.emit({ type: "message", role: "system", text: "No saved CodeForge sessions." });
       return;
     }
 
-    this.emit({ type: "sessions", sessions: sessions.map(toAgentSessionSummary) });
+    this.emit({ type: "sessions", sessions });
   }
 
   async resumeSession(sessionId: string | undefined): Promise<void> {
@@ -3158,7 +3103,7 @@ export class AgentController {
 
     this.approvals.clear();
     this.workerApprovalWaiters.clear();
-    await this.startNewSession(`Fork of ${source?.title ?? "CodeForge session"}`);
+    await this.sessions.startNewSession(`Fork of ${source?.title ?? "CodeForge session"}`);
     this.replaceMessages(messages, "restore");
     await this.publishTranscript();
     this.emit({ type: "message", role: "system", text: `Forked session${source ? ` ${source.id}` : ""} into a new local session.` });
@@ -3170,7 +3115,7 @@ export class AgentController {
       return;
     }
 
-    const snapshot = await this.resolveStoredSession(sessionId);
+    const snapshot = await this.sessions.resolveStored(sessionId);
     if (!snapshot) {
       this.emit({ type: "error", text: sessionId ? `No saved CodeForge session found for ${sessionId}.` : "No saved CodeForge session found." });
       return;
@@ -3194,7 +3139,7 @@ export class AgentController {
       return;
     }
 
-    const snapshot = await this.resolveStoredSession(sessionId);
+    const snapshot = await this.sessions.resolveStored(sessionId);
     if (!snapshot) {
       this.emit({ type: "error", text: sessionId ? `No saved CodeForge session found for ${sessionId}.` : "No saved CodeForge session found." });
       return;
@@ -3206,19 +3151,6 @@ export class AgentController {
       return;
     }
     this.emit({ type: "message", role: "system", text: `Exported ${snapshot.id} to ${exportedPath}.` });
-  }
-
-  private async resolveStoredSession(sessionId: string | undefined): Promise<SessionSnapshot | undefined> {
-    if (!this.sessionStore) {
-      return undefined;
-    }
-    if (sessionId) {
-      return this.sessionStore.read(sessionId);
-    }
-    if (this.sessionId) {
-      return this.sessionStore.read(this.sessionId);
-    }
-    return this.sessionStore.readLatest();
   }
 
   private formatContextReport(): string {
@@ -3554,17 +3486,6 @@ function toAgentModelSummary(model: ModelInfo): AgentModelSummary {
   };
 }
 
-
-function toAgentSessionSummary(session: SessionSummary): AgentSessionSummary {
-  return {
-    id: session.id,
-    title: session.title,
-    createdAt: session.createdAt,
-    updatedAt: session.updatedAt,
-    messageCount: session.messageCount,
-    pendingApprovalCount: session.pendingApprovalCount
-  };
-}
 
 function formatWorkerList(workers: readonly WorkerSummary[]): string {
   if (workers.length === 0) {
