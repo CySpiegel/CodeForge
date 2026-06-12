@@ -1,6 +1,7 @@
 import { spawn, ChildProcessWithoutNullStreams } from "child_process";
 import { createInterface, Interface as ReadlineInterface } from "readline";
 import { errorMessage, isRecord as isObject } from "./guards";
+import type { JsonRpcRequest, JsonRpcResponse, McpResourceReadResult, McpResourceSummary, McpServerInspection, McpServerStatus, McpToolSummary, McpTransport } from "./mcp/types";
 import { combinedSignal, isSafeId, mcpEnvironment, requestId, safeJson, safeResponseText, throwIfAborted, truncate, withoutUndefined } from "./mcp/util";
 import { assertUrlAllowed } from "./networkPolicy";
 import { SseEvent, SseParser } from "./sseParser";
@@ -9,66 +10,9 @@ import { McpCallToolAction, McpServerConfig, NetworkPolicy } from "./types";
 const protocolVersion = "2025-06-18";
 const defaultRequestTimeoutMs = 30_000;
 
-interface JsonRpcResponse {
-  readonly id?: string | number | null;
-  readonly result?: unknown;
-  readonly error?: {
-    readonly code?: number;
-    readonly message?: string;
-    readonly data?: unknown;
-  };
-}
-
-interface JsonRpcRequest {
-  readonly jsonrpc: "2.0";
-  readonly id?: string;
-  readonly method: string;
-  readonly params?: unknown;
-}
-
-interface McpTransport {
-  request(method: string, params?: unknown, signal?: AbortSignal): Promise<JsonRpcResponse>;
-  notify(method: string, params?: unknown, signal?: AbortSignal): Promise<void>;
-  close(): void;
-}
-
-export interface McpServerStatus {
-  readonly id: string;
-  readonly label: string;
-  readonly enabled: boolean;
-  readonly transport: McpServerConfig["transport"];
-  readonly target: string;
-  readonly valid: boolean;
-  readonly reason?: string;
-}
-
-export interface McpToolSummary {
-  readonly name: string;
-  readonly description?: string;
-  readonly inputSchema?: unknown;
-}
-
-export interface McpResourceSummary {
-  readonly uri: string;
-  readonly name?: string;
-  readonly description?: string;
-  readonly mimeType?: string;
-}
-
-export interface McpServerInspection {
-  readonly status: McpServerStatus;
-  readonly serverInfo?: unknown;
-  readonly tools: readonly McpToolSummary[];
-  readonly resources: readonly McpResourceSummary[];
-  readonly error?: string;
-}
-
-export interface McpResourceReadResult {
-  readonly serverId: string;
-  readonly uri: string;
-  readonly label: string;
-  readonly content: string;
-}
+// Public types re-exported so existing `from "../core/mcpClient"` importers (toolDiscovery,
+// mcpCoordinator, agentController, doctorService, toolSchemaService) are unaffected by the split.
+export type { McpResourceReadResult, McpResourceSummary, McpServerInspection, McpServerStatus, McpToolSummary } from "./mcp/types";
 
 export function configuredMcpServerStatuses(servers: readonly McpServerConfig[], policy: NetworkPolicy): readonly McpServerStatus[] {
   return servers.map((server) => validateMcpServer(server, policy));
