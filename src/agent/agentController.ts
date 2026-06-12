@@ -11,6 +11,7 @@ import { McpCoordinator } from "./mcpCoordinator";
 import { SessionService } from "./sessionService";
 import { ContextManager } from "./contextManager";
 import { InspectorLog } from "./inspectorLog";
+import { UndoManager } from "./undoManager";
 import { approvalAcceptedText, approvalContinuationPrompt, approvalPermissionDecision, formatQuestionAnswers, invocationForApproval } from "./approvalText";
 import { SlashCommandRouter } from "./slashCommandRouter";
 // Re-exported so existing test imports (`from agentController`) keep working after the extraction.
@@ -53,7 +54,6 @@ import {
 } from "../core/mcpClient";
 import { OpenAiCompatibleProvider } from "../core/openaiAdapter";
 import { evaluateActionPermission, permissionModeLabel } from "../core/permissions";
-import { parseUnifiedDiff, targetPath } from "../core/unifiedDiff";
 import { SessionRecord, SessionSnapshot, SessionStore } from "../core/session";
 import { classifyShellCommand } from "../core/shellSemantics";
 import { normalizeWorkspacePathInput } from "../core/workspacePaths";
@@ -122,10 +122,6 @@ const maxAgentToolTurns = 25;
 const maxReadOnlyToolTurns = 12;
 const workerJoinTimeoutMs = 900_000;
 const queuedWorkLimit = 20;
-// Undo: how many prior-change snapshots to keep, and the per-file byte cap above which a file is too
-// large to snapshot safely (restoring a truncated copy would corrupt it).
-const undoStackLimit = 25;
-const undoSnapshotMaxBytes = 5_000_000;
 
 interface QueuedPrompt {
   readonly type: "prompt";
@@ -216,6 +212,8 @@ export class AgentController {
   private readonly context: ContextManager;
   // Owns the run-inspector + permission-audit ring buffers and their UI event.
   private readonly inspector: InspectorLog;
+  // Owns the bounded pre-change snapshot stack and the /undo restore.
+  private readonly undoManager: UndoManager;
   private readonly readFileState = new Map<string, ReadFileSnapshot>();
   private readonly notebookReadState = new Set<string>();
   private messages: ChatMessage[] = [];
@@ -243,9 +241,6 @@ export class AgentController {
   // Did the most recent run surface an error? Read by the learning loop so it won't distil durable
   // lessons from a failed run.
   private lastRunErrored = false;
-  // Bounded stack of pre-change file snapshots, captured at each checkpoint, so the user can /undo the
-  // last applied edit/write/patch. Cleared on reset.
-  private undoStack: UndoSnapshot[] = [];
   // Cumulative cadence counters the learning loop reads to decide when a review is due.
   private userTurnCount = 0;
   private toolIterationCount = 0;
@@ -268,6 +263,17 @@ export class AgentController {
     this.config = config;
     this.inspector = new InspectorLog({
       emit: (event) => this.emit(event)
+    });
+    this.undoManager = new UndoManager({
+      readFileSnapshot: (path, maxBytes) => this.workspace.readTextFile(path, maxBytes, this.runningAbort?.signal),
+      restoreFile: (path, previousContent) => this.diff.restoreFile(path, previousContent),
+      forgetReadState: (path) => {
+        this.readFileState.delete(path);
+      },
+      emit: (event) => this.emit(event),
+      recordInspector: (level, category, summary, detail) => this.inspector.record(level, category, summary, detail),
+      publishState: () => this.publishState(),
+      isBusy: () => Boolean(this.runningAbort)
     });
     this.models = new ModelResolver({
       config,
@@ -799,7 +805,7 @@ export class AgentController {
     this.continueAfterCurrentRun = false;
     this.pendingContinuation = undefined;
     this.queuedWork = [];
-    this.undoStack = [];
+    this.undoManager.reset();
     this.memoryInitialized = false;
     this.userTurnCount = 0;
     this.toolIterationCount = 0;
@@ -2539,8 +2545,14 @@ export class AgentController {
     }));
   }
 
+  // Public entry point for the view provider and the /undo command; the stack and restore live in
+  // UndoManager.
+  async undo(): Promise<void> {
+    await this.undoManager.undo();
+  }
+
   private async recordCheckpoint(action: AgentAction, summary: string): Promise<void> {
-    await this.captureUndoSnapshot(action, summary);
+    await this.undoManager.capture(action, summary);
     await this.sessions.record((sessionId) => ({
       type: "checkpoint",
       sessionId,
@@ -2548,68 +2560,6 @@ export class AgentController {
       action,
       summary
     }));
-  }
-
-  // Snapshot the current content of every file an edit/write/patch is about to change, so /undo can
-  // restore it. Called from recordCheckpoint (before the change applies). Best-effort and never throws.
-  private async captureUndoSnapshot(action: AgentAction, summary: string): Promise<void> {
-    const paths = undoTargetPaths(action);
-    if (paths.length === 0) {
-      return;
-    }
-    const files = await Promise.all(paths.map(async (path) => {
-      try {
-        const content = await this.workspace.readTextFile(path, undoSnapshotMaxBytes, this.runningAbort?.signal);
-        // If we hit the cap the snapshot is truncated; restoring it would corrupt the file, so mark it
-        // unrestorable rather than silently losing data.
-        const restorable = Buffer.byteLength(content, "utf8") < undoSnapshotMaxBytes;
-        return { path, previousContent: content, restorable };
-      } catch {
-        // The file does not exist yet — the action creates it, so undo deletes it.
-        return { path, previousContent: null, restorable: true };
-      }
-    }));
-    this.undoStack.push({ summary, createdAt: Date.now(), files });
-    if (this.undoStack.length > undoStackLimit) {
-      this.undoStack.shift();
-    }
-  }
-
-  async undo(): Promise<void> {
-    if (this.runningAbort) {
-      this.emit({ type: "status", text: "Finish or stop the current request before undoing." });
-      return;
-    }
-    const snapshot = this.undoStack.pop();
-    if (!snapshot) {
-      this.emit({ type: "message", role: "system", text: "Nothing to undo — no file changes have been applied this session." });
-      return;
-    }
-    const restored: string[] = [];
-    const skipped: string[] = [];
-    for (const file of snapshot.files) {
-      if (!file.restorable) {
-        skipped.push(`${file.path} (too large to snapshot)`);
-        continue;
-      }
-      try {
-        await this.diff.restoreFile(file.path, file.previousContent);
-        this.readFileState.delete(file.path);
-        restored.push(file.previousContent === null ? `${file.path} (removed new file)` : file.path);
-      } catch (error) {
-        skipped.push(`${file.path} (${errorMessage(error)})`);
-      }
-    }
-    const parts = [`↩️ Undid: ${snapshot.summary}`];
-    if (restored.length > 0) {
-      parts.push(`Restored ${restored.join(", ")}.`);
-    }
-    if (skipped.length > 0) {
-      parts.push(`Could not restore ${skipped.join(", ")}.`);
-    }
-    this.inspector.record("info", "tool", "Undo applied.", parts.join(" "));
-    this.emit({ type: "message", role: "system", text: parts.join(" ") });
-    void this.publishState();
   }
 
   private applySession(snapshot: SessionSnapshot): void {
@@ -3055,28 +3005,6 @@ function agentModeInstructions(mode: AgentMode): string {
     "Do not edit files, create files, propose patches, open diffs, or run terminal commands in Plan mode.",
     "When the plan is ready, present the intended edits clearly and tell the user to switch to Agent mode before implementation."
   ].join("\n");
-}
-
-interface UndoSnapshot {
-  readonly summary: string;
-  readonly createdAt: number;
-  readonly files: ReadonlyArray<{ readonly path: string; readonly previousContent: string | null; readonly restorable: boolean }>;
-}
-
-// The repo-relative paths an action is about to modify, used to snapshot them for undo. Only the
-// file-mutating actions are covered; commands and reads return none.
-function undoTargetPaths(action: AgentAction): readonly string[] {
-  if (action.type === "write_file" || action.type === "edit_file") {
-    return [action.path];
-  }
-  if (action.type === "propose_patch") {
-    try {
-      return parseUnifiedDiff(action.patch).map(targetPath).filter((path) => path !== "/dev/null");
-    } catch {
-      return [];
-    }
-  }
-  return [];
 }
 
 function readStateKey(path: string): string {
