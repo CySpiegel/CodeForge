@@ -15,7 +15,9 @@ import { approvalAcceptedText, approvalContinuationPrompt, approvalPermissionDec
 import { SlashCommandRouter } from "./slashCommandRouter";
 // Re-exported so existing test imports (`from agentController`) keep working after the extraction.
 export { resolveConfiguredModelId } from "./modelResolver";
-import { errorMessage, firstLines, isToolErrorText, toolError } from "./toolText";
+import { errorMessage, firstLines, isContextOverflowError, isMissingFileError, isRecoverableEditPreflightError, isToolErrorText, modelRecoverableToolError, toolError } from "./toolText";
+// Re-exported so existing test imports (`from agentController`) keep working after the extraction.
+export { isContextOverflowError } from "./toolText";
 import { modelStreamIdleTimeoutMs, streamWithIdleTimeout } from "./modelStream";
 // Re-exported so existing test imports (`from agentController`) keep working after the extraction.
 export { buildGitArgv } from "./gitTool";
@@ -62,7 +64,6 @@ import {
   GitAction,
   ChatMessage,
   CodeForgeTask,
-  CommandResult,
   ContextItem,
   ContextLimits,
   LlmRequest,
@@ -72,14 +73,14 @@ import {
   PermissionDecision,
   PermissionMode,
   ProviderCapabilities,
-  RunCommandAction,
   TokenUsage,
   ToolCall,
   ToolDefinition,
   WorkspaceDiagnostic,
   WorkspacePort
 } from "../core/types";
-import { codeForgeTools, isApprovalAction, isConcurrencySafeAction, isLocalReadOnlyAction, isReadOnlyAction, ToolInvocation, toolSummary, validateAction } from "../core/toolRegistry";
+import { codeForgeTools, isApprovalAction, isConcurrencySafeAction, isInternalAutomationAction, isInternalReadAction, isInternalStateAction, isLocalReadOnlyAction, isReadOnlyAction, ToolInvocation, toolSummary, validateAction } from "../core/toolRegistry";
+import { formatCommandResult, hookFailureStatus } from "./commandResultText";
 import {
   discoveredCodeForgeToolNames,
   discoveredMcpToolNames,
@@ -3017,9 +3018,6 @@ function stripWorkspaceContext(content: string): string {
   return content.split("\n\nWorkspace context:\n\n", 1)[0];
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function agentModeLabel(mode: AgentMode): string {
   switch (mode) {
@@ -3059,23 +3057,6 @@ function agentModeInstructions(mode: AgentMode): string {
   ].join("\n");
 }
 
-// Heuristic: does this endpoint error mean the prompt exceeded the model's context window? Covers the
-// common phrasings from vLLM, llama.cpp, LM Studio, LiteLLM, and OpenAI-style gateways.
-export function isContextOverflowError(error: unknown): boolean {
-  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
-  if (!message) {
-    return false;
-  }
-  return /context (length|window|size)/.test(message)
-    || /maximum context/.test(message)
-    || /exceed[a-z]*[^.]{0,24}context/.test(message)
-    || /context[^.]{0,24}exceed/.test(message)
-    || /too many tokens/.test(message)
-    || /reduce the (length|input|number of tokens|prompt)/.test(message)
-    || /prompt is too long/.test(message)
-    || (/\b(400|413)\b/.test(message) && /\btokens?\b/.test(message));
-}
-
 interface UndoSnapshot {
   readonly summary: string;
   readonly createdAt: number;
@@ -3098,84 +3079,6 @@ function undoTargetPaths(action: AgentAction): readonly string[] {
   return [];
 }
 
-function isInternalAutomationAction(action: AgentAction): boolean {
-  return action.type === "spawn_agent" || action.type === "worker_output";
-}
-
-function isInternalStateAction(action: AgentAction): boolean {
-  return action.type === "task_create" || action.type === "task_update";
-}
-
-function isInternalReadAction(action: AgentAction): boolean {
-  return action.type === "tool_list"
-    || action.type === "tool_search"
-    || action.type === "task_list"
-    || action.type === "task_get"
-    || action.type === "code_hover"
-    || action.type === "code_definition"
-    || action.type === "code_references"
-    || action.type === "code_symbols"
-    || action.type === "mcp_list_resources"
-    || action.type === "mcp_read_resource"
-    || action.type === "notebook_read"
-    || action.type === "skill_view"
-    || action.type === "skills_list"
-    || action.type === "fact_store"
-    || action.type === "fact_feedback";
-}
-
-function formatCommandResult(action: RunCommandAction, result: CommandResult): string {
-  const status = result.timedOut
-    ? `timed out after command timeout`
-    : result.cancelled
-      ? "cancelled by user"
-    : `exited with ${result.exitCode ?? result.signal ?? "unknown"}`;
-  const stdout = result.stdout.trim();
-  const stderr = result.stderr.trim();
-  return [
-    `run_command ${action.command}`,
-    "",
-    `CWD: ${result.cwd}`,
-    `Status: ${status}`,
-    `Duration: ${Math.max(0, result.endedAt - result.startedAt)}ms`,
-    `Output limit: ${formatBytes(result.outputLimitBytes)} per stream`,
-    result.stdoutTruncated ? "STDOUT was truncated to the configured output limit." : undefined,
-    stdout ? `STDOUT:\n${stdout}` : "STDOUT: (empty)",
-    result.stderrTruncated ? "STDERR was truncated to the configured output limit." : undefined,
-    stderr ? `STDERR:\n${stderr}` : "STDERR: (empty)"
-  ].filter((line): line is string => Boolean(line)).join("\n");
-}
-
-function hookFailureStatus(result: CommandResult): string {
-  if (result.timedOut) {
-    return "Command timed out.";
-  }
-  if (result.cancelled) {
-    return "Command was cancelled.";
-  }
-  return `Command exited with ${result.exitCode ?? result.signal ?? "unknown"}.`;
-}
-
-function isRecoverableEditPreflightError(error: unknown): boolean {
-  if (isRecord(error) && error.modelRecoverableToolError === true) {
-    return true;
-  }
-  const message = errorMessage(error);
-  return /edit_file oldText (?:was not found|appears \d+ times)/.test(message)
-    || /requires reading .* before modifying an existing file/.test(message)
-    || /requires reading .* before modifying an existing notebook/.test(message)
-    || /cannot modify .* because the file changed since it was read/.test(message);
-}
-
-function modelRecoverableToolError(message: string): Error & { readonly modelRecoverableToolError: true } {
-  const error = new Error(message) as Error & { modelRecoverableToolError: true };
-  Object.defineProperty(error, "modelRecoverableToolError", {
-    value: true,
-    enumerable: true
-  });
-  return error;
-}
-
 function readStateKey(path: string): string {
   return normalizeWorkspacePathInput(path).replace(/^\/+/, "").replace(/^\.\//, "");
 }
@@ -3183,10 +3086,6 @@ function readStateKey(path: string): string {
 function readFileContentFromToolResult(result: string, path: string): string {
   const prefix = `read_file ${path}\n\n`;
   return result.startsWith(prefix) ? result.slice(prefix.length) : result.replace(/^read_file[^\n]*\n\n/, "");
-}
-
-function isMissingFileError(message: string): boolean {
-  return /(?:no such file|not found|does not exist|enoent|unable to resolve nonexistent)/i.test(message);
 }
 
 function summaryForInvocation(invocation: ToolInvocation): string {
