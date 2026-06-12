@@ -3,6 +3,11 @@ import { actionProtocolInstructions, parseActionsFromAssistantText, parseToolAct
 import { ApprovalQueue } from "../core/approvals";
 import { CodeIntelPort, UnavailableCodeIntelPort } from "../core/codeIntel";
 import { GitPort, UnavailableGitPort } from "../core/git";
+import { runGitOperation, unsafeGitArgsMessage } from "./gitTool";
+import { modelStreamIdleTimeoutMs, streamWithIdleTimeout } from "./modelStream";
+import { describeMemoryWrite, learningNotice, ReviewToolOutcome, reviewActionsFromText, reviewWriteSucceeded, summarizeReviewActions } from "./learningReview";
+// Re-exported so existing test imports (`from agentController`) keep working after the extraction.
+export { buildGitArgv } from "./gitTool";
 import { ContextBuilder } from "../core/contextBuilder";
 import { compactOldToolResults } from "../core/contextCompaction";
 import { buildContextUsage, ContextUsage, formatBytes } from "../core/contextUsage";
@@ -292,13 +297,11 @@ const workerJoinTimeoutMs = 900_000;
 const contextAutoCompactPercent = 80;
 const contextAttachmentRatio = 0.55;
 const contextToolResultTargetRatio = 0.6;
-const defaultModelStreamIdleTimeoutMs = 300_000;
 const queuedWorkLimit = 20;
 // Undo: how many prior-change snapshots to keep, and the per-file byte cap above which a file is too
 // large to snapshot safely (restoring a truncated copy would corrupt it).
 const undoStackLimit = 25;
 const undoSnapshotMaxBytes = 5_000_000;
-const gitOutputLimitBytes = 200_000;
 const codeForgeToolSchemaMarker = "CODEFORGE_TOOL_SCHEMA_LOADED:";
 const mcpToolSchemaMarker = "CODEFORGE_MCP_TOOL_SCHEMA_LOADED:";
 
@@ -1114,77 +1117,16 @@ export class AgentController {
     ], "compact");
   }
 
-  private async *streamChatWithIdleTimeout(
+  private streamChatWithIdleTimeout(
     provider: LlmProvider,
     request: LlmRequest,
     abort: AbortController,
     purpose: string
   ): AsyncIterable<LlmStreamEvent> {
-    const iterator = provider.streamChat(request)[Symbol.asyncIterator]();
-    const idleTimeoutMs = modelStreamIdleTimeoutMs(this.config.getModelIdleTimeoutSeconds());
-    const statusIntervalMs = 10_000;
-    let lastActivityAt = Date.now();
-
-    try {
-      let nextResult = iterator.next();
-      while (true) {
-        if (abort.signal.aborted) {
-          throw new Error(`${purpose} was stopped.`);
-        }
-
-        let timeout: ReturnType<typeof setTimeout> | undefined;
-        let heartbeat: ReturnType<typeof setTimeout> | undefined;
-        const remainingBeforeTimeoutMs = Math.max(1, idleTimeoutMs - (Date.now() - lastActivityAt));
-        const timeoutPromise = new Promise<never>((_, reject) => {
-          timeout = setTimeout(() => {
-            abort.abort();
-            reject(new Error(`${purpose} timed out because the model stream was idle for ${formatDuration(idleTimeoutMs)}.`));
-          }, remainingBeforeTimeoutMs);
-        });
-        const heartbeatPromise = new Promise<"heartbeat">((resolve) => {
-          heartbeat = setTimeout(() => resolve("heartbeat"), statusIntervalMs);
-        });
-
-        let result: IteratorResult<LlmStreamEvent> | "heartbeat";
-        try {
-          result = await Promise.race([nextResult, timeoutPromise, heartbeatPromise]);
-        } finally {
-          if (timeout) {
-            clearTimeout(timeout);
-          }
-          if (heartbeat) {
-            clearTimeout(heartbeat);
-          }
-        }
-
-        if (result === "heartbeat") {
-          const idleMs = Date.now() - lastActivityAt;
-          const remainingMs = Math.max(0, idleTimeoutMs - idleMs);
-          this.emit({ type: "status", text: `${purpose} still waiting on ${provider.profile.label}: ${formatDuration(idleMs)} idle, ${formatDuration(remainingMs)} before timeout.` });
-          continue;
-        }
-
-        if (result.done) {
-          return;
-        }
-        lastActivityAt = Date.now();
-        nextResult = iterator.next();
-        if (result.value.type === "rateLimit") {
-          // The adapter is backing off a 429 (tokens-per-minute) / transient error. Surface it so the
-          // user knows the run paused on purpose and will resume — not that it hung.
-          const seconds = Math.max(1, Math.round(result.value.waitMs / 1000));
-          this.emit({
-            type: "status",
-            text: `Rate limit reached (tokens/min) — waiting ${seconds}s, then retrying (attempt ${result.value.attempt}).`
-          });
-          continue;
-        }
-        yield result.value;
-      }
-    } catch (error) {
-      void iterator.return?.().catch(() => undefined);
-      throw error;
-    }
+    return streamWithIdleTimeout(provider, request, abort, purpose, {
+      idleTimeoutMs: modelStreamIdleTimeoutMs(this.config.getModelIdleTimeoutSeconds()),
+      onStatus: (text) => this.emit({ type: "status", text })
+    });
   }
 
   reset(): void {
@@ -2346,18 +2288,8 @@ export class AgentController {
   }
 
   private async executeGitAction(action: GitAction): Promise<string> {
-    const argv = buildGitArgv(action);
-    if (!argv) {
-      return toolError(`git ${action.operation}: unsupported or unsafe arguments. Allowed extras are a ref, a repo-relative path, or a safe flag (--cached, --stat, --name-only, -p, -n <count>).`);
-    }
-    const result = await this.gitPort.run(argv, this.runningAbort?.signal);
-    const raw = result.ok
-      ? (result.stdout.trim() || "(no output)")
-      : `git ${action.operation} failed (exit ${result.exitCode}).\n${(result.stderr || result.stdout).trim() || "no output"}`;
-    const clipped = Buffer.byteLength(raw, "utf8") > gitOutputLimitBytes
-      ? `${Buffer.from(raw, "utf8").subarray(0, gitOutputLimitBytes).toString("utf8")}\n…[git output clipped]`
-      : raw;
-    return `git ${action.operation}${action.args ? ` ${action.args}` : ""}\n\n${clipped}`;
+    const result = await runGitOperation(this.gitPort, action, this.runningAbort?.signal);
+    return result ?? toolError(unsafeGitArgsMessage(action));
   }
 
   private async executePermittedAction(action: AgentAction, toolCallId: string | undefined): Promise<string> {
@@ -5363,77 +5295,10 @@ export function isContextOverflowError(error: unknown): boolean {
     || (/\b(400|413)\b/.test(message) && /\btokens?\b/.test(message));
 }
 
-interface ReviewToolOutcome {
-  readonly output: string;
-  readonly summary: string;
-  readonly notice: string;
-}
-
 interface UndoSnapshot {
   readonly summary: string;
   readonly createdAt: number;
   readonly files: ReadonlyArray<{ readonly path: string; readonly previousContent: string | null; readonly restorable: boolean }>;
-}
-
-// Safe flags the read-only git tool may forward. Everything else starting with "-" is rejected so the
-// model cannot smuggle dangerous options (e.g. --output, --upload-pack) through the git port.
-const gitFlagAllowlist = new Set([
-  "--cached", "--staged", "--stat", "--name-only", "--name-status", "-p", "--patch", "--decorate", "--oneline", "--graph", "-n"
-]);
-
-// Build the exact argv for a read-only git operation from a fixed safe base plus validated extras.
-// Returns undefined when an argument is unsafe, so the caller surfaces a tool error instead of running.
-// Exported for unit testing the argument-safety logic.
-export function buildGitArgv(action: GitAction): readonly string[] | undefined {
-  const extra = sanitizeGitArgs(action.args);
-  if (extra === undefined) {
-    return undefined;
-  }
-  switch (action.operation) {
-    case "status":
-      return ["status", "--short", "--branch", ...extra];
-    case "diff":
-      return ["diff", ...extra];
-    case "log":
-      return extra.length > 0 ? ["log", "--oneline", "--decorate", ...extra] : ["log", "--oneline", "--decorate", "-n", "30"];
-    case "show":
-      return ["show", "--stat", ...extra];
-    case "branch":
-      return ["branch", "--all", "--verbose", ...extra];
-  }
-}
-
-// Validate model-supplied extra git args token by token. Flags must be in the allowlist; other tokens
-// must be a plain ref / range / repo-relative path (no shell metacharacters — args are passed as argv,
-// and git bounds pathspecs to the repo). Returns the token list, or undefined if anything is unsafe.
-function sanitizeGitArgs(args: string | undefined): readonly string[] | undefined {
-  if (!args || !args.trim()) {
-    return [];
-  }
-  const tokens = args.trim().split(/\s+/);
-  if (tokens.length > 8) {
-    return undefined;
-  }
-  const safe: string[] = [];
-  for (const token of tokens) {
-    if (token.startsWith("-")) {
-      if (gitFlagAllowlist.has(token) || /^-n\d+$/.test(token)) {
-        safe.push(token);
-        continue;
-      }
-      return undefined;
-    }
-    if (/^\d+$/.test(token) && safe[safe.length - 1] === "-n") {
-      safe.push(token);
-      continue;
-    }
-    if (/^[A-Za-z0-9_./@^~-]+$/.test(token)) {
-      safe.push(token);
-      continue;
-    }
-    return undefined;
-  }
-  return safe;
 }
 
 // The repo-relative paths an action is about to modify, used to snapshot them for undo. Only the
@@ -5450,95 +5315,6 @@ function undoTargetPaths(action: AgentAction): readonly string[] {
     }
   }
   return [];
-}
-
-function reviewWriteSucceeded(output: string): boolean {
-  try {
-    return Boolean((JSON.parse(output) as { success?: boolean }).success);
-  } catch {
-    return false;
-  }
-}
-
-function describeMemoryWrite(args: Record<string, unknown>): string {
-  const action = String(args.action ?? "update");
-  const target = args.target === "user" ? "user profile" : "memory";
-  const verb = action === "add" ? "saved to" : action === "remove" ? "removed from" : "updated";
-  return `${verb} ${target}`;
-}
-
-// Hermes-style, user-facing notification shown live in the chat each time the autonomous
-// self-improvement review writes to memory, the user profile (user.md), or a skill — so the user can
-// see the system is actively learning. Returns "" for read-only review tools.
-function learningNotice(name: string, args: Record<string, unknown>): string {
-  if (name === "memory") {
-    const action = String(args.action ?? "update");
-    const isUser = args.target === "user";
-    const snippet = noticeSnippet(args.content);
-    if (action === "remove") {
-      return isUser ? "👤 Updated your user profile — removed an outdated note" : "🧠 Pruned a memory it no longer needs";
-    }
-    const verb = action === "add" ? "Learned" : "Refined";
-    if (isUser) {
-      return `👤 ${verb} something about you${snippet ? `: “${snippet}”` : ""}`;
-    }
-    return `🧠 ${verb} a lesson from this session${snippet ? `: “${snippet}”` : ""}`;
-  }
-  if (name === "skill_manage") {
-    const action = String(args.action ?? "update");
-    const skill = String(args.name ?? "").trim();
-    const named = skill ? ` “${skill}”` : "";
-    if (action === "create") {
-      return `🛠️ Created a new skill${named}`;
-    }
-    if (action === "delete" || action === "remove_file") {
-      return `🗑️ Retired the skill${named}`;
-    }
-    return `🛠️ Improved the skill${named}`;
-  }
-  return "";
-}
-
-function noticeSnippet(value: unknown): string {
-  if (typeof value !== "string") {
-    return "";
-  }
-  const text = value.replace(/\s+/g, " ").trim();
-  return text.length > 80 ? `${text.slice(0, 77)}…` : text;
-}
-
-function summarizeReviewActions(actions: readonly string[]): string {
-  return [...new Set(actions.filter(Boolean))].join(" · ");
-}
-
-// Recover memory/skill tool calls from a non-native model's text (the CodeForge JSON action protocol).
-function reviewActionsFromText(content: string): { readonly name: string; readonly args: Record<string, unknown> }[] {
-  const out: { name: string; args: Record<string, unknown> }[] = [];
-  for (const action of parseActionsFromAssistantText(content)) {
-    if (action.type === "memory") {
-      out.push({ name: "memory", args: { action: action.action, target: action.target, content: action.content, old_text: action.oldText } });
-    } else if (action.type === "skill_manage") {
-      out.push({
-        name: "skill_manage",
-        args: {
-          action: action.action,
-          name: action.name,
-          content: action.content,
-          old_string: action.oldString,
-          new_string: action.newString,
-          replace_all: action.replaceAll,
-          file_path: action.filePath,
-          file_content: action.fileContent,
-          absorbed_into: action.absorbedInto
-        }
-      });
-    } else if (action.type === "skill_view") {
-      out.push({ name: "skill_view", args: { name: action.name, file_path: action.filePath } });
-    } else if (action.type === "skills_list") {
-      out.push({ name: "skills_list", args: {} });
-    }
-  }
-  return out;
 }
 
 function isInternalAutomationAction(action: AgentAction): boolean {
@@ -5689,17 +5465,6 @@ function approvalContinuationPrompt(action: AgentAction, outcome: "accepted" | "
   return `CodeForge continuation: ${summary} was approved but failed. Continue the original task by inspecting the current state and trying a corrected approach. Do not repeat the same failed action unchanged.`;
 }
 
-function modelStreamIdleTimeoutMs(configuredSeconds: number): number {
-  const configured = Number(process.env.CODEFORGE_MODEL_STREAM_IDLE_TIMEOUT_MS);
-  if (Number.isFinite(configured) && configured > 0) {
-    return Math.max(10, Math.floor(configured));
-  }
-  if (Number.isFinite(configuredSeconds) && configuredSeconds > 0) {
-    return Math.max(30_000, Math.floor(configuredSeconds * 1000));
-  }
-  return defaultModelStreamIdleTimeoutMs;
-}
-
 function invocationForApproval(approval: ApprovalRequest): ToolInvocation {
   return {
     id: approval.toolCallId ?? approval.id,
@@ -5707,18 +5472,6 @@ function invocationForApproval(approval: ApprovalRequest): ToolInvocation {
     source: approval.toolCallId ? "native" : "json",
     toolCallId: approval.toolCallId
   };
-}
-
-function formatDuration(milliseconds: number): string {
-  if (milliseconds < 1000) {
-    return `${milliseconds}ms`;
-  }
-  const seconds = milliseconds / 1000;
-  if (seconds < 60) {
-    return `${Number.isInteger(seconds) ? seconds : seconds.toFixed(1)}s`;
-  }
-  const minutes = seconds / 60;
-  return `${Number.isInteger(minutes) ? minutes : minutes.toFixed(1)}m`;
 }
 
 function isRecoverableEditPreflightError(error: unknown): boolean {
