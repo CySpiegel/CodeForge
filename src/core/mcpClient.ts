@@ -1,6 +1,7 @@
 import { spawn, ChildProcessWithoutNullStreams } from "child_process";
 import { createInterface, Interface as ReadlineInterface } from "readline";
 import { errorMessage, isRecord as isObject } from "./guards";
+import { combinedSignal, isSafeId, mcpEnvironment, requestId, safeJson, safeResponseText, throwIfAborted, truncate, withoutUndefined } from "./mcp/util";
 import { assertUrlAllowed } from "./networkPolicy";
 import { SseEvent, SseParser } from "./sseParser";
 import { McpCallToolAction, McpServerConfig, NetworkPolicy } from "./types";
@@ -724,84 +725,3 @@ function mcpName(method: string, params: unknown): string | undefined {
   return undefined;
 }
 
-function combinedSignal(primary: AbortSignal, secondary?: AbortSignal): AbortSignal {
-  if (!secondary) {
-    return primary;
-  }
-  const controller = new AbortController();
-  const abort = (): void => controller.abort();
-  if (primary.aborted || secondary.aborted) {
-    controller.abort();
-    return controller.signal;
-  }
-  primary.addEventListener("abort", abort, { once: true });
-  secondary.addEventListener("abort", abort, { once: true });
-  return controller.signal;
-}
-
-function requestId(): string {
-  return `codeforge-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-}
-
-async function safeResponseText(response: Response): Promise<string> {
-  try {
-    return await response.text();
-  } catch {
-    return response.statusText;
-  }
-}
-
-function safeJson(value: unknown): string {
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
-}
-
-function truncate(value: string, max: number): string {
-  return value.length > max ? `${value.slice(0, max)}\n...[truncated]` : value;
-}
-
-function throwIfAborted(signal: AbortSignal | undefined): void {
-  if (signal?.aborted) {
-    throw new Error("MCP request was cancelled.");
-  }
-}
-
-function withoutUndefined<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T;
-}
-
-
-function isSafeId(value: string): boolean {
-  return /^[A-Za-z0-9._-]{1,80}$/.test(value);
-}
-
-
-function mcpEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const allowed = [
-    "PATH",
-    "HOME",
-    "USER",
-    "USERNAME",
-    "SHELL",
-    "TMPDIR",
-    "TEMP",
-    "TMP",
-    "SystemRoot",
-    "ComSpec",
-    "PATHEXT"
-  ];
-  const env: NodeJS.ProcessEnv = {
-    CODEFORGE: "1",
-    NO_COLOR: "1"
-  };
-  for (const key of allowed) {
-    const value = source[key];
-    if (value !== undefined) {
-      env[key] = value;
-    }
-  }
-  return env;
-}
