@@ -45,10 +45,12 @@ export class ScriptedLlmProvider implements LlmProvider {
   readonly profile: ProviderProfile;
   readonly requests: LlmRequest[] = [];
   private readonly responses: ScriptedLlmResponse[];
+  private readonly inspectionOverride?: OpenAiEndpointInspection;
 
-  constructor(responses: readonly ScriptedLlmResponse[], profile: ProviderProfile = fakeProfile) {
+  constructor(responses: readonly ScriptedLlmResponse[], profile: ProviderProfile = fakeProfile, inspectionOverride?: OpenAiEndpointInspection) {
     this.responses = [...responses];
     this.profile = profile;
+    this.inspectionOverride = inspectionOverride;
   }
 
   async *streamChat(request: LlmRequest): AsyncIterable<LlmStreamEvent> {
@@ -77,7 +79,7 @@ export class ScriptedLlmProvider implements LlmProvider {
   }
 
   async inspectEndpoint(): Promise<OpenAiEndpointInspection> {
-    return {
+    return this.inspectionOverride ?? {
       backend: "openai-api",
       backendLabel: "Fake OpenAI API compatible",
       models: [this.modelInfo()]
@@ -364,6 +366,10 @@ export interface ControllerHarnessOptions {
   readonly streamCompletionGraceSeconds?: number;
   readonly maxOutputTokensPreference?: number;
   readonly memorySettings?: Partial<MemorySettings>;
+  // Model-discovery overrides: drive refreshModels/resolveModel against a specific endpoint model
+  // list and a selected/configured model that may or may not be in it.
+  readonly inspection?: OpenAiEndpointInspection;
+  readonly configuredModel?: string;
   // Live-test hooks: drive the controller with a real LLM provider and a (fake) skill store so the
   // full memory/skills/review loop runs end-to-end against a real endpoint.
   readonly liveProvider?: LlmProvider;
@@ -372,7 +378,7 @@ export interface ControllerHarnessOptions {
 }
 
 export function createControllerHarness(options: ControllerHarnessOptions): ControllerHarness {
-  const provider = (options.liveProvider as ScriptedLlmProvider | undefined) ?? new ScriptedLlmProvider(options.responses);
+  const provider = (options.liveProvider as ScriptedLlmProvider | undefined) ?? new ScriptedLlmProvider(options.responses, fakeProfile, options.inspection);
   const workspace = new FakeWorkspace(options.files);
   const diff = new FakeDiffService(workspace);
   const terminal = new FakeTerminalRunner();
@@ -400,7 +406,7 @@ export function createControllerHarness(options: ControllerHarnessOptions): Cont
     getAgentMode: () => options.mode,
     getPermissionPolicy: () => permissionPolicy,
     getMcpServers: () => options.mcpServers ?? [],
-    getConfiguredModel: () => fakeProfile.defaultModel ?? "",
+    getConfiguredModel: () => options.configuredModel ?? fakeProfile.defaultModel ?? "",
     getContextLimits: () => contextLimits,
     getMemorySettings: () => memorySettings,
     getCuratorSettings: () => ({ enabled: false, intervalHours: 168, minIdleHours: 2, staleAfterDays: 30, archiveAfterDays: 90, backupEnabled: true, backupKeep: 5 }),

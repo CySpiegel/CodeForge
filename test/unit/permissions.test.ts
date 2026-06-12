@@ -83,6 +83,30 @@ test("full auto mode still asks for ask_user_question by design", () => {
   assert.equal(evaluateActionPermission({ type: "edit_file", path: "src/a.ts", oldText: "a", newText: "b" }, policy).behavior, "allow");
 });
 
+test("full auto mode ignores ask rules but still honors deny rules", () => {
+  // Regression: a stray ask-rule (or the cautious default) must never re-introduce an approval prompt
+  // in Full Auto — the mode is authoritative for everything except deny rules and model questions.
+  const askRulePolicy: PermissionPolicy = {
+    mode: "fullAuto",
+    rules: [
+      { kind: "command", pattern: "npm *", behavior: "ask", scope: "workspace" },
+      { kind: "tool", pattern: "edit_file", behavior: "ask", scope: "user" }
+    ]
+  };
+  assert.equal(evaluateActionPermission({ type: "run_command", command: "npm test" }, askRulePolicy).behavior, "allow");
+  assert.equal(evaluateActionPermission({ type: "edit_file", path: "src/a.ts", oldText: "a", newText: "b" }, askRulePolicy).behavior, "allow");
+
+  // Deny rules still win in Full Auto even when an ask rule also matches.
+  const denyRulePolicy: PermissionPolicy = {
+    mode: "fullAuto",
+    rules: [
+      { kind: "command", pattern: "rm *", behavior: "ask", scope: "workspace" },
+      { kind: "command", pattern: "rm *", behavior: "deny", scope: "user" }
+    ]
+  };
+  assert.equal(evaluateActionPermission({ type: "run_command", command: "rm -rf build" }, denyRulePolicy).behavior, "deny");
+});
+
 test("applies endpoint rules to MCP server ids", () => {
   const decision = evaluateActionPermission(
     { type: "mcp_call_tool", serverId: "prod-local", toolName: "tools.echo" },

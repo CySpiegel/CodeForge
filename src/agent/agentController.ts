@@ -388,6 +388,9 @@ export class AgentController {
   private readonly selectedModelByProfile = new Map<string, string>();
   // Dedup keys (`${profileId}:${configuredId}`) for the one-time "configured model not in list" warning.
   private readonly warnedUnmatchedModels = new Set<string>();
+  // Dedup keys (`${profileId}:${selectedId}`) for the visible "selected model is currently unavailable"
+  // chat notice. Cleared for a model once it is seen available again so a later disappearance re-warns.
+  private readonly unavailableModelNoticed = new Set<string>();
   private readonly readFileState = new Map<string, ReadFileSnapshot>();
   private readonly notebookReadState = new Set<string>();
   private messages: ChatMessage[] = [];
@@ -600,6 +603,7 @@ export class AgentController {
       if (selectedModel && !this.selectedModelByProfile.has(provider.profile.id)) {
         this.selectedModelByProfile.set(provider.profile.id, selectedModel);
       }
+      this.notifyIfSelectedModelUnavailable(provider.profile, inspection);
       this.emit({
         type: "models",
         models,
@@ -886,8 +890,16 @@ export class AgentController {
   }
 
   async setPermissionMode(mode: PermissionMode): Promise<void> {
-    await this.config.updateSettings({ permissionMode: mode });
-    await this.publishState();
+    try {
+      await this.config.updateSettings({ permissionMode: mode });
+    } finally {
+      // Always re-publish from the persisted policy so the picker label reflects what actually took
+      // effect — never the optimistic value the webview showed before this round-trip. If the write
+      // failed, this corrects the label back to the real mode before the error propagates.
+      await this.publishState();
+    }
+    const applied = this.config.getPermissionPolicy().mode;
+    this.emit({ type: "message", role: "system", text: `Permission mode set to ${permissionModeLabel(applied)}.` });
   }
 
   async pinActiveFile(): Promise<void> {
@@ -1570,10 +1582,13 @@ export class AgentController {
   private async handleActions(invocations: readonly ToolInvocation[]): Promise<boolean> {
     let index = 0;
     let continuedWithLocalContext = false;
-    const permissionPolicy = this.config.getPermissionPolicy();
-    const agentMode = this.config.getAgentMode();
 
     while (index < invocations.length) {
+      // Re-read the permission policy and agent mode each pass so a mid-run switch to Full Auto (or a
+      // stricter mode) takes effect immediately instead of staying pinned to the value captured when
+      // this batch started.
+      const permissionPolicy = this.config.getPermissionPolicy();
+      const agentMode = this.config.getAgentMode();
       const concurrentBatch: ToolInvocation[] = [];
       while (index < invocations.length && isConcurrencySafeAction(invocations[index].action)) {
         const invocation = invocations[index];
@@ -2711,7 +2726,9 @@ export class AgentController {
       const summary = await this.runBackgroundReview(memoryDue, skillsDue, slice);
       this.lastReviewedMessageCount = this.messages.length;
       if (summary) {
-        this.emit({ type: "message", role: "system", text: `💾 Self-improvement review: ${summary}` });
+        // Per-update "learning" notices are emitted live inside runBackgroundReview as each memory,
+        // user-profile, or skill write lands; here we just refresh the side panels (Learned/memory
+        // list/skills) so they reflect what was just saved.
         await this.publishState();
       }
     } catch (error) {
@@ -2769,6 +2786,9 @@ export class AgentController {
           if (result.summary) {
             actions.push(result.summary);
           }
+          if (result.notice) {
+            this.emit({ type: "message", role: "system", text: result.notice });
+          }
           messages.push({ role: "tool", content: result.output, toolCallId: toolCall.id, name: toolCall.name });
         }
         continue;
@@ -2780,6 +2800,9 @@ export class AgentController {
         const result = await this.executeReviewTool(action.name, action.args);
         if (result.summary) {
           actions.push(result.summary);
+        }
+        if (result.notice) {
+          this.emit({ type: "message", role: "system", text: result.notice });
         }
       }
       break;
@@ -2797,26 +2820,32 @@ export class AgentController {
     return [...memorySchemas, ...skillSchemas];
   }
 
-  private async executeReviewTool(name: string, args: Record<string, unknown>): Promise<{ readonly output: string; readonly summary: string }> {
+  private async executeReviewTool(name: string, args: Record<string, unknown>): Promise<ReviewToolOutcome> {
     try {
       if (name === "memory" && this.memoryManager) {
         const output = await this.memoryManager.handleToolCall("memory", args);
-        return { output, summary: reviewToolSummary(output, `${describeMemoryWrite(args)}`) };
+        const ok = reviewWriteSucceeded(output);
+        return { output, summary: ok ? describeMemoryWrite(args) : "", notice: ok ? learningNotice("memory", args) : "" };
       }
       if (name === "skill_manage" && this.skillManager) {
         const output = await this.skillManager.handleManage(args, { markAgentCreated: true });
-        return { output, summary: reviewToolSummary(output, `${String(args.action ?? "update")} skill ${String(args.name ?? "")}`.trim()) };
+        const ok = reviewWriteSucceeded(output);
+        return {
+          output,
+          summary: ok ? `${String(args.action ?? "update")} skill ${String(args.name ?? "")}`.trim() : "",
+          notice: ok ? learningNotice("skill_manage", args) : ""
+        };
       }
       if (name === "skill_view" && this.skillManager) {
-        return { output: await this.skillManager.handleView(args), summary: "" };
+        return { output: await this.skillManager.handleView(args), summary: "", notice: "" };
       }
       if (name === "skills_list" && this.skillManager) {
-        return { output: await this.skillManager.handleList(), summary: "" };
+        return { output: await this.skillManager.handleList(), summary: "", notice: "" };
       }
     } catch (error) {
-      return { output: JSON.stringify({ success: false, error: errorMessage(error) }), summary: "" };
+      return { output: JSON.stringify({ success: false, error: errorMessage(error) }), summary: "", notice: "" };
     }
-    return { output: JSON.stringify({ success: false, error: `Tool '${name}' is not available in the review pass.` }), summary: "" };
+    return { output: JSON.stringify({ success: false, error: `Tool '${name}' is not available in the review pass.` }), summary: "", notice: "" };
   }
 
   // -- Curator (long-horizon skill maintenance) -----------------------------
@@ -3124,7 +3153,8 @@ export class AgentController {
     }
     const profile = await this.config.getActiveProfile();
     return new OpenAiCompatibleProvider(profile, this.config.getNetworkPolicy(), {
-      streamCompletionGraceMs: this.config.getStreamCompletionGraceSeconds() * 1000
+      streamCompletionGraceMs: this.config.getStreamCompletionGraceSeconds() * 1000,
+      maxRateLimitRetries: this.config.getRateLimitRetries()
     });
   }
 
@@ -3151,6 +3181,7 @@ export class AgentController {
     if (inspection.models.length === 0) {
       throw new Error("No model is configured and the endpoint did not return any models.");
     }
+    this.notifyIfSelectedModelUnavailable(provider.profile, inspection);
     return this.selectedModelFor(provider.profile, inspection);
   }
 
@@ -3643,8 +3674,9 @@ export class AgentController {
   }
 
   private async setPermissionModeFromSlash(mode: PermissionMode): Promise<void> {
+    // setPermissionMode already emits the "Permission mode set to ..." confirmation from the
+    // persisted value, so the slash path just delegates.
     await this.setPermissionMode(mode);
-    this.emit({ type: "message", role: "system", text: `Permission mode set to ${permissionModeLabel(mode)}.` });
   }
 
   private async showLocalCommands(): Promise<void> {
@@ -4396,6 +4428,44 @@ export class AgentController {
       "Sending the configured id anyway. Single-model servers (e.g. llama.cpp) ignore the requested id and serve their loaded model. If this is wrong, pick a model from the dropdown."
     );
   }
+
+  // Emit a one-time, visible chat notice when the model the user has selected is not actually served
+  // by the endpoint, so a stale or removed selection does not silently fail. Stays quiet for a
+  // single-model server (generic openai-api with one model), which serves its loaded model regardless
+  // of the requested id; routers like LiteLLM/vLLM reject unknown ids, so they always warn.
+  private notifyIfSelectedModelUnavailable(profile: ProviderProfile, inspection: OpenAiEndpointInspection): void {
+    if (inspection.models.length === 0) {
+      return;
+    }
+    const selected = this.selectedModelFor(profile, inspection);
+    if (!selected) {
+      return;
+    }
+    const needle = selected.trim().toLowerCase();
+    const available = inspection.models.some((model) =>
+      model.id.trim().toLowerCase() === needle
+      || (model.aliases ?? []).some((alias) => alias.trim().toLowerCase() === needle)
+    );
+    const key = `${profile.id}:${selected}`;
+    if (available) {
+      // Re-arm the notice so a later disappearance of this model warns again.
+      this.unavailableModelNoticed.delete(key);
+      return;
+    }
+    const isRouter = inspection.backend === "litellm" || inspection.backend === "vllm";
+    if (inspection.models.length === 1 && !isRouter) {
+      return;
+    }
+    if (this.unavailableModelNoticed.has(key)) {
+      return;
+    }
+    this.unavailableModelNoticed.add(key);
+    this.emit({
+      type: "message",
+      role: "system",
+      text: `⚠️ The selected model “${selected}” is currently unavailable — ${profile.label} did not return it from /v1/models. Pick an available model from the dropdown to continue.`
+    });
+  }
 }
 
 interface ModelIdResolution {
@@ -5046,11 +5116,17 @@ function safeParseArgs(json: string): Record<string, unknown> {
   }
 }
 
-function reviewToolSummary(output: string, label: string): string {
+interface ReviewToolOutcome {
+  readonly output: string;
+  readonly summary: string;
+  readonly notice: string;
+}
+
+function reviewWriteSucceeded(output: string): boolean {
   try {
-    return (JSON.parse(output) as { success?: boolean }).success ? label : "";
+    return Boolean((JSON.parse(output) as { success?: boolean }).success);
   } catch {
-    return "";
+    return false;
   }
 }
 
@@ -5059,6 +5135,46 @@ function describeMemoryWrite(args: Record<string, unknown>): string {
   const target = args.target === "user" ? "user profile" : "memory";
   const verb = action === "add" ? "saved to" : action === "remove" ? "removed from" : "updated";
   return `${verb} ${target}`;
+}
+
+// Hermes-style, user-facing notification shown live in the chat each time the autonomous
+// self-improvement review writes to memory, the user profile (user.md), or a skill — so the user can
+// see the system is actively learning. Returns "" for read-only review tools.
+function learningNotice(name: string, args: Record<string, unknown>): string {
+  if (name === "memory") {
+    const action = String(args.action ?? "update");
+    const isUser = args.target === "user";
+    const snippet = noticeSnippet(args.content);
+    if (action === "remove") {
+      return isUser ? "👤 Updated your user profile — removed an outdated note" : "🧠 Pruned a memory it no longer needs";
+    }
+    const verb = action === "add" ? "Learned" : "Refined";
+    if (isUser) {
+      return `👤 ${verb} something about you${snippet ? `: “${snippet}”` : ""}`;
+    }
+    return `🧠 ${verb} a lesson from this session${snippet ? `: “${snippet}”` : ""}`;
+  }
+  if (name === "skill_manage") {
+    const action = String(args.action ?? "update");
+    const skill = String(args.name ?? "").trim();
+    const named = skill ? ` “${skill}”` : "";
+    if (action === "create") {
+      return `🛠️ Created a new skill${named}`;
+    }
+    if (action === "delete" || action === "remove_file") {
+      return `🗑️ Retired the skill${named}`;
+    }
+    return `🛠️ Improved the skill${named}`;
+  }
+  return "";
+}
+
+function noticeSnippet(value: unknown): string {
+  if (typeof value !== "string") {
+    return "";
+  }
+  const text = value.replace(/\s+/g, " ").trim();
+  return text.length > 80 ? `${text.slice(0, 77)}…` : text;
 }
 
 function summarizeReviewActions(actions: readonly string[]): string {

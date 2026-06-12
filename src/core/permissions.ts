@@ -29,6 +29,18 @@ export function evaluateActionPermission(action: AgentAction, policy: Permission
     return modeConstraint;
   }
 
+  // Full Auto is authoritative once deny rules (above) and model questions (handled by the mode
+  // constraint) are accounted for: an "ask" rule or the cautious default must never re-introduce a
+  // prompt for a tool the agent wants to run. Allow rules are still honored so an explicit allow can
+  // carry its own reason; everything else falls through to the Full Auto auto-allow.
+  if (normalizedPolicy.mode === "fullAuto") {
+    const allowRule = findMatchingRule(normalizedPolicy.rules, "allow", context);
+    if (allowRule) {
+      return ruleDecision("allow", allowRule, action);
+    }
+    return defaultDecision(action, normalizedPolicy.mode);
+  }
+
   const askRule = findMatchingRule(normalizedPolicy.rules, "ask", context);
   if (askRule) {
     return ruleDecision("ask", askRule, action);

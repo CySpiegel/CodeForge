@@ -342,6 +342,13 @@
           "maximum": 120,
           "description": "Time the OpenAI adapter waits after the last streamed chunk before treating the stream as finished. Increase this for slow local models that pause between tool-call argument fragments."
         },
+        "codeforge.requests.rateLimitRetries": {
+          "type": "number",
+          "default": 4,
+          "minimum": 0,
+          "maximum": 20,
+          "description": "How many times the OpenAI adapter retries a request that fails with HTTP 429 (rate limit, e.g. a LiteLLM tokens-per-minute limit) or a 5xx server error. Retries honor a Retry-After header when present, otherwise use exponential backoff with jitter. Set to 0 to fail immediately."
+        },
         "codeforge.agent.maxInvalidToolCallRetries": {
           "type": "number",
           "default": 3,

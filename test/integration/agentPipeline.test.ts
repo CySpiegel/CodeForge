@@ -1018,13 +1018,80 @@ test("background self-improvement review saves a memory on the turn cadence", as
   });
 
   await harness.controller.sendPrompt("Be terse and use bullets from now on.");
+  // The review surfaces a live, Hermes-style "learning" notice the moment it writes the user profile.
   await waitForEvent(
     harness.events,
-    (event) => event.type === "message" && event.role === "system" && /Self-improvement review/.test(event.text)
+    (event) => event.type === "message" && event.role === "system" && /Learned something about you/.test(event.text)
   );
 
   assert.ok(
     harness.memory.memories.some((memory) => memory.scope === "user" && /terse, bulleted/.test(memory.text)),
     "the review should persist a user-profile memory"
+  );
+});
+
+test("refreshing models warns when the selected model is no longer served by the endpoint", async () => {
+  const harness = createControllerHarness({
+    mode: "agent",
+    responses: [],
+    configuredModel: "removed-model",
+    inspection: {
+      backend: "litellm",
+      backendLabel: "LiteLLM",
+      models: [
+        { id: "llama-3", contextLength: 8192, maxOutputTokens: 4096, supportsReasoning: false },
+        { id: "qwen3", contextLength: 32768, maxOutputTokens: 4096, supportsReasoning: false }
+      ]
+    }
+  });
+
+  await harness.controller.refreshModels();
+
+  assert.ok(
+    harness.events.some((event) =>
+      event.type === "message" && event.role === "system"
+      && /currently unavailable/.test(event.text) && /removed-model/.test(event.text)
+    ),
+    "should emit a visible 'currently unavailable' notice naming the missing model"
+  );
+});
+
+test("refreshing models stays quiet when the selected model is available", async () => {
+  const harness = createControllerHarness({
+    mode: "agent",
+    responses: [],
+    configuredModel: "qwen3",
+    inspection: {
+      backend: "litellm",
+      backendLabel: "LiteLLM",
+      models: [{ id: "qwen3", contextLength: 32768, maxOutputTokens: 4096, supportsReasoning: false }]
+    }
+  });
+
+  await harness.controller.refreshModels();
+
+  assert.ok(
+    !harness.events.some((event) => event.type === "message" && /currently unavailable/.test(event.text)),
+    "an available model must not warn"
+  );
+});
+
+test("a single-model non-router endpoint does not warn about an unmatched id (it serves its loaded model)", async () => {
+  const harness = createControllerHarness({
+    mode: "agent",
+    responses: [],
+    configuredModel: "whatever-placeholder",
+    inspection: {
+      backend: "openai-api",
+      backendLabel: "OpenAI API compatible",
+      models: [{ id: "loaded-local-model", contextLength: 8192, maxOutputTokens: 4096, supportsReasoning: false }]
+    }
+  });
+
+  await harness.controller.refreshModels();
+
+  assert.ok(
+    !harness.events.some((event) => event.type === "message" && /currently unavailable/.test(event.text)),
+    "single-model servers ignore the requested id, so no false alarm"
   );
 });

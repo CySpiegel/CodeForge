@@ -94,6 +94,12 @@ export class CodeForgeConfigService {
     return clampNumber(this.config().get<number>("requests.streamCompletionGraceSeconds", 30), 1, 120, 30);
   }
 
+  // How many times the OpenAI adapter retries a request that fails with HTTP 429 (rate limit, e.g. a
+  // LiteLLM tokens-per-minute limit) or a 5xx server error before surfacing the error.
+  getRateLimitRetries(): number {
+    return clampNumber(this.config().get<number>("requests.rateLimitRetries", 4), 0, 20, 4);
+  }
+
   getMaxInvalidToolCallRetries(): number {
     return clampNumber(this.config().get<number>("agent.maxInvalidToolCallRetries", 3), 0, 20, 3);
   }

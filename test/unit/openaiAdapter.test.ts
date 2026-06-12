@@ -47,6 +47,174 @@ test("streams OpenAI-compatible chat completion chunks", async () => {
   }
 });
 
+test("streamChat finishes on the include_usage terminal chunk without waiting for [DONE]", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input: string | URL | Request) => {
+    const url = input instanceof Request ? input.url : String(input);
+    if (url.endsWith("/v1/chat/completions")) {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          const encoder = new TextEncoder();
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "ok" } }] })}\n\n`));
+          // Spec terminal chunk: usage present, choices empty. The run must end here even though no
+          // [DONE] follows — anything after it must not surface (this is the stuck-"Generating" fix).
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 } })}\n\n`));
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "LEAK" } }] })}\n\n`));
+          controller.close();
+        }
+      });
+      return new Response(stream, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+    }
+    return new Response("not found", { status: 404 });
+  };
+
+  try {
+    const provider = new OpenAiCompatibleProvider(
+      { id: "test", label: "Test", baseUrl: "http://127.0.0.1:4000/v1" },
+      { allowlist: [] }
+    );
+    const chunks: string[] = [];
+    let usageTotal: number | undefined;
+    for await (const event of provider.streamChat({ model: "local-model", messages: [{ role: "user", content: "hi" }] })) {
+      if (event.type === "content") {
+        chunks.push(event.text);
+      }
+      if (event.type === "usage") {
+        usageTotal = event.usage.totalTokens;
+      }
+    }
+    assert.equal(chunks.join(""), "ok");
+    assert.equal(usageTotal, 7);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("streamChat retries an HTTP 429 rate limit then streams the result", async () => {
+  const originalFetch = globalThis.fetch;
+  let chatCalls = 0;
+  globalThis.fetch = async (input: string | URL | Request) => {
+    const url = input instanceof Request ? input.url : String(input);
+    if (url.endsWith("/v1/chat/completions")) {
+      chatCalls++;
+      if (chatCalls === 1) {
+        // LiteLLM tokens-per-minute limit: transient 429 with a Retry-After hint (0s keeps the test fast).
+        return new Response(JSON.stringify({ error: { message: "tokens per minute rate limit exceeded" } }), {
+          status: 429,
+          headers: { "Content-Type": "application/json", "Retry-After": "0" }
+        });
+      }
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          const encoder = new TextEncoder();
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "ok" } }] })}\n\n`));
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+          controller.close();
+        }
+      });
+      return new Response(stream, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+    }
+    return new Response("not found", { status: 404 });
+  };
+
+  try {
+    const provider = new OpenAiCompatibleProvider(
+      { id: "test", label: "Test", baseUrl: "http://127.0.0.1:4000/v1" },
+      { allowlist: [] },
+      { maxRateLimitRetries: 3 }
+    );
+    const chunks: string[] = [];
+    for await (const event of provider.streamChat({ model: "local-model", messages: [{ role: "user", content: "hi" }] })) {
+      if (event.type === "content") {
+        chunks.push(event.text);
+      }
+    }
+    assert.equal(chunks.join(""), "ok");
+    assert.equal(chatCalls, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("streamChat surfaces a rate-limit-aware error once 429 retries are exhausted", async () => {
+  const originalFetch = globalThis.fetch;
+  let chatCalls = 0;
+  globalThis.fetch = async (input: string | URL | Request) => {
+    const url = input instanceof Request ? input.url : String(input);
+    if (url.endsWith("/v1/chat/completions")) {
+      chatCalls++;
+      return new Response("tokens per minute rate limit exceeded", { status: 429, headers: { "Retry-After": "0" } });
+    }
+    return new Response("not found", { status: 404 });
+  };
+
+  try {
+    const provider = new OpenAiCompatibleProvider(
+      { id: "test", label: "Test", baseUrl: "http://127.0.0.1:4000/v1" },
+      { allowlist: [] },
+      { maxRateLimitRetries: 1 }
+    );
+    await assert.rejects(
+      (async () => {
+        const seen: string[] = [];
+        for await (const event of provider.streamChat({ model: "local-model", messages: [{ role: "user", content: "hi" }] })) {
+          seen.push(event.type);
+        }
+      })(),
+      /rate-limited \(HTTP 429\)/
+    );
+    // One initial attempt plus one retry (maxRateLimitRetries=1).
+    assert.equal(chatCalls, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("streamChat drops stream_options on a non-429 4xx and does not treat it as a rate limit", async () => {
+  const originalFetch = globalThis.fetch;
+  const bodies: Array<Record<string, unknown>> = [];
+  globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {
+    const url = input instanceof Request ? input.url : String(input);
+    if (url.endsWith("/v1/chat/completions")) {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      if (bodies.length === 1) {
+        // Endpoint rejects the optional stream_options field with a 400 (not a rate limit).
+        return new Response("unsupported field: stream_options", { status: 400 });
+      }
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          const encoder = new TextEncoder();
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "hi" } }] })}\n\n`));
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+          controller.close();
+        }
+      });
+      return new Response(stream, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+    }
+    return new Response("not found", { status: 404 });
+  };
+
+  try {
+    const provider = new OpenAiCompatibleProvider(
+      { id: "test", label: "Test", baseUrl: "http://127.0.0.1:4000/v1" },
+      { allowlist: [] },
+      { maxRateLimitRetries: 0 }
+    );
+    const chunks: string[] = [];
+    for await (const event of provider.streamChat({ model: "local-model", messages: [{ role: "user", content: "hi" }] })) {
+      if (event.type === "content") {
+        chunks.push(event.text);
+      }
+    }
+    assert.equal(chunks.join(""), "hi");
+    assert.equal(bodies.length, 2);
+    assert.ok("stream_options" in bodies[0], "first attempt includes stream_options");
+    assert.ok(!("stream_options" in bodies[1]), "retry drops stream_options");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("stops streaming when OpenAI done event arrives even if the response body stays open", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => {
