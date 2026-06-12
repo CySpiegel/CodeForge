@@ -17,6 +17,7 @@ import { ToolSchemaService } from "./toolSchemaService";
 import { MemoryCommandsService } from "./memoryCommands";
 import { PinnedFiles } from "./pinnedFiles";
 import { ProviderGateway } from "./providerGateway";
+import { ReadStateTracker, readFileContentFromToolResult } from "./readStateTracker";
 import { SpawnAgentService } from "./spawnAgentService";
 import { agentModeLabel, SystemPromptBuilder } from "./systemPrompt";
 import { TaskBoard } from "./taskBoard";
@@ -60,7 +61,6 @@ import {
 import { evaluateActionPermission, permissionModeLabel } from "../core/permissions";
 import { SessionSnapshot, SessionStore } from "../core/session";
 import { classifyShellCommand } from "../core/shellSemantics";
-import { normalizeWorkspacePathInput } from "../core/workspacePaths";
 import {
   AgentAction,
   AgentMode,
@@ -142,13 +142,6 @@ interface InvalidNativeToolCall {
   readonly message: string;
 }
 
-interface ReadFileSnapshot {
-  readonly content: string;
-  readonly maxBytes: number;
-  readonly readAt: number;
-  readonly source: "tool" | "worker";
-}
-
 export class AgentController {
   private readonly config: CodeForgeConfigService;
   private readonly workspace: WorkspacePort;
@@ -188,8 +181,8 @@ export class AgentController {
   private readonly spawnAgent: SpawnAgentService;
   // Runs workspace-local pre/post/failure shell hooks for tool events.
   private readonly localHooks: LocalHookRunner;
-  private readonly readFileState = new Map<string, ReadFileSnapshot>();
-  private readonly notebookReadState = new Set<string>();
+  // Owns read-state bookkeeping (per-file read snapshots + read notebooks) for the stale-read guard.
+  private readonly readState = new ReadStateTracker();
   private messages: ChatMessage[] = [];
   // Owns the model-facing task board (task_create/update/list/get) + its session persistence/restore.
   private readonly taskBoard: TaskBoard;
@@ -244,7 +237,7 @@ export class AgentController {
       readFileSnapshot: (path, maxBytes) => this.workspace.readTextFile(path, maxBytes, this.runningAbort?.signal),
       restoreFile: (path, previousContent) => this.diff.restoreFile(path, previousContent),
       forgetReadState: (path) => {
-        this.readFileState.delete(path);
+        this.readState.forget(path);
       },
       emit: (event) => this.emit(event),
       recordInspector: (level, category, summary, detail) => this.inspector.record(level, category, summary, detail),
@@ -345,7 +338,7 @@ export class AgentController {
       requestMaxTokens: () => this.requestMaxTokens(),
       permissionPolicy: () => this.config.getPermissionPolicy(),
       executeAction: (action, toolCallId, worker) => this.executeWorkerAction(action, toolCallId, worker),
-      onReadFile: (path, content, maxBytes) => this.rememberReadFile(path, content, maxBytes, "worker"),
+      onReadFile: (path, content, maxBytes) => this.readState.remember(path, content, maxBytes, "worker"),
       record: (factory) => this.sessions.persist(factory),
       onDidChange: (workers) => this.emit({ type: "workers", workers }),
       onNotice: (message) => this.emit({ type: "message", role: "system", text: message })
@@ -481,8 +474,7 @@ export class AgentController {
         this.lastContextItems = [];
         this.mcp.reset();
         this.pinned.clear();
-        this.readFileState.clear();
-        this.notebookReadState.clear();
+        this.readState.clear();
         this.inspector.reset();
         this.lastTokenUsage = undefined;
         this.sessions.clearSession();
@@ -759,8 +751,7 @@ export class AgentController {
     this.lastContextItems = [];
     this.mcp.reset();
     this.pinned.clear();
-    this.readFileState.clear();
-    this.notebookReadState.clear();
+    this.readState.clear();
     this.inspector.reset();
     this.lastTokenUsage = undefined;
     this.sessions.clearSession();
@@ -1438,7 +1429,7 @@ export class AgentController {
   private async preflightWritableAction(action: AgentAction): Promise<void> {
     if (action.type === "notebook_edit_cell") {
       const current = await this.readWorkspaceFileIfExists(action.path, 1);
-      if (current.exists && !this.notebookReadState.has(readStateKey(action.path))) {
+      if (current.exists && !this.readState.hasNotebookRead(action.path)) {
         throw modelRecoverableToolError([
           `notebook_edit_cell requires reading ${action.path} before modifying an existing notebook.`,
           "Call notebook_read for the exact repo-relative path, inspect the current cells, then retry the notebook edit.",
@@ -1457,8 +1448,7 @@ export class AgentController {
       return;
     }
 
-    const key = readStateKey(action.path);
-    const snapshot = this.readFileState.get(key);
+    const snapshot = this.readState.snapshotFor(action.path);
     if (!snapshot) {
       throw modelRecoverableToolError([
         `${action.type} requires reading ${action.path} before modifying an existing file.`,
@@ -1469,7 +1459,7 @@ export class AgentController {
 
     const latest = await this.readWorkspaceFileIfExists(action.path, snapshot.maxBytes);
     if (!latest.exists || latest.content !== snapshot.content) {
-      this.readFileState.delete(key);
+      this.readState.forget(action.path);
       throw modelRecoverableToolError([
         `${action.type} cannot modify ${action.path} because the file changed since it was read.`,
         "Call read_file again, inspect the current contents, then retry with a fresh edit or full-file write.",
@@ -1493,19 +1483,10 @@ export class AgentController {
     }
   }
 
-  private rememberReadFile(path: string, content: string, maxBytes: number, source: ReadFileSnapshot["source"]): void {
-    this.readFileState.set(readStateKey(path), {
-      content,
-      maxBytes,
-      readAt: Date.now(),
-      source
-    });
-  }
-
   private async rememberCurrentFile(path: string): Promise<void> {
     const current = await this.readWorkspaceFileIfExists(path, 48000);
     if (current.exists) {
-      this.rememberReadFile(path, current.content, 48000, "tool");
+      this.readState.remember(path, current.content, 48000, "tool");
     }
   }
 
@@ -1761,7 +1742,7 @@ export class AgentController {
       );
       transcriptResult = result.content;
       if (!result.isError && action.type === "read_file") {
-        this.rememberReadFile(action.path, readFileContentFromToolResult(transcriptResult, action.path), 48000, "tool");
+        this.readState.remember(action.path, readFileContentFromToolResult(transcriptResult, action.path), 48000, "tool");
       }
       await this.localHooks.run("postTool", action);
       return transcriptResult;
@@ -1838,7 +1819,7 @@ export class AgentController {
 
     if (action.type === "notebook_read") {
       transcriptResult = await this.notebooks.execute(action, this.runningAbort?.signal);
-      this.notebookReadState.add(readStateKey(action.path));
+      this.readState.markNotebookRead(action.path);
       await this.localHooks.run("postTool", action);
       return transcriptResult;
     }
@@ -1939,7 +1920,7 @@ export class AgentController {
       await this.recordCheckpoint(action, `Before writing ${action.path}.`);
       const changed = await this.diff.applyWriteFile(action);
       transcriptResult = `write_file ${action.path}\n\nWrote ${changed.join(", ")}.${await this.changeVerifier.verify(changed)}`;
-      this.rememberReadFile(action.path, action.content, Math.max(48000, Buffer.byteLength(action.content, "utf8")), "tool");
+      this.readState.remember(action.path, action.content, Math.max(48000, Buffer.byteLength(action.content, "utf8")), "tool");
       await this.localHooks.run("postTool", action);
       return transcriptResult;
     }
@@ -1977,7 +1958,7 @@ export class AgentController {
       await this.recordCheckpoint(action, `Before editing notebook ${action.path} cell ${action.index}.`);
       transcriptResult = await this.notebooks.execute(action, this.runningAbort?.signal);
       transcriptResult = `${transcriptResult}${await this.changeVerifier.verify([action.path])}`;
-      this.notebookReadState.add(readStateKey(action.path));
+      this.readState.markNotebookRead(action.path);
       await this.localHooks.run("postTool", action);
       return transcriptResult;
     }
@@ -2255,8 +2236,7 @@ export class AgentController {
     this.lastContextItems = [];
     this.mcp.reset();
     this.pinned.clear();
-    this.readFileState.clear();
-    this.notebookReadState.clear();
+    this.readState.clear();
     this.inspector.reset();
     this.lastTokenUsage = undefined;
     this.approvals.restore(snapshot.pendingApprovals);
@@ -2426,15 +2406,6 @@ function stripWorkspaceContext(content: string): string {
   return content.split("\n\nWorkspace context:\n\n", 1)[0];
 }
 
-
-function readStateKey(path: string): string {
-  return normalizeWorkspacePathInput(path).replace(/^\/+/, "").replace(/^\.\//, "");
-}
-
-function readFileContentFromToolResult(result: string, path: string): string {
-  const prefix = `read_file ${path}\n\n`;
-  return result.startsWith(prefix) ? result.slice(prefix.length) : result.replace(/^read_file[^\n]*\n\n/, "");
-}
 
 function summaryForInvocation(invocation: ToolInvocation): string {
   try {
