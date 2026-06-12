@@ -175,3 +175,27 @@ function trimToBudget(value: string, maxBytes: number): string {
 function byteLength(value: string): number {
   return Buffer.byteLength(value, "utf8");
 }
+
+// Human-readable label for a context item kind, used in context-usage reports.
+export function contextItemKindLabel(kind: ContextItem["kind"]): string {
+  switch (kind) {
+    case "activeFile":
+      return "Active file";
+    case "projectInstructions":
+      return "Project instructions";
+    case "memory":
+      return "Local memory";
+    case "mcpResource":
+      return "MCP resource";
+    case "selection":
+      return "Active selection";
+    case "openFile":
+      return "Open file";
+    case "fileTree":
+      return "Repo file list";
+    case "file":
+      return "Repo file";
+    case "workspaceIndex":
+      return "Repo index";
+  }
+}

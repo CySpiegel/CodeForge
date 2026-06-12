@@ -10,20 +10,18 @@ import { DoctorService } from "./doctorService";
 import { McpCoordinator } from "./mcpCoordinator";
 import { SessionService } from "./sessionService";
 import { ContextManager } from "./contextManager";
+import { SlashCommandRouter } from "./slashCommandRouter";
 // Re-exported so existing test imports (`from agentController`) keep working after the extraction.
 export { resolveConfiguredModelId } from "./modelResolver";
-import { errorMessage, isToolErrorText, toolError } from "./toolText";
+import { errorMessage, firstLines, isToolErrorText, toolError } from "./toolText";
 import { modelStreamIdleTimeoutMs, streamWithIdleTimeout } from "./modelStream";
 // Re-exported so existing test imports (`from agentController`) keep working after the extraction.
 export { buildGitArgv } from "./gitTool";
-import { ContextBuilder } from "../core/contextBuilder";
+import { ContextBuilder, contextItemKindLabel } from "../core/contextBuilder";
 import { ContextUsage, formatBytes } from "../core/contextUsage";
 import { DoctorCheck, formatDoctorReport, worstDoctorStatus } from "../core/doctor";
 import { EndpointCapabilityStore, isFreshCapability } from "../core/endpointCapabilityCache";
 import {
-  formatLocalCommandList,
-  formatLocalAgentList,
-  formatLocalSkillList,
   loadLocalCommands,
   loadLocalAgents,
   loadLocalHooks,
@@ -31,9 +29,7 @@ import {
   loadLocalSoul,
   LocalAgent,
   LocalHook,
-  localHookMatches,
-  renderLocalCommand,
-  renderLocalSkillPrompt
+  localHookMatches
 } from "../core/localExtensions";
 import { executeLocalReadOnlyTools, LocalToolProgress } from "../core/localToolExecutor";
 import { formatSkillsDigest } from "../core/skills";
@@ -84,12 +80,11 @@ import {
   WorkspacePort
 } from "../core/types";
 import { codeForgeTools, isApprovalAction, isConcurrencySafeAction, isLocalReadOnlyAction, isReadOnlyAction, ToolInvocation, toolSummary, validateAction } from "../core/toolRegistry";
-import { buildWorkspaceIndex } from "../core/workspaceIndex";
 import { DiffService } from "../adapters/diffService";
 import { TerminalRunner } from "../adapters/terminalRunner";
 import { CodeForgeConfigService, CodeForgeSettingsUpdate } from "../adapters/vscodeConfig";
 import { WorkerManager } from "./workerManager";
-import { findWorkerDefinition, isWorkerKind, workerCommandList } from "../core/workerAgents";
+import { findWorkerDefinition, isWorkerKind } from "../core/workerAgents";
 import { WorkerDefinition, WorkerSummary } from "../core/workerTypes";
 
 // UI contract types live in ./agentUiTypes. Imported here for internal use and re-exported so existing
@@ -243,6 +238,9 @@ export class AgentController {
   // Owns the self-improvement review + curator. The controller keeps only the run-loop signals it
   // reads (turn/iteration counts, error flag) and the transcript.
   private readonly learning: LearningCoordinator;
+  // Owns the entire /command surface (parsing, dispatch, report builders). Constructed last so it can
+  // bind to every collaborator above.
+  private readonly slash: SlashCommandRouter;
   // Did the most recent run surface an error? Read by the learning loop so it won't distil durable
   // lessons from a failed run.
   private lastRunErrored = false;
@@ -379,6 +377,51 @@ export class AgentController {
       emit: (event) => this.emit(event),
       publishState: () => this.publishState(),
       publishTranscript: () => this.publishTranscript()
+    });
+    this.slash = new SlashCommandRouter({
+      config,
+      workspace: this.workspace,
+      sessions: this.sessions,
+      models: this.models,
+      workers: this.workers,
+      memoryStore: this.memoryStore,
+      emit: (event) => this.emit(event),
+      reset: () => this.reset(),
+      cancel: () => this.cancel(),
+      resumeSession: (sessionId) => this.resumeSession(sessionId),
+      compactContext: (focus) => this.compactContext(focus),
+      undo: () => this.undo(),
+      runDoctor: () => this.runDoctor(),
+      runPrompt: (visiblePrompt, modelPrompt) => this.runPrompt(visiblePrompt, modelPrompt),
+      setAgentMode: (mode) => this.setAgentMode(mode),
+      setPermissionMode: (mode) => this.setPermissionMode(mode),
+      pinFile: (path) => this.pinFile(path),
+      pinActiveFile: () => this.pinActiveFile(),
+      unpinFile: (path) => this.unpinFile(path),
+      currentContextUsage: () => this.currentContextUsage(),
+      emitContextUsage: () => this.emitContextUsage(),
+      selectModel: (model) => this.selectModel(model),
+      refreshModels: () => this.refreshModels(),
+      handleCuratorCommand: (rest) => this.learning.handleCuratorCommand(rest),
+      handleMcpCommand: (rest) => this.mcp.handleCommand(rest),
+      showWorkerOutput: (workerId) => this.showWorkerOutput(workerId),
+      attachWorkerOutput: (workerId) => this.attachWorkerOutput(workerId),
+      stopWorker: (workerId) => this.stopWorker(workerId),
+      replaceMessages: (messages, reason, preserveContextItems) => this.replaceMessages(messages, reason, preserveContextItems),
+      publishTranscript: () => this.publishTranscript(),
+      publishState: () => this.publishState(),
+      clearApprovals: () => {
+        this.approvals.clear();
+        this.workerApprovalWaiters.clear();
+      },
+      emitInspector: () => this.emitInspector(),
+      capabilitySummaries: (profileId) => this.capabilitySummaries(profileId),
+      getMessages: () => this.messages,
+      getLastContextItems: () => this.lastContextItems,
+      getPinnedFiles: () => [...this.pinnedFiles],
+      getInspectorEntries: () => this.inspectorEntries,
+      getAuditEntries: () => this.auditEntries,
+      currentSignal: () => this.runningAbort?.signal
     });
   }
 
@@ -815,7 +858,7 @@ export class AgentController {
 
   async sendPrompt(prompt: string): Promise<void> {
     if (prompt.startsWith("/")) {
-      await this.handleSlashCommand(prompt);
+      await this.slash.handle(prompt);
       return;
     }
 
@@ -2678,245 +2721,12 @@ export class AgentController {
     };
   }
 
-  private async handleSlashCommand(rawPrompt: string): Promise<void> {
-    const [commandWithSlash, ...args] = rawPrompt.trim().split(/\s+/);
-    const command = commandWithSlash.toLowerCase();
-    const rest = args.join(" ");
-    const permissionMode = permissionModeFromSlashCommand(command);
-    if (permissionMode) {
-      await this.setPermissionModeFromSlash(permissionMode);
-      return;
-    }
-
-    switch (command) {
-      case "/clear":
-      case "/reset":
-      case "/new":
-        this.reset();
-        return;
-      case "/stop":
-      case "/cancel":
-        this.cancel();
-        return;
-      case "/history":
-      case "/sessions":
-      case "/chats":
-        await this.showSessionHistory();
-        return;
-      case "/resume":
-        await this.resumeSession(rest || undefined);
-        return;
-      case "/fork":
-        await this.forkSession(rest || undefined);
-        return;
-      case "/diff":
-        await this.showSessionDiff(rest || undefined);
-        return;
-      case "/export":
-        await this.exportSession(rest || undefined);
-        return;
-      case "/compact":
-        await this.compactContext(rest);
-        return;
-      case "/undo":
-        await this.undo();
-        return;
-      case "/curator":
-        await this.learning.handleCuratorCommand(rest);
-        return;
-      case "/context": {
-        this.emit({ type: "message", role: "system", text: this.formatContextReport() });
-        this.emitContextUsage();
-        return;
-      }
-      case "/doctor":
-        await this.runDoctor();
-        return;
-      case "/index":
-        await this.showWorkspaceIndex();
-        return;
-      case "/pin":
-        if (rest) {
-          await this.pinFile(rest);
-        } else {
-          await this.pinActiveFile();
-        }
-        return;
-      case "/unpin":
-        await this.unpinFile(rest || undefined);
-        return;
-      case "/pins":
-        this.emit({ type: "message", role: "system", text: this.formatPinnedFilesReport() });
-        return;
-      case "/inspect":
-      case "/inspector":
-        this.emitInspector();
-        this.emit({ type: "message", role: "system", text: this.formatInspectorReport() });
-        return;
-      case "/audit":
-        this.emitInspector();
-        this.emit({ type: "message", role: "system", text: this.formatAuditReport() });
-        return;
-      case "/capabilities":
-        this.emit({ type: "message", role: "system", text: await this.formatCapabilityReport() });
-        return;
-      case "/commands":
-        await this.showLocalCommands();
-        return;
-      case "/mcp":
-        await this.mcp.handleCommand(rest);
-        return;
-      case "/workers":
-        this.showWorkers();
-        return;
-      case "/worker":
-        await this.handleWorkerCommand(rest);
-        return;
-      case "/agents":
-        await this.showLocalAgents();
-        return;
-      case "/review":
-        await this.runReviewCommand(rest);
-        return;
-      case "/skills":
-        await this.showLocalSkills();
-        return;
-      case "/skill":
-        await this.handleSkillCommand(rest);
-        return;
-      case "/memory":
-        await this.handleMemoryCommand(rest);
-        return;
-      case "/config":
-      case "/settings":
-        this.emit({ type: "openSettings" });
-        await this.publishState();
-        return;
-      case "/model":
-      case "/models":
-        if (rest) {
-          await this.selectModel(rest);
-          this.emit({ type: "message", role: "system", text: `Model set to ${rest}.` });
-        } else {
-          await this.refreshModels();
-          this.emit({ type: "message", role: "system", text: this.formatModelReport() });
-        }
-        return;
-      case "/agent":
-      case "/auto":
-        await this.setAgentMode("agent");
-        if (rest) {
-          await this.runPrompt(rest, rest);
-        }
-        return;
-      case "/ask":
-        await this.setAgentMode("ask");
-        if (rest) {
-          await this.runPrompt(rest, rest);
-        }
-        return;
-      case "/plan":
-        await this.setAgentMode("plan");
-        if (rest) {
-          await this.runPrompt(rest, rest);
-        }
-        return;
-      default:
-        if (await this.tryLocalSlashCommand(command.slice(1), rest, rawPrompt.trim())) {
-          return;
-        }
-        this.emit({
-          type: "message",
-          role: "system",
-          text: `Unknown command ${command}. Available commands: /new, /compact, /undo, /curator, /context, /doctor, /index, /pin, /unpin, /pins, /inspect, /audit, /capabilities, /commands, /mcp, /workers, /worker, /agents, /review, /skills, /skill, /memory, /clear, /stop, /history, /resume, /fork, /diff, /export, /model, /models, /agent, /ask, /plan, /manual, /smart, /full-auto, /config.`
-        });
-    }
-  }
-
-  private async setPermissionModeFromSlash(mode: PermissionMode): Promise<void> {
-    // setPermissionMode already emits the "Permission mode set to ..." confirmation from the
-    // persisted value, so the slash path just delegates.
-    await this.setPermissionMode(mode);
-  }
-
-  private async showLocalCommands(): Promise<void> {
-    const commands = await loadLocalCommands(this.workspace);
-    this.emit({ type: "message", role: "system", text: formatLocalCommandList(commands) });
-  }
-
-  private async runReviewCommand(scope: string): Promise<void> {
-    const target = scope.trim() || "the current branch, workspace changes, or relevant repo context";
-    await this.runPrompt(`/review ${scope}`.trim(), reviewCommandPrompt(target));
-  }
-
   private emitWorkerStarted(worker: WorkerSummary): void {
     this.emit({
       type: "message",
       role: "system",
       text: `${worker.label} worker started: ${worker.id}\n\nUse /worker output ${worker.id} to view its transcript or /worker stop ${worker.id} to stop it.`
     });
-  }
-
-  private showWorkers(): void {
-    const workers = this.workers.list();
-    this.emit({ type: "workers", workers });
-    this.emit({ type: "message", role: "system", text: formatWorkerList(workers) });
-  }
-
-  private async handleWorkerCommand(rest: string): Promise<void> {
-    const [subcommandRaw, ...tail] = rest.trim().split(/\s+/);
-    const subcommand = subcommandRaw?.toLowerCase() || "list";
-    switch (subcommand) {
-      case "list":
-      case "status":
-        this.showWorkers();
-        return;
-      case "output":
-      case "show":
-      case "open": {
-        const workerId = tail[0];
-        if (!workerId) {
-          this.emit({ type: "message", role: "system", text: "Usage: /worker output <worker-id>" });
-          return;
-        }
-        this.showWorkerOutput(workerId);
-        return;
-      }
-      case "attach": {
-        const workerId = tail[0];
-        if (!workerId) {
-          this.emit({ type: "message", role: "system", text: "Usage: /worker attach <worker-id>" });
-          return;
-        }
-        this.attachWorkerOutput(workerId);
-        return;
-      }
-      case "stop":
-      case "cancel": {
-        const workerId = tail[0];
-        if (!workerId) {
-          this.emit({ type: "message", role: "system", text: "Usage: /worker stop <worker-id>" });
-          return;
-        }
-        this.stopWorker(workerId);
-        return;
-      }
-      case "help":
-        this.emit({ type: "message", role: "system", text: workerCommandList() });
-        return;
-      default:
-        this.emit({ type: "message", role: "system", text: workerCommandList() });
-    }
-  }
-
-  private async showLocalSkills(): Promise<void> {
-    const skills = await loadLocalSkills(this.workspace);
-    this.emit({ type: "message", role: "system", text: formatLocalSkillList(skills) });
-  }
-
-  private async showLocalAgents(): Promise<void> {
-    const agents = await loadLocalAgents(this.workspace);
-    this.emit({ type: "message", role: "system", text: formatLocalAgentList(agents) });
   }
 
   private async executeSpawnAgentAction(action: Extract<AgentAction, { readonly type: "spawn_agent" }>): Promise<string> {
@@ -2955,60 +2765,6 @@ export class AgentController {
     return localAgentWorkerDefinition(agent);
   }
 
-  private async handleSkillCommand(rest: string): Promise<void> {
-    const [firstRaw, ...tail] = rest.trim().split(/\s+/);
-    const first = firstRaw?.toLowerCase() || "";
-    if (!first || first === "list") {
-      await this.showLocalSkills();
-      return;
-    }
-
-    const name = first === "use" ? tail.shift()?.toLowerCase() : first;
-    const task = (first === "use" ? tail : rest.trim().split(/\s+/).slice(1)).join(" ").trim();
-    if (!name) {
-      this.emit({ type: "message", role: "system", text: "Usage: /skill <name> <task> or /skill list." });
-      return;
-    }
-
-    const skills = await loadLocalSkills(this.workspace);
-    const skill = skills.find((item) => item.name.toLowerCase() === name);
-    if (!skill) {
-      this.emit({ type: "message", role: "system", text: `No local CodeForge skill named ${name}.\n\n${formatLocalSkillList(skills)}` });
-      return;
-    }
-
-    await this.runPrompt(`/skill ${skill.name}${task ? ` ${task}` : ""}`, renderLocalSkillPrompt(skill, task));
-  }
-
-  private async tryLocalSlashCommand(name: string, args: string, visiblePrompt: string): Promise<boolean> {
-    if (!name) {
-      return false;
-    }
-    const commands = await loadLocalCommands(this.workspace);
-    const command = commands.find((item) => item.name.toLowerCase() === name.toLowerCase());
-    if (!command) {
-      return false;
-    }
-    const skills = command.skills.length > 0 ? await loadLocalSkills(this.workspace) : [];
-    await this.runPrompt(visiblePrompt, renderLocalCommand(command, args, skills));
-    return true;
-  }
-
-  private async showSessionHistory(): Promise<void> {
-    if (!this.sessionStore) {
-      this.emit({ type: "message", role: "system", text: "Session history is not available in this environment." });
-      return;
-    }
-
-    const sessions = await this.sessions.listSummaries(10);
-    if (sessions.length === 0) {
-      this.emit({ type: "message", role: "system", text: "No saved CodeForge sessions." });
-      return;
-    }
-
-    this.emit({ type: "sessions", sessions });
-  }
-
   async resumeSession(sessionId: string | undefined): Promise<void> {
     if (!this.sessionStore) {
       this.emit({ type: "message", role: "system", text: "Session resume is not available in this environment." });
@@ -3024,244 +2780,6 @@ export class AgentController {
     this.applySession(snapshot);
     await this.publishTranscript();
     this.emit({ type: "message", role: "system", text: `Resumed session ${snapshot.id}.` });
-  }
-
-  private async forkSession(sessionId: string | undefined): Promise<void> {
-    if (!this.sessionStore) {
-      this.emit({ type: "message", role: "system", text: "Session fork is not available in this environment." });
-      return;
-    }
-
-    const source = sessionId ? await this.sessionStore.read(sessionId) : undefined;
-    if (sessionId && !source) {
-      this.emit({ type: "error", text: `No saved CodeForge session found for ${sessionId}.` });
-      return;
-    }
-    const messages = source ? source.messages : this.messages;
-    if (messages.length === 0) {
-      this.emit({ type: "message", role: "system", text: "There is no session context to fork yet." });
-      return;
-    }
-
-    this.approvals.clear();
-    this.workerApprovalWaiters.clear();
-    await this.sessions.startNewSession(`Fork of ${source?.title ?? "CodeForge session"}`);
-    this.replaceMessages(messages, "restore");
-    await this.publishTranscript();
-    this.emit({ type: "message", role: "system", text: `Forked session${source ? ` ${source.id}` : ""} into a new local session.` });
-  }
-
-  private async showSessionDiff(sessionId: string | undefined): Promise<void> {
-    if (!this.sessionStore) {
-      this.emit({ type: "message", role: "system", text: "Session diff history is not available in this environment." });
-      return;
-    }
-
-    const snapshot = await this.sessions.resolveStored(sessionId);
-    if (!snapshot) {
-      this.emit({ type: "error", text: sessionId ? `No saved CodeForge session found for ${sessionId}.` : "No saved CodeForge session found." });
-      return;
-    }
-
-    const checkpoints = snapshot.records.filter(isCheckpointRecord);
-    if (checkpoints.length === 0) {
-      this.emit({ type: "message", role: "system", text: `No edit or command checkpoints recorded for ${snapshot.id}.` });
-      return;
-    }
-
-    const lines = checkpoints.map((record, index) => {
-      return `${index + 1}. ${new Date(record.createdAt).toLocaleString()} | ${record.summary} | ${toolSummary(record.action)}`;
-    });
-    this.emit({ type: "message", role: "system", text: `Checkpoints for ${snapshot.id}:\n${lines.join("\n")}` });
-  }
-
-  private async exportSession(sessionId: string | undefined): Promise<void> {
-    if (!this.sessionStore) {
-      this.emit({ type: "message", role: "system", text: "Session export is not available in this environment." });
-      return;
-    }
-
-    const snapshot = await this.sessions.resolveStored(sessionId);
-    if (!snapshot) {
-      this.emit({ type: "error", text: sessionId ? `No saved CodeForge session found for ${sessionId}.` : "No saved CodeForge session found." });
-      return;
-    }
-
-    const exportedPath = await this.sessionStore.exportSession(snapshot.id);
-    if (!exportedPath) {
-      this.emit({ type: "error", text: `Failed to export ${snapshot.id}.` });
-      return;
-    }
-    this.emit({ type: "message", role: "system", text: `Exported ${snapshot.id} to ${exportedPath}.` });
-  }
-
-  private formatContextReport(): string {
-    const usage = this.currentContextUsage();
-    const lines = [
-      `Context usage: ${usage.label} (${usage.percent}%).`,
-      "",
-      "Breakdown:",
-      ...usage.breakdown.map((part) => `- ${part.label}: ${formatBytes(part.bytes)} (${part.percent}%)`)
-    ];
-
-    if (this.lastContextItems.length > 0) {
-      lines.push("", "Last attached local context:");
-      for (const item of this.lastContextItems) {
-        lines.push(`- ${contextItemKindLabel(item.kind)}: ${item.label} (${formatBytes(Buffer.byteLength(item.content, "utf8"))})`);
-      }
-    } else {
-      lines.push("", "Last attached local context: none yet in this session.");
-    }
-
-    return lines.join("\n");
-  }
-
-  private async showWorkspaceIndex(): Promise<void> {
-    try {
-      const index = await buildWorkspaceIndex(this.workspace, {
-        maxFiles: 500,
-        maxAnalyzedFiles: 80,
-        maxBytesPerFile: 16000
-      }, this.runningAbort?.signal);
-      this.emit({
-        type: "message",
-        role: "system",
-        text: index ? `Repo index:\n\n${index.content}` : "Repo index:\n\nNo repo files found."
-      });
-    } catch (error) {
-      this.emit({ type: "error", text: `Failed to build workspace index: ${errorMessage(error)}` });
-    }
-  }
-
-  private formatPinnedFilesReport(): string {
-    const pinned = [...this.pinnedFiles];
-    return pinned.length === 0
-      ? "Pinned context files: none. The open repo folder is still used automatically; use /pin <path> only when you want to force a specific file into every request."
-      : `Pinned context files:\n${pinned.map((path) => `- ${path}`).join("\n")}`;
-  }
-
-  private formatInspectorReport(): string {
-    if (this.inspectorEntries.length === 0) {
-      return "Run inspector:\n\nNo run events recorded yet.";
-    }
-    const lines = this.inspectorEntries.slice(0, 40).map((entry) => {
-      const when = new Date(entry.createdAt).toLocaleTimeString();
-      return `- ${when} [${entry.level}] ${entry.category}: ${entry.summary}${entry.detail ? `\n  ${firstLines(entry.detail, 4).replace(/\n/g, "\n  ")}` : ""}`;
-    });
-    return `Run inspector:\n${lines.join("\n")}`;
-  }
-
-  private formatAuditReport(): string {
-    if (this.auditEntries.length === 0) {
-      return "Permission audit:\n\nNo permission decisions recorded yet.";
-    }
-    const lines = this.auditEntries.slice(0, 60).map((entry) => {
-      const when = new Date(entry.createdAt).toLocaleTimeString();
-      return `- ${when} ${entry.action} ${entry.outcome} (${entry.behavior}/${entry.source}) - ${entry.reason}`;
-    });
-    return `Permission audit:\n${lines.join("\n")}`;
-  }
-
-  private async formatCapabilityReport(): Promise<string> {
-    const profileId = this.config.getActiveProfileId();
-    const entries = await this.capabilitySummaries(profileId);
-    if (entries.length === 0) {
-      return "Endpoint capability cache:\n\nNo cached model capabilities yet. Run /doctor or send a request to probe the selected model.";
-    }
-    const lines = entries.map((entry) => {
-      const details = [
-        entry.nativeToolCalls ? "native tools" : "json fallback",
-        entry.streaming ? "streaming" : "non-streaming",
-        entry.contextLength ? `${entry.contextLength.toLocaleString("en-US")} ctx` : undefined,
-        entry.supportsReasoning ? "thinking" : undefined
-      ].filter((item): item is string => Boolean(item)).join(", ");
-      return `- ${entry.model} | ${details} | checked ${new Date(entry.checkedAt).toLocaleString()}`;
-    });
-    return `Endpoint capability cache:\n${lines.join("\n")}`;
-  }
-
-  private formatModelReport(): string {
-    const activeProfileId = this.config.getActiveProfileId();
-    const profile = this.config.getProfiles().find((item) => item.id === activeProfileId);
-    const inspection = this.models.getInspection(activeProfileId);
-    const selectedModel = profile ? this.models.selectedModelFor(profile, inspection) : inspection?.models[0]?.id || "";
-    const lines = [
-      `Active model: ${selectedModel || "(not configured)"}.`,
-      inspection?.backendLabel ? `Detected backend: ${inspection.backendLabel}.` : undefined,
-      "",
-      "Available models:"
-    ].filter((line): line is string => line !== undefined);
-
-    if (!inspection || inspection.models.length === 0) {
-      lines.push("- No models found. Check the OpenAI API endpoint settings.");
-      return lines.join("\n");
-    }
-
-    for (const model of inspection.models) {
-      const details = [
-        model.contextLength ? `${model.contextLength.toLocaleString("en-US")} ctx` : undefined,
-        model.maxOutputTokens ? `${model.maxOutputTokens.toLocaleString("en-US")} output` : undefined,
-        model.supportsReasoning ? "thinking" : undefined
-      ].filter((item): item is string => Boolean(item));
-      const marker = model.id === selectedModel ? "*" : "-";
-      lines.push(`${marker} ${model.id}${details.length > 0 ? ` (${details.join(", ")})` : ""}`);
-    }
-    lines.push("", "Use `/models` to pick from the active endpoint or `/model <model-id>` to switch directly.");
-    return lines.join("\n");
-  }
-
-  private async handleMemoryCommand(rest: string): Promise<void> {
-    if (!this.memoryStore) {
-      this.emit({ type: "message", role: "system", text: "Local memory is not available in this environment." });
-      return;
-    }
-
-    const [subcommandRaw, ...args] = rest.trim().split(/\s+/);
-    const subcommand = subcommandRaw?.toLowerCase() || "list";
-    const value = args.join(" ").trim();
-
-    switch (subcommand) {
-      case "add":
-      case "remember": {
-        if (!value) {
-          this.emit({ type: "message", role: "system", text: "Usage: /memory add <local instruction or preference>" });
-          return;
-        }
-        const memory = await this.memoryStore.add(value);
-        this.emit({ type: "message", role: "system", text: `Saved local memory ${memory.id}.` });
-        return;
-      }
-      case "remove":
-      case "forget":
-      case "delete": {
-        if (!value) {
-          this.emit({ type: "message", role: "system", text: "Usage: /memory remove <memory-id>" });
-          return;
-        }
-        const removed = await this.memoryStore.remove(value);
-        this.emit({ type: "message", role: "system", text: removed ? `Removed local memory ${value}.` : `No local memory found for ${value}.` });
-        return;
-      }
-      case "clear":
-        await this.memoryStore.clear();
-        this.emit({ type: "message", role: "system", text: "Cleared all local CodeForge memories." });
-        return;
-      case "list": {
-        const memories = await this.memoryStore.list();
-        if (memories.length === 0) {
-          this.emit({ type: "message", role: "system", text: "No local CodeForge memories are saved." });
-          return;
-        }
-        const lines = memories.map((memory) => {
-          const scope = memory.scope === "agent" && memory.namespace ? `agent:${memory.namespace}` : memory.scope ?? "workspace";
-          return `${memory.id} | ${scope} | ${new Date(memory.createdAt).toLocaleString()} | ${memory.text}`;
-        });
-        this.emit({ type: "message", role: "system", text: `Local CodeForge memories:\n${lines.join("\n")}` });
-        return;
-      }
-      default:
-        this.emit({ type: "message", role: "system", text: "Usage: /memory list, /memory add <text>, /memory remove <id>, or /memory clear." });
-    }
   }
 
   private async getState(): Promise<AgentUiState> {
@@ -3402,23 +2920,6 @@ function toAgentModelSummary(model: ModelInfo): AgentModelSummary {
 }
 
 
-function formatWorkerList(workers: readonly WorkerSummary[]): string {
-  if (workers.length === 0) {
-    return `${workerCommandList()}\n\nNo workers have run in this chat session.`;
-  }
-  const lines = workers.map((worker) => {
-    const detail = [
-      worker.model,
-      worker.toolUseCount > 0 ? `${worker.toolUseCount} tools` : undefined,
-      worker.tokenCount > 0 ? `${worker.tokenCount.toLocaleString("en-US")} tokens` : undefined,
-      worker.filesInspected.length > 0 ? `${worker.filesInspected.length} files` : undefined
-    ].filter((item): item is string => Boolean(item)).join(", ");
-    const summary = worker.error ?? worker.summary ?? worker.prompt;
-    return `- ${worker.id} | ${worker.label} | ${worker.status}${detail ? ` | ${detail}` : ""}\n  ${summary}`;
-  });
-  return `Workers:\n${lines.join("\n")}\n\nUse /worker output <id> to view a transcript or /worker stop <id> to stop a running worker.`;
-}
-
 function formatQuestionAnswers(questions: readonly UserQuestion[], answers: Readonly<Record<string, string>>): string {
   const lines = questions.map((question) => `- ${question.question} -> ${answers[question.question]}`);
   return `ask_user_question\n\nUser answered CodeForge's question(s):\n${lines.join("\n")}\n\nContinue with these answers in mind.`;
@@ -3432,9 +2933,6 @@ function approvalPermissionDecision(approval: ApprovalRequest): PermissionDecisi
   };
 }
 
-function firstLines(value: string, limit: number): string {
-  return value.split(/\r?\n/).slice(0, limit).join("\n");
-}
 
 function uniqueStrings(values: readonly string[] | undefined): readonly string[] {
   return [...new Set((values ?? []).map((value) => value.trim()).filter(Boolean))];
@@ -3610,66 +3108,6 @@ function stripWorkspaceContext(content: string): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function isCheckpointRecord(record: SessionRecord): record is Extract<SessionRecord, { readonly type: "checkpoint" }> {
-  return record.type === "checkpoint";
-}
-
-function contextItemKindLabel(kind: ContextItem["kind"]): string {
-  switch (kind) {
-    case "activeFile":
-      return "Active file";
-    case "projectInstructions":
-      return "Project instructions";
-    case "memory":
-      return "Local memory";
-    case "mcpResource":
-      return "MCP resource";
-    case "selection":
-      return "Active selection";
-    case "openFile":
-      return "Open file";
-    case "fileTree":
-      return "Repo file list";
-    case "file":
-      return "Repo file";
-    case "workspaceIndex":
-      return "Repo index";
-  }
-}
-
-function reviewCommandPrompt(scope: string): string {
-  return [
-    "You are an expert code reviewer working inside VS Code.",
-    `Review: ${scope}`,
-    "",
-    "Use repo read/search/diagnostic tools when evidence is not already available.",
-    "Do not edit files, create files, run terminal commands, or launch workers unless the user explicitly asks for implementation or verification.",
-    "Prioritize correctness bugs, regressions, unsafe assumptions, missing tests, and behavior that conflicts with the user request.",
-    "Lead with findings. Include concrete file paths and line references when available. If there are no concrete findings, say that clearly and list any remaining test gaps."
-  ].join("\n");
-}
-
-function permissionModeFromSlashCommand(command: string): PermissionMode | undefined {
-  switch (command) {
-    case "/manual":
-    case "/read-only":
-    case "/readonly":
-      return "manual";
-    case "/smart":
-    case "/default":
-    case "/accept-edits":
-    case "/acceptedits":
-      return "smart";
-    case "/full-auto":
-    case "/fullauto":
-    case "/workspace-trusted":
-    case "/workspacetrusted":
-      return "fullAuto";
-    default:
-      return undefined;
-  }
 }
 
 function agentModeLabel(mode: AgentMode): string {

@@ -14,6 +14,11 @@ export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+// Keep only the first `limit` lines of a string (for compact inspector/log previews).
+export function firstLines(value: string, limit: number): string {
+  return value.split(/\r?\n/).slice(0, limit).join("\n");
+}
+
 // Parse a tool call's JSON arguments into a plain object, tolerating malformed input (returns {}).
 export function safeParseArgs(json: string): Record<string, unknown> {
   try {

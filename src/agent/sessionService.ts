@@ -106,6 +106,14 @@ export class SessionService {
     return this.deps.store?.readLatest();
   }
 
+  async read(id: string): Promise<SessionSnapshot | undefined> {
+    return this.deps.store?.read(id);
+  }
+
+  async exportSession(id: string): Promise<string | undefined> {
+    return this.deps.store?.exportSession(id);
+  }
+
   // Load a specific session, or the current one, or the latest — used by resume/fork/diff.
   async resolveStored(sessionId: string | undefined): Promise<SessionSnapshot | undefined> {
     const store = this.deps.store;
