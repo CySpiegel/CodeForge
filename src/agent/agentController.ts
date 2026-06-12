@@ -12,6 +12,7 @@ import { SessionService } from "./sessionService";
 import { ContextManager } from "./contextManager";
 import { InspectorLog } from "./inspectorLog";
 import { MemoryCommandsService } from "./memoryCommands";
+import { PinnedFiles } from "./pinnedFiles";
 import { ProviderGateway } from "./providerGateway";
 import { TaskBoard } from "./taskBoard";
 import { UndoManager } from "./undoManager";
@@ -219,7 +220,8 @@ export class AgentController {
   // Owns the model-facing task board (task_create/update/list/get) + its session persistence/restore.
   private readonly taskBoard: TaskBoard;
   private lastContextItems: readonly ContextItem[] = [];
-  private pinnedFiles = new Set<string>();
+  // Owns the user-pinned context files (the /pin surface + the set read into every request).
+  private readonly pinned: PinnedFiles;
   private lastTokenUsage: TokenUsage | undefined;
   private runningAbort: AbortController | undefined;
   private continueAfterCurrentRun = false;
@@ -282,6 +284,11 @@ export class AgentController {
     this.memoryCommands = new MemoryCommandsService({
       memoryStore,
       recordInspector: (level, category, summary, detail) => this.inspector.record(level, category, summary, detail),
+      emit: (event) => this.emit(event),
+      publishState: () => this.publishState()
+    });
+    this.pinned = new PinnedFiles({
+      workspace,
       emit: (event) => this.emit(event),
       publishState: () => this.publishState()
     });
@@ -441,7 +448,7 @@ export class AgentController {
       capabilitySummaries: (profileId) => this.providerGateway.capabilitySummaries(profileId),
       getMessages: () => this.messages,
       getLastContextItems: () => this.lastContextItems,
-      getPinnedFiles: () => [...this.pinnedFiles],
+      getPinnedFiles: () => this.pinned.list(),
       getInspectorEntries: () => this.inspector.inspectorLog(),
       getAuditEntries: () => this.inspector.auditLog(),
       currentSignal: () => this.runningAbort?.signal
@@ -468,7 +475,7 @@ export class AgentController {
         this.taskBoard.reset();
         this.lastContextItems = [];
         this.mcp.reset();
-        this.pinnedFiles.clear();
+        this.pinned.clear();
         this.readFileState.clear();
         this.notebookReadState.clear();
         this.inspector.reset();
@@ -644,42 +651,17 @@ export class AgentController {
     this.emit({ type: "message", role: "system", text: `Permission mode set to ${permissionModeLabel(applied)}.` });
   }
 
+  // Public /pin facade — view provider + slash router call these by name; logic lives in PinnedFiles.
   async pinActiveFile(): Promise<void> {
-    const active = await this.workspace.getActiveTextDocument(1);
-    if (!active || active.label.startsWith("Unsaved active")) {
-      this.emit({ type: "error", text: "Focus a repo file to pin it, or use /pin <repo-relative path>." });
-      return;
-    }
-    await this.pinFile(active.label);
+    await this.pinned.pinActive();
   }
 
   async pinFile(path: string): Promise<void> {
-    const normalized = path.trim().replace(/^Pinned:\s*/, "");
-    if (!normalized) {
-      this.emit({ type: "error", text: "Provide a repo-relative file path to pin." });
-      return;
-    }
-    try {
-      await this.workspace.readTextFile(normalized, 1);
-      this.pinnedFiles.add(normalized);
-      this.emit({ type: "status", text: `Pinned ${normalized} for future context.` });
-      await this.publishState();
-    } catch (error) {
-      this.emit({ type: "error", text: `Could not pin ${normalized}: ${errorMessage(error)}` });
-    }
+    await this.pinned.pin(path);
   }
 
   async unpinFile(path?: string): Promise<void> {
-    if (!path || path.trim().toLowerCase() === "all") {
-      this.pinnedFiles.clear();
-      this.emit({ type: "status", text: "Cleared pinned context files." });
-      await this.publishState();
-      return;
-    }
-    const normalized = path.trim().replace(/^Pinned:\s*/, "");
-    const removed = this.pinnedFiles.delete(normalized);
-    this.emit({ type: removed ? "status" : "error", text: removed ? `Unpinned ${normalized}.` : `${normalized} was not pinned.` });
-    await this.publishState();
+    await this.pinned.unpin(path);
   }
 
   // Public memory-panel facade — the view provider and tests call these by name; logic lives in
@@ -771,7 +753,7 @@ export class AgentController {
     this.taskBoard.reset();
     this.lastContextItems = [];
     this.mcp.reset();
-    this.pinnedFiles.clear();
+    this.pinned.clear();
     this.readFileState.clear();
     this.notebookReadState.clear();
     this.inspector.reset();
@@ -873,7 +855,7 @@ export class AgentController {
       const provider = await this.providerGateway.createProvider();
       const model = await this.models.resolveModel(provider, abort.signal);
       await this.context.autoCompactIfNeeded(provider, model, abort, "before request");
-      const context = new ContextBuilder(this.workspace, this.effectiveContextLimits(), { mcpResources: this.mcp.getContextItems(), pinnedFiles: [...this.pinnedFiles] });
+      const context = new ContextBuilder(this.workspace, this.effectiveContextLimits(), { mcpResources: this.mcp.getContextItems(), pinnedFiles: this.pinned.list() });
       const contextItems = await context.build(abort.signal);
       const contextText = context.format(contextItems);
       this.lastContextItems = contextItems;
@@ -2438,7 +2420,7 @@ export class AgentController {
     this.taskBoard.restoreFromSessionRecords(snapshot.records);
     this.lastContextItems = [];
     this.mcp.reset();
-    this.pinnedFiles.clear();
+    this.pinned.clear();
     this.readFileState.clear();
     this.notebookReadState.clear();
     this.inspector.reset();
@@ -2587,7 +2569,7 @@ export class AgentController {
     return {
       activeFile: active && !active.label.startsWith("Unsaved active") ? active.label : undefined,
       workspaceReady,
-      pinnedFiles: [...this.pinnedFiles]
+      pinnedFiles: this.pinned.list()
     };
   }
 
