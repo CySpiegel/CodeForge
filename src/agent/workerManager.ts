@@ -18,6 +18,7 @@ import {
 } from "../core/types";
 import { isLocalReadOnlyAction, toolDefinitions, ToolInvocation, validateAction } from "../core/toolRegistry";
 import { findWorkerDefinition, isWorkerKind, workerDefinitions } from "../core/workerAgents";
+import { toolError } from "./toolText";
 import { WorkerDefinition, WorkerKind, WorkerSessionEvent, WorkerStatus, WorkerSummary, WorkerTranscriptEntry } from "../core/workerTypes";
 
 export interface WorkerManagerOptions {
@@ -789,9 +790,6 @@ function trackResultPaths(task: WorkerTask, content: string): void {
   }
 }
 
-function toolError(message: string): string {
-  return `<tool_use_error>Error: ${message}</tool_use_error>`;
-}
 
 function readFileContentFromToolResult(result: string, path: string): string {
   const prefix = `read_file ${path}\n\n`;

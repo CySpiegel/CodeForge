@@ -4,6 +4,7 @@ import { ApprovalQueue } from "../core/approvals";
 import { CodeIntelPort, UnavailableCodeIntelPort } from "../core/codeIntel";
 import { GitPort, UnavailableGitPort } from "../core/git";
 import { runGitOperation, unsafeGitArgsMessage } from "./gitTool";
+import { isToolErrorText, safeParseArgs, toolError } from "./toolText";
 import { modelStreamIdleTimeoutMs, streamWithIdleTimeout } from "./modelStream";
 import { describeMemoryWrite, learningNotice, ReviewToolOutcome, reviewActionsFromText, reviewWriteSucceeded, summarizeReviewActions } from "./learningReview";
 // Re-exported so existing test imports (`from agentController`) keep working after the extraction.
@@ -4988,14 +4989,6 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function toolError(message: string): string {
-  return `<tool_use_error>Error: ${message}</tool_use_error>`;
-}
-
-function isToolErrorText(text: string): boolean {
-  return text.includes("<tool_use_error>");
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -5268,15 +5261,6 @@ const readOnlyToolNames = new Set([
 
 const maxBackgroundReviewIterations = 6;
 const maxCuratorIterations = 24;
-
-function safeParseArgs(json: string): Record<string, unknown> {
-  try {
-    const parsed = JSON.parse(json);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
-  } catch {
-    return {};
-  }
-}
 
 // Heuristic: does this endpoint error mean the prompt exceeded the model's context window? Covers the
 // common phrasings from vLLM, llama.cpp, LM Studio, LiteLLM, and OpenAI-style gateways.
