@@ -12,6 +12,7 @@ import { SessionService } from "./sessionService";
 import { ContextManager } from "./contextManager";
 import { ChangeVerifier } from "./changeVerifier";
 import { InspectorLog } from "./inspectorLog";
+import { ToolSchemaService } from "./toolSchemaService";
 import { MemoryCommandsService } from "./memoryCommands";
 import { PinnedFiles } from "./pinnedFiles";
 import { ProviderGateway } from "./providerGateway";
@@ -81,20 +82,17 @@ import {
   ToolDefinition,
   WorkspacePort
 } from "../core/types";
-import { codeForgeTools, isApprovalAction, isConcurrencySafeAction, isInternalAutomationAction, isInternalReadAction, isInternalStateAction, isLocalReadOnlyAction, isReadOnlyAction, ToolInvocation, toolSummary, validateAction } from "../core/toolRegistry";
+import { isApprovalAction, isConcurrencySafeAction, isInternalAutomationAction, isInternalReadAction, isInternalStateAction, isLocalReadOnlyAction, isReadOnlyAction, ToolInvocation, toolSummary, validateAction } from "../core/toolRegistry";
 import { formatCommandResult, hookFailureStatus } from "./commandResultText";
 import {
+  coreAgentToolNames,
+  coreReadOnlyToolNames,
   discoveredCodeForgeToolNames,
   discoveredMcpToolNames,
-  formatMcpToolSchemaSearchResult,
   mcpFunctionName,
   McpToolBinding,
   mcpToolParameters,
   parseNativeToolCall,
-  scoreToolSearch,
-  searchCodeForgeTools,
-  selectedToolNames,
-  ToolSchemaSearchResult,
   toolDefinitionsForAgentMode
 } from "../core/toolDiscovery";
 import { DiffService } from "../adapters/diffService";
@@ -142,38 +140,6 @@ interface PendingContinuation {
 
 type QueuedWork = QueuedPrompt | QueuedCompact;
 
-const coreAgentToolNames = new Set([
-  "list_files",
-  "glob_files",
-  "read_file",
-  "search_text",
-  "grep_text",
-  "list_diagnostics",
-  "tool_search",
-  "tool_list",
-  "ask_user_question",
-  "spawn_agent",
-  "worker_output",
-  "open_diff",
-  "propose_patch",
-  "write_file",
-  "edit_file",
-  "run_command"
-]);
-
-const coreReadOnlyToolNames = new Set([
-  "list_files",
-  "glob_files",
-  "read_file",
-  "search_text",
-  "grep_text",
-  "list_diagnostics",
-  "tool_search",
-  "tool_list",
-  "ask_user_question",
-  "worker_output"
-]);
-
 interface InvalidNativeToolCall {
   readonly toolCall: ToolCall;
   readonly message: string;
@@ -219,6 +185,8 @@ export class AgentController {
   private readonly systemPrompt: SystemPromptBuilder;
   // Post-edit diagnostics footer for changed files.
   private readonly changeVerifier: ChangeVerifier;
+  // Implements the tool_list / tool_search tools (catalog + schema search).
+  private readonly toolSchemas: ToolSchemaService;
   private readonly readFileState = new Map<string, ReadFileSnapshot>();
   private readonly notebookReadState = new Set<string>();
   private messages: ChatMessage[] = [];
@@ -305,6 +273,12 @@ export class AgentController {
     this.changeVerifier = new ChangeVerifier({
       getDiagnostics: (path, limit, signal) => this.workspace.getDiagnostics(path, limit, signal),
       recordInspector: (level, category, summary, detail) => this.inspector.record(level, category, summary, detail),
+      signal: () => this.runningAbort?.signal
+    });
+    this.toolSchemas = new ToolSchemaService({
+      getAgentMode: () => this.config.getAgentMode(),
+      getMcpServers: () => this.config.getMcpServers(),
+      getNetworkPolicy: () => this.config.getNetworkPolicy(),
       signal: () => this.runningAbort?.signal
     });
     this.models = new ModelResolver({
@@ -1750,87 +1724,6 @@ export class AgentController {
     void this.continueAfterToolResult(undefined, "Continuing after user answer.", remainingInvocations);
   }
 
-  private formatToolList(): string {
-    const lines = codeForgeTools.map((tool) => {
-      const loading = (this.config.getAgentMode() === "agent" ? coreAgentToolNames : coreReadOnlyToolNames).has(tool.name)
-        ? "core"
-        : "deferred";
-      const approval = tool.requiresApproval ? "approval" : "auto";
-      const concurrent = tool.concurrencySafe ? "concurrent" : "serial";
-      return `- ${tool.name} | ${loading} | risk=${tool.risk} | ${approval} | ${concurrent} | ${tool.description}`;
-    });
-    return `tool_list\n\n${lines.join("\n")}\n\nUse tool_search with a capability query or select:tool_name to load deferred schemas.`;
-  }
-
-  private async searchToolSchemas(action: Extract<AgentAction, { readonly type: "tool_search" }>): Promise<string> {
-    const mode = this.config.getAgentMode();
-    const allowedToolNames = new Set(toolDefinitionsForAgentMode(mode).map((tool) => tool.name));
-    const limit = Math.max(1, Math.min(action.limit ?? 8, 20));
-    const codeForgeMatches = searchCodeForgeTools(action.query, allowedToolNames);
-    const mcpMatches = mode === "agent"
-      ? await this.searchMcpToolSchemas(action.query, limit)
-      : [];
-    const combined = [...codeForgeMatches, ...mcpMatches]
-      .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))
-      .slice(0, limit);
-
-    if (combined.length === 0) {
-      return [
-        `tool_search ${action.query}`,
-        "",
-        "No matching tools found.",
-        "Try broader terms such as code symbols, task tracking, notebook, memory, mcp, command, edit, or select:tool_name."
-      ].join("\n");
-    }
-
-    return [
-      `tool_search ${action.query}`,
-      "",
-      "The following schemas are now loaded for the next model turn:",
-      "",
-      ...combined.map((match) => match.content)
-    ].join("\n");
-  }
-
-  private async searchMcpToolSchemas(query: string, limit: number): Promise<readonly ToolSchemaSearchResult[]> {
-    if (this.config.getMcpServers().length === 0) {
-      return [];
-    }
-
-    try {
-      const inspections = await inspectConfiguredMcpServers(
-        this.config.getMcpServers(),
-        this.config.getNetworkPolicy(),
-        undefined,
-        this.runningAbort?.signal
-      );
-      const selected = selectedToolNames(query);
-      const usedNames = new Set(toolDefinitions.map((tool) => tool.name));
-      const results: ToolSchemaSearchResult[] = [];
-      for (const inspection of inspections) {
-        if (inspection.error || !inspection.status.valid || !inspection.status.enabled) {
-          continue;
-        }
-        for (const tool of inspection.tools) {
-          const functionName = mcpFunctionName(inspection.status.id, tool.name, usedNames);
-          usedNames.add(functionName);
-          const score = scoreToolSearch(query, selected, functionName, tool.description, ["mcp", inspection.status.id, tool.name]);
-          if (score <= 0) {
-            continue;
-          }
-          results.push({
-            name: functionName,
-            score,
-            content: formatMcpToolSchemaSearchResult(functionName, inspection.status.id, tool)
-          });
-        }
-      }
-      return results.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name)).slice(0, Math.max(limit, 8));
-    } catch {
-      return [];
-    }
-  }
-
   private async executeGitAction(action: GitAction): Promise<string> {
     const result = await runGitOperation(this.gitPort, action, this.runningAbort?.signal);
     return result ?? toolError(unsafeGitArgsMessage(action));
@@ -1886,13 +1779,13 @@ export class AgentController {
     }
 
     if (action.type === "tool_list") {
-      transcriptResult = this.formatToolList();
+      transcriptResult = this.toolSchemas.formatList();
       await this.runLocalHooks("postTool", action);
       return transcriptResult;
     }
 
     if (action.type === "tool_search") {
-      transcriptResult = await this.searchToolSchemas(action);
+      transcriptResult = await this.toolSchemas.search(action);
       await this.runLocalHooks("postTool", action);
       return transcriptResult;
     }

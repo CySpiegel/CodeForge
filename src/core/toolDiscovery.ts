@@ -8,6 +8,39 @@ import { AgentMode, ChatMessage, ToolCall } from "./types";
 export const codeForgeToolSchemaMarker = "CODEFORGE_TOOL_SCHEMA_LOADED:";
 export const mcpToolSchemaMarker = "CODEFORGE_MCP_TOOL_SCHEMA_LOADED:";
 
+// Tools whose schemas are loaded up front (vs deferred until tool_search). Agent mode vs read-only modes.
+export const coreAgentToolNames = new Set([
+  "list_files",
+  "glob_files",
+  "read_file",
+  "search_text",
+  "grep_text",
+  "list_diagnostics",
+  "tool_search",
+  "tool_list",
+  "ask_user_question",
+  "spawn_agent",
+  "worker_output",
+  "open_diff",
+  "propose_patch",
+  "write_file",
+  "edit_file",
+  "run_command"
+]);
+
+export const coreReadOnlyToolNames = new Set([
+  "list_files",
+  "glob_files",
+  "read_file",
+  "search_text",
+  "grep_text",
+  "list_diagnostics",
+  "tool_search",
+  "tool_list",
+  "ask_user_question",
+  "worker_output"
+]);
+
 // Tools available in read-only agent modes (ask/plan). Agent mode exposes the full set.
 export const readOnlyToolNames = new Set([
   "list_files",
