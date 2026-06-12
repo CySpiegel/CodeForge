@@ -9,6 +9,7 @@ import { ModelResolver } from "./modelResolver";
 import { DoctorService } from "./doctorService";
 import { McpCoordinator } from "./mcpCoordinator";
 import { SessionService } from "./sessionService";
+import { ContextManager } from "./contextManager";
 // Re-exported so existing test imports (`from agentController`) keep working after the extraction.
 export { resolveConfiguredModelId } from "./modelResolver";
 import { errorMessage, isToolErrorText, toolError } from "./toolText";
@@ -16,8 +17,7 @@ import { modelStreamIdleTimeoutMs, streamWithIdleTimeout } from "./modelStream";
 // Re-exported so existing test imports (`from agentController`) keep working after the extraction.
 export { buildGitArgv } from "./gitTool";
 import { ContextBuilder } from "../core/contextBuilder";
-import { compactOldToolResults } from "../core/contextCompaction";
-import { buildContextUsage, ContextUsage, formatBytes } from "../core/contextUsage";
+import { ContextUsage, formatBytes } from "../core/contextUsage";
 import { DoctorCheck, formatDoctorReport, worstDoctorStatus } from "../core/doctor";
 import { EndpointCapabilityStore, isFreshCapability } from "../core/endpointCapabilityCache";
 import {
@@ -52,7 +52,7 @@ import {
   McpToolSummary,
   readConfiguredMcpResource
 } from "../core/mcpClient";
-import { OpenAiCompatibleProvider, resolveRequestMaxTokens } from "../core/openaiAdapter";
+import { OpenAiCompatibleProvider } from "../core/openaiAdapter";
 import { evaluateActionPermission, permissionModeLabel } from "../core/permissions";
 import { parseUnifiedDiff, targetPath } from "../core/unifiedDiff";
 import { SessionRecord, SessionSnapshot, SessionStore } from "../core/session";
@@ -114,9 +114,6 @@ import {
 const maxAgentToolTurns = 25;
 const maxReadOnlyToolTurns = 12;
 const workerJoinTimeoutMs = 900_000;
-const contextAutoCompactPercent = 80;
-const contextAttachmentRatio = 0.55;
-const contextToolResultTargetRatio = 0.6;
 const queuedWorkLimit = 20;
 // Undo: how many prior-change snapshots to keep, and the per-file byte cap above which a file is too
 // large to snapshot safely (restoring a truncated copy would corrupt it).
@@ -222,6 +219,7 @@ export class AgentController {
   private readonly models: ModelResolver;
   private readonly doctor: DoctorService;
   private readonly mcp: McpCoordinator;
+  private readonly context: ContextManager;
   private readonly readFileState = new Map<string, ReadFileSnapshot>();
   private readonly notebookReadState = new Set<string>();
   private messages: ChatMessage[] = [];
@@ -366,6 +364,21 @@ export class AgentController {
     this.sessions = new SessionService({
       store: sessionStore,
       emit: (event) => this.emit(event)
+    });
+    this.context = new ContextManager({
+      config,
+      getMessages: () => this.messages,
+      replaceMessages: (messages, reason, preserveContextItems) => this.replaceMessages(messages, reason, preserveContextItems),
+      getLastContextItems: () => this.lastContextItems,
+      getLastTokenUsage: () => this.lastTokenUsage,
+      selectedModelInfo: () => this.models.selectedModelInfo(),
+      resolveAuxiliaryModel: (provider, signal, fallback) => this.models.resolveAuxiliaryModel(provider, signal, fallback),
+      streamChatWithIdleTimeout: (provider, request, abort, purpose) => this.streamChatWithIdleTimeout(provider, request, abort, purpose),
+      systemMessage: () => this.systemMessage(),
+      approvalsCount: () => this.approvals.list().length,
+      emit: (event) => this.emit(event),
+      publishState: () => this.publishState(),
+      publishTranscript: () => this.publishTranscript()
     });
   }
 
@@ -697,7 +710,7 @@ export class AgentController {
       const model = this.config.getAuxiliaryModel()
         ? await this.models.resolveAuxiliaryModel(provider, abort.signal)
         : await this.models.resolveModel(provider, abort.signal);
-      await this.compactSessionWithProvider(provider, model, abort, focus);
+      await this.context.compact(provider, model, abort, focus);
       await this.publishTranscript();
       this.emit({ type: "message", role: "system", text: "Context compacted with the selected model." });
       this.emitContextUsage();
@@ -708,55 +721,6 @@ export class AgentController {
       this.clearRunningAbort(abort);
       this.drainQueuedWork();
     }
-  }
-
-  private async autoCompactContextIfNeeded(provider: LlmProvider, model: string, abort: AbortController, phase: string): Promise<void> {
-    const usage = this.currentContextUsage();
-    if (usage.percent < contextAutoCompactPercent || this.approvals.list().length > 0 || this.messages.filter((message) => message.role !== "system").length === 0) {
-      return;
-    }
-
-    this.emit({ type: "status", text: `Auto-compacting context at ${usage.percent}% ${phase}.` });
-    try {
-      const compactModel = this.config.getAuxiliaryModel()
-        ? await this.models.resolveAuxiliaryModel(provider, abort.signal, model)
-        : model;
-      await this.compactSessionWithProvider(provider, compactModel, abort, `Automatic compaction at ${usage.percent}% context usage.`);
-      await this.publishTranscript();
-      this.emit({ type: "message", role: "system", text: `Context auto-compacted at ${usage.percent}%.` });
-      this.emitContextUsage();
-      await this.publishState();
-    } catch (error) {
-      this.emit({ type: "error", text: `Auto-compaction failed: ${errorMessage(error)}` });
-    }
-  }
-
-  private async compactSessionWithProvider(provider: LlmProvider, model: string, abort: AbortController, focus = ""): Promise<void> {
-    const compactMessages: ChatMessage[] = [
-      {
-        role: "system",
-        content: `You compact coding assistant sessions. Preserve user goals, decisions, files discussed, pending work, and important constraints. Return a concise handoff summary only.${focus ? ` Focus especially on: ${focus}` : ""}`
-      },
-      {
-        role: "user",
-        content: this.messages.map((message) => `${message.role.toUpperCase()}:\n${message.content}`).join("\n\n")
-      }
-    ];
-
-    let summary = "";
-    for await (const event of this.streamChatWithIdleTimeout(provider, { model, messages: compactMessages, temperature: 0, maxTokens: this.requestMaxTokens(), signal: abort.signal }, abort, "Context compaction")) {
-      if (event.type === "content") {
-        summary += event.text;
-      }
-    }
-
-    this.replaceMessages([
-      this.systemMessage(),
-      {
-        role: "user",
-        content: `Compacted session context:\n\n${summary.trim()}`
-      }
-    ], "compact");
   }
 
   private streamChatWithIdleTimeout(
@@ -880,7 +844,7 @@ export class AgentController {
     try {
       const provider = await this.createProvider();
       const model = await this.models.resolveModel(provider, abort.signal);
-      await this.autoCompactContextIfNeeded(provider, model, abort, "before request");
+      await this.context.autoCompactIfNeeded(provider, model, abort, "before request");
       const context = new ContextBuilder(this.workspace, this.effectiveContextLimits(), { mcpResources: this.mcp.getContextItems(), pinnedFiles: [...this.pinnedFiles] });
       const contextItems = await context.build(abort.signal);
       const contextText = context.format(contextItems);
@@ -905,7 +869,7 @@ export class AgentController {
       this.emitContextUsage();
 
       await this.runModelLoopWithOverflowRecovery(provider, model, abort);
-      await this.autoCompactContextIfNeeded(provider, model, abort, "after request");
+      await this.context.autoCompactIfNeeded(provider, model, abort, "after request");
     } catch (error) {
       this.lastRunErrored = true;
       this.recordInspector("error", "run", "Request failed.", errorMessage(error));
@@ -1114,7 +1078,7 @@ export class AgentController {
       const compactModel = this.config.getAuxiliaryModel()
         ? await this.models.resolveAuxiliaryModel(provider, abort.signal, model)
         : model;
-      await this.compactSessionWithProvider(provider, compactModel, abort, "Recover from a context-window overflow.");
+      await this.context.compact(provider, compactModel, abort, "Recover from a context-window overflow.");
       await this.publishTranscript();
       // Single retry — a second overflow propagates to the caller as a normal error.
       await this.runModelLoop(provider, model, abort);
@@ -1126,7 +1090,7 @@ export class AgentController {
     const maxInvalidRetries = this.config.getMaxInvalidToolCallRetries();
     let consecutiveInvalidIterations = 0;
     for (let iteration = 0; iteration < maxToolTurns; iteration++) {
-      this.compactOldToolResultsIfNeeded();
+      this.context.compactOldToolResults();
       this.emit({ type: "status", text: `Calling ${provider.profile.label} / ${model}` });
       const capabilities = await this.capabilities(provider, model, abort.signal);
       const agentMode = this.config.getAgentMode();
@@ -2361,28 +2325,6 @@ export class AgentController {
     });
   }
 
-  private compactOldToolResultsIfNeeded(): void {
-    if (this.approvals.list().length > 0) {
-      return;
-    }
-
-    const result = compactOldToolResults(this.messages, {
-      maxBytes: this.contextWindowMaxBytes(),
-      triggerRatio: contextAutoCompactPercent / 100,
-      targetRatio: contextToolResultTargetRatio
-    });
-    if (result.compactedCount === 0) {
-      return;
-    }
-
-    this.replaceMessages(result.messages, "compact", true);
-    this.emit({
-      type: "status",
-      text: `Compacted ${result.compactedCount} older tool result(s) to preserve context budget.`
-    });
-    this.emitContextUsage();
-  }
-
   private async createProvider(): Promise<LlmProvider> {
     if (this.providerFactory) {
       return this.providerFactory();
@@ -3430,49 +3372,22 @@ export class AgentController {
     }));
   }
 
+  // Thin delegates to the context manager (kept on the controller so the many call sites and the
+  // worker/learning deps stay unchanged).
   private emitContextUsage(): void {
-    this.emit({ type: "contextUsage", usage: this.currentContextUsage() });
+    this.context.emitUsage();
   }
 
   private currentContextUsage(): ContextUsage {
-    return buildContextUsage(this.messages, this.contextWindowMaxBytes(), this.lastContextItems, {
-      actualTokenUsage: this.lastTokenUsage,
-      maxTokens: this.contextWindowMaxTokens()
-    });
+    return this.context.currentUsage();
   }
 
   private effectiveContextLimits(): ContextLimits {
-    const configured = this.config.getContextLimits();
-    const maxTokens = this.contextWindowMaxTokens();
-    if (!maxTokens) {
-      return configured;
-    }
-
-    const usableTokens = Math.max(1024, Math.floor(maxTokens * contextAttachmentRatio));
-    return {
-      ...configured,
-      maxBytes: Math.max(8000, usableTokens * 4)
-    };
+    return this.context.effectiveContextLimits();
   }
 
-  private contextWindowMaxTokens(): number | undefined {
-    return this.config.getContextLimits().maxTokens ?? this.models.selectedModelInfo()?.contextLength;
-  }
-
-  // Bound on generated tokens for every model turn, honoring codeforge.model.maxOutputTokens
-  // (0 = no limit, >=1 = cap; defaults to 32k, safely bounded). Returns undefined when no limit, so
-  // no max_tokens is sent and the endpoint decides (on vLLM, up to the remaining context window).
   private requestMaxTokens(): number | undefined {
-    return resolveRequestMaxTokens(
-      this.models.selectedModelInfo(),
-      this.config.getContextLimits().maxTokens,
-      this.config.getMaxOutputTokensPreference()
-    );
-  }
-
-  private contextWindowMaxBytes(): number {
-    const maxTokens = this.contextWindowMaxTokens();
-    return maxTokens ? Math.max(8000, maxTokens * 4) : this.config.getContextLimits().maxBytes;
+    return this.context.requestMaxTokens();
   }
 
 }
