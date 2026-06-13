@@ -30,9 +30,17 @@ behavior-preserving and was landed with the full offline test suite green.
   real endpoint (env-driven; not part of `npm test`).
 - CI workflow (`.github/workflows/ci.yml`): compile + full test suite on every push/PR.
 - `package.json` `repository`, `bugs`, and `homepage` metadata.
+- Minimal ESLint (`eslint.config.mjs`) + a `lint` script wired into CI.
+- A comprehensive **user guide** (`docs/user-guide.md`): endpoint setup, working/approval modes, the
+  full command surface, context management for local models, sub-agents, memory, `.codeforge/`
+  customization, MCP, local-model tips, and troubleshooting. Linked from the README.
 
 ### Fixed
-- README/ARCHITECTURE documentation reconciled with the real learning/memory settings and module layout.
+- Documentation reconciled with the current code. Corrected stale references to the replaced learning
+  system across the README, `ARCHITECTURE.md`, `docs/testing.md`, and `docs/local-extensions.md` — there is
+  no "Learned" accept/reject panel, no `learning.autonomy` setting, no `memory_write` tool, and no learned
+  "lessons" or agent proposals; the background review writes memory and skills directly (anti-poisoning
+  gated). Also fixed the deterministic test count (300) and the webview module list.
 
 ## [0.1.15] and earlier
 

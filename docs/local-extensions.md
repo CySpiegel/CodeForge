@@ -124,6 +124,8 @@ Example permission rule:
 ]
 ```
 
-## Learning-proposed extensions
+## Agent-authored skills
 
-CodeForge's learning loop can propose new entries into these folders from its own experience. Repeated successful procedures may be proposed as skills under `.codeforge/skills/`, and recurring task types may be proposed as sub-agents under `.codeforge/agents/<name>/AGENT.md`. Proposed skill and agent files are always review-only: nothing is written until you accept it from the Learned panel, and proposed agent tool lists are validated against the same tool registry, so a learned agent can never grant itself a capability that does not exist.
+CodeForge's background self-improvement review can update the `.codeforge/skills/` folder from its own experience. After a turn completes, a non-blocking review pass curates the skill library via the `skill_manage` tool — patching an existing skill, adding a support file, or creating a new skill under `.codeforge/skills/<name>/SKILL.md`. These skill updates are written directly (a write is blocked only after a failed run, to avoid learning from broken work). A separate curator archives stale skills and consolidates overlapping ones — archiving, never deleting; pinned skills are exempt.
+
+This review loop touches **skills and memory only — it never writes or proposes worker agents**. Files under `.codeforge/agents/` are authored solely by you. Gate the skill review with `codeforge.skills.enabled` and the curator with `codeforge.curator.enabled` (both default on).

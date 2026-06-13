@@ -10,10 +10,10 @@ Run this before committing code changes:
 npm test
 ```
 
-This compiles the test project and runs the full deterministic suite (currently **206 tests pass / 0 fail**), covering:
+This compiles the test project and runs the full deterministic suite (currently **300 tests pass / 0 fail**), covering:
 
 - core unit tests
-- tool registry validation tests
+- tool registry validation tests, plus the extracted validator/classification/approval-metadata/request-tooling unit tests (`toolValidation.ts`, `toolClassification.ts`, `approvalMetadata.ts`, `toolRequestDefinitions.ts`)
 - permission matrix tests
 - settings and session migration tests
 - `/doctor` report tests
@@ -21,9 +21,9 @@ This compiles the test project and runs the full deterministic suite (currently 
 - pinned active-file context, run inspector, permission audit, edit verification, and memory-management integration tests
 - package contract checks for VS Code-only/offline-first release shape
 - MCP client tests
-- learning lesson extraction/ranking/audit tests (`learning.ts`, `learningAudit.ts`: parse/serialize round-trips, corrective-vs-reusable extraction prompts, prompt ranking and byte-bounded digests, scope/status mapping by autonomy, overflow eviction)
-- skill-proposal and agent-proposal tests (`skillProposal.ts`, `agentProposal.ts`: procedure clustering with `minRepeats`, name sanitization, `SKILL.md`/`AGENT.md` rendering the loaders can parse, tool validation against the real registry)
-- worker manager tests (read-only vs approval-gated dispatch, per-kind tool gating, native tool-call parse-error retries, ranked learned-lesson/skill context, and the `workers.maxConcurrent` concurrency cap) plus built-in worker agent tests (`workerAgents.ts`)
+- background self-improvement review tests (`backgroundReview.ts`) and curator tests (`curator.ts`, `curatorBackup.ts`: deterministic active → stale → archived transitions, recoverable backups, pinned-exempt archiving)
+- skill manager and skill-usage tests (`skillManager.ts`, `skillUsage.ts`, `skillIo.ts`: agent-built skill create/patch/view, `SKILL.md` rendering the loader can parse, `.usage.json` tracking, tool validation against the real registry)
+- worker manager tests (read-only vs approval-gated dispatch, per-kind tool gating, native tool-call parse-error retries, ranked relevant-skill context, and the `workers.maxConcurrent` concurrency cap) plus built-in worker agent tests (`workerAgents.ts`)
 - worktree adapter tests (`GitWorktreeManager` isolating edits in a throwaway worktree and capturing a diff, plus `isAvailable` outside a git repo)
 - model-selection tests (`modelSelection.test.ts`, covering `resolveConfiguredModelId` in `agentController.ts`: alias/canonical-id matching, case/whitespace tolerance, unmatched non-empty id kept rather than swapped to `models[0]`)
 - `openaiAdapter` tests (tool-argument sanitize/repair, `resolveRequestMaxTokens` bounding, and context-length detection across LiteLLM, llama.cpp `n_ctx`/`n_ctx_train`, LM Studio `loaded_context_length`, and nested fields)
@@ -39,10 +39,10 @@ Run this before launching or packaging:
 npm run compile
 ```
 
-Check the webview script syntax when UI files changed:
+Check the webview script syntax when UI files changed (the view is split into `window.CodeForge` modules):
 
 ```bash
-node --check media/main.js
+node --check media/*.js
 ```
 
 ## VS Code Extension Host
@@ -88,9 +88,9 @@ After `npm run compile`, launch the extension in a development host and check:
 - `/index` reports an offline workspace map with important files, diagnostics, symbols, and imports
 - run inspector panel shows model/tool/verification events and permission audit history
 - memory settings can add, edit, delete, and clear local memories
-- the Learned panel accepts and rejects proposed lessons, skills, and agents, and the tab shows a pending-count badge that updates as items are accepted or rejected
+- `/skills` and `/skill` list and inspect the agent-built local skills under `.codeforge/skills`, and `/curator` reports the skill-library consolidation/archive status
 - `/workers` and `/worker` list and inspect spawned sub-agents (and the built-in kinds), and `/agents` lists the local custom worker agents defined under `.codeforge/agents/`
-- after an Agent-mode task, inline chat messages surface "Learned N…" and "Applied N learned lessons" provenance
+- after an Agent-mode task, the background review may save memory or author/refine a skill, surfaced through `/memory` and `/skills`
 - model metadata shows cached capability status after `/doctor` or a model request
 - MCP settings can add, inspect, and delete servers
 - `/doctor` reports local endpoint, model, workspace, permission, MCP, persistence, and tooling status

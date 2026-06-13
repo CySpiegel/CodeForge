@@ -4,6 +4,8 @@ CodeForge is a Visual Studio Code extension that turns a configured OpenAI-compa
 
 It is designed for explicit endpoint control. CodeForge does not include public provider presets and keeps model traffic pointed at endpoints you configure, such as vLLM, LiteLLM, LM Studio, or a corporate/cloud OpenAI-compatible gateway.
 
+> **New here?** The [**User Guide**](docs/user-guide.md) walks through endpoint setup, the working and approval modes, the command surface, managing context on local models, sub-agents, memory, MCP, and troubleshooting.
+
 ## What CodeForge Does
 
 CodeForge gives your local model a VS Code-native coding workflow:
@@ -18,7 +20,7 @@ CodeForge gives your local model a VS Code-native coding workflow:
 - run approved terminal commands
 - maintain workspace chat history
 - keep and manage explicit local memories
-- learn durable lessons from finished tasks and apply them later
+- improve over time by saving curated memory and reusable skills from finished tasks
 - delegate to background sub-agents (workers)
 - use local slash commands, skills, and custom agents
 - connect to explicitly configured MCP servers
@@ -96,22 +98,23 @@ After file edits, CodeForge checks current VS Code diagnostics for changed files
 
 ## Learning & Memory
 
-When an Agent-mode task finishes, CodeForge distils durable **lessons** from its own work — corrective ones from failures, reusable ones from successes — and stores them as scoped memory entries. On later tasks it ranks the relevant lessons and injects them back into both the main loop and sub-agents. This is fire-and-forget and fully guarded: learning never blocks or breaks a run.
+CodeForge keeps two kinds of local memory and can improve its own reusable skills over time. Everything is local — no telemetry, no external services.
 
-CodeForge can also propose extension files from what it learns:
+**Curated memory.** When `codeforge.memory.enabled` is on, CodeForge injects two note sets into the system prompt — MEMORY (environment facts, project conventions, tool quirks) and a separate USER profile (your preferences and working style) — and exposes a `memory` tool so the agent can save durable facts across sessions. Budgets are bounded by `codeforge.memory.charLimit` and `codeforge.memory.userCharLimit`; the agent consolidates entries when it reaches a limit. A background memory review runs every `codeforge.memory.nudgeInterval` user turns.
 
-- repeated successful procedures may be proposed as reusable **skills** (`.codeforge/skills`)
-- recurring task *types* may be proposed as **review-only sub-agents** (`.codeforge/agents`)
+**Self-improvement review.** After Agent-mode turns, a non-blocking background review may save new memory and author or refine reusable **skills** under `.codeforge/skills` (via the `skill_manage` tool). These updates are applied directly rather than held in a review queue, and are guarded — a skill write is blocked after a failed run (anti-poisoning) — and the whole pass is fire-and-forget: it never blocks or breaks a run.
 
-A periodic self-audit dedups and prunes the lesson library. The **Learned** panel in the settings view lets you accept or reject proposed lessons, skills, and agents, and shows a pending-count badge. Inline chat surfaces provenance such as "Learned N…" and "Applied N learned lessons".
+**Curation.** A periodic curator consolidates overlapping skills and archives stale ones. It never deletes (archives are recoverable) and pinned skills are exempt.
+
+Inspect and manage all of this from chat with `/memory`, `/skills`, `/skill`, and `/curator`.
 
 Self-improvement is governed by three settings — all default **on**. To stop the agent from writing to local memory and skill files entirely, set all three to `false`:
 
-- **`codeforge.memory.enabled`** — durable curated memory (notes the agent keeps and reuses across sessions; sized by `codeforge.memory.charLimit` / `codeforge.memory.userCharLimit`).
-- **`codeforge.skills.enabled`** — capturing recurring procedures as reusable skills under `.codeforge/skills` (nudged by `codeforge.skills.creationNudgeInterval`).
+- **`codeforge.memory.enabled`** — durable curated memory (sized by `codeforge.memory.charLimit` / `codeforge.memory.userCharLimit`).
+- **`codeforge.skills.enabled`** — authoring and refining reusable skills under `.codeforge/skills` (nudged by `codeforge.skills.creationNudgeInterval`).
 - **`codeforge.curator.enabled`** — the periodic skill-library curation pass that consolidates and archives skills (cadence via `codeforge.curator.intervalHours` / `codeforge.curator.minIdleHours`).
 
-All edits the agent proposes — including memory and skill files — are still routed through the same permission policy and approval flow as any other file change.
+For a durable, searchable fact store with compositional recall, set `codeforge.memory.provider` to `holographic` (default `none`); it mirrors saved memories and recalls relevant facts into each task's context, fully local.
 
 ## Chat Commands
 
@@ -218,9 +221,10 @@ node --check media/main.js
 - `src/adapters`: VS Code, terminal, diff, config, session, memory, code-intel, notebook, and worktree adapters
 - `src/agent`: model loop, tool orchestration, permissions, sub-agent workers, learning hooks, and diagnostics
 - `src/ui`: VS Code webview provider and message bridge
-- `media`: chat UI scripts (decomposed into `window.CodeForge` modules — markdown, DOM utils, inspector, approvals, MCP editor, worker list, and the `main.js` core), styles, and extension icon
+- `media`: chat UI scripts (decomposed into `window.CodeForge` modules — markdown, DOM utils, inspector, approvals, MCP editor, worker list, slash commands, and the `main.js` core), styles, and extension icon
 - `docs`: roadmap, testing notes, and local extension formats
 
+See `docs/user-guide.md` for the full guide to using CodeForge — modes, commands, context, sub-agents, memory, MCP, and troubleshooting.
 See `ARCHITECTURE.md` for implementation boundaries and design patterns.
 See `docs/testing.md` for verification steps.
 See `docs/local-extensions.md` for local commands, skills, agents, hooks, and the `soul.md` persona.

@@ -39,8 +39,8 @@ Load order is `markdown → dom → inspector → approvals → mcpEditor → wo
 - Public IP network access is blocked. CodeForge permits localhost, private IP ranges, and explicitly configured on-prem hostnames for vLLM/LiteLLM-compatible endpoints.
 - File writes and shell commands require user approval.
 - Shell commands run through the terminal adapter with workspace-scoped cwd validation, bounded output, cancellation, and a minimized environment.
-- Local memories are written only through approval-gated paths: the user's `/memory` command, the approval-gated `memory_write` tool, and — when learning autonomy permits — automatically saved learned lessons. Nothing is written to memory silently outside these.
+- Local memory is written only through the `memory` tool and the user's `/memory` command, gated by `codeforge.memory.enabled`; nothing else writes to memory.
 - Model responses and local action requests are parsed through typed, validated boundaries before use.
 - The learning loop is fire-and-forget and fully guarded: it runs only after a finished task and must never block or break a run.
-- Learned skill and agent files are written only through the approval path (`diff.applyWriteFile`); they are never written silently.
-- Agent definitions are never auto-written — proposed sub-agents stay review-only and require explicit acceptance even under `learning.autonomy: auto`.
+- Skills under `.codeforge/skills` are written by the background self-improvement review via the `skill_manage` tool (gated by `codeforge.skills.enabled`), not the user-approval path; the guard is an anti-poisoning check that blocks a skill write after a failed run.
+- Worker agent definitions are never written or proposed by CodeForge — `.codeforge/agents` files are authored only by you.
