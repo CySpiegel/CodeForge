@@ -24,6 +24,7 @@ import { TaskBoard } from "./taskBoard";
 import { UndoManager } from "./undoManager";
 import { approvalAcceptedText, approvalContinuationPrompt, approvalPermissionDecision, formatQuestionAnswers, invocationForApproval } from "./approvalText";
 import { buildApprovalMetadata, buildWorkerApprovalMetadata } from "./approvalMetadata";
+import { buildToolDefinitionsForRequest } from "./toolRequestDefinitions";
 import { SlashCommandRouter } from "./slashCommandRouter";
 // Re-exported so existing test imports (`from agentController`) keep working after the extraction.
 export { resolveConfiguredModelId } from "./modelResolver";
@@ -57,7 +58,6 @@ import { SkillUsageTracker } from "../core/skillUsage";
 import { NotebookPort, UnavailableNotebookPort } from "../core/notebooks";
 import {
   callConfiguredMcpTool,
-  inspectConfiguredMcpServers,
   readConfiguredMcpResource
 } from "../core/mcpClient";
 import { evaluateActionPermission, permissionModeLabel } from "../core/permissions";
@@ -84,17 +84,7 @@ import {
 } from "../core/types";
 import { isApprovalAction, isConcurrencySafeAction, isInternalAutomationAction, isInternalReadAction, isInternalStateAction, isLocalReadOnlyAction, isReadOnlyAction, ToolInvocation, toolSummary, validateAction } from "../core/toolRegistry";
 import { formatCommandResult } from "./commandResultText";
-import {
-  coreAgentToolNames,
-  coreReadOnlyToolNames,
-  discoveredCodeForgeToolNames,
-  discoveredMcpToolNames,
-  mcpFunctionName,
-  McpToolBinding,
-  mcpToolParameters,
-  parseNativeToolCall,
-  toolDefinitionsForAgentMode
-} from "../core/toolDiscovery";
+import { McpToolBinding, parseNativeToolCall } from "../core/toolDiscovery";
 import { DiffService } from "../adapters/diffService";
 import { TerminalRunner } from "../adapters/terminalRunner";
 import { CodeForgeConfigService, CodeForgeSettingsUpdate } from "../adapters/vscodeConfig";
@@ -2001,56 +1991,8 @@ export class AgentController {
     });
   }
 
-  private async toolDefinitionsForRequest(mode: AgentMode, mcpToolBindings: Map<string, McpToolBinding>, signal: AbortSignal): Promise<readonly ToolDefinition[]> {
-    const allowedTools = [...toolDefinitionsForAgentMode(mode)];
-    const loadedToolNames = new Set(mode === "agent" ? coreAgentToolNames : coreReadOnlyToolNames);
-    for (const toolName of discoveredCodeForgeToolNames(this.messages)) {
-      loadedToolNames.add(toolName);
-    }
-    const baseTools = allowedTools.filter((tool) => loadedToolNames.has(tool.name));
-    if (mode !== "agent" || this.config.getMcpServers().length === 0) {
-      return baseTools;
-    }
-
-    const loadedMcpToolNames = discoveredMcpToolNames(this.messages);
-    if (loadedMcpToolNames.size === 0) {
-      return baseTools;
-    }
-
-    try {
-      const inspections = await inspectConfiguredMcpServers(
-        this.config.getMcpServers(),
-        this.config.getNetworkPolicy(),
-        undefined,
-        signal
-      );
-      const usedNames = new Set(baseTools.map((tool) => tool.name));
-      const mcpTools: ToolDefinition[] = [];
-      for (const inspection of inspections) {
-        if (inspection.error || !inspection.status.valid || !inspection.status.enabled) {
-          continue;
-        }
-        for (const tool of inspection.tools) {
-          const name = mcpFunctionName(inspection.status.id, tool.name, usedNames);
-          usedNames.add(name);
-          if (!loadedMcpToolNames.has(name)) {
-            continue;
-          }
-          mcpToolBindings.set(name, { serverId: inspection.status.id, toolName: tool.name });
-          mcpTools.push({
-            name,
-            description: [
-              `Call MCP tool ${tool.name} on configured server ${inspection.status.id}.`,
-              tool.description
-            ].filter((line): line is string => Boolean(line)).join(" "),
-            parameters: mcpToolParameters(tool.inputSchema)
-          });
-        }
-      }
-      return [...baseTools, ...mcpTools];
-    } catch {
-      return baseTools;
-    }
+  private toolDefinitionsForRequest(mode: AgentMode, mcpToolBindings: Map<string, McpToolBinding>, signal: AbortSignal): Promise<readonly ToolDefinition[]> {
+    return buildToolDefinitionsForRequest(mode, mcpToolBindings, this.messages, this.config, signal);
   }
 
   private ensureSystemMessage(): void {
