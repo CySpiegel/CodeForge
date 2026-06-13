@@ -2,9 +2,17 @@
   "name": "codeforge",
   "displayName": "CodeForge",
   "description": "A self-hosted-first coding harness extension for Visual Studio Code.",
-  "version": "0.1.15",
+  "version": "0.2.0",
   "publisher": "codeforge",
   "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/CySpiegel/CodeForge.git"
+  },
+  "bugs": {
+    "url": "https://github.com/CySpiegel/CodeForge/issues"
+  },
+  "homepage": "https://github.com/CySpiegel/CodeForge#readme",
   "engines": {
     "vscode": "^1.90.0",
     "node": ">=18"
@@ -559,7 +567,7 @@
     "compile:tests": "tsc -p ./tsconfig.test.json",
     "test": "npm run compile:tests && node --test out-test/test/unit/*.test.js out-test/test/integration/*.test.js",
     "vscode:test": "npm run compile && npm run compile:tests && node ./out-test/test/runTest.js",
-    "package": "npm run compile && vsce package --allow-missing-repository --no-dependencies",
+    "package": "npm run compile && vsce package --no-dependencies",
     "postcompile": "node scripts/copyHolographicWasm.js"
   },
   "devDependencies": {

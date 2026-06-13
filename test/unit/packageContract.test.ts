@@ -6,6 +6,7 @@ import { codeForgeTools } from "../../src/core/toolRegistry";
 
 interface PackageJson {
   readonly bin?: unknown;
+  readonly repository?: { readonly url?: string };
   readonly dependencies?: Record<string, unknown>;
   readonly activationEvents?: readonly string[];
   readonly contributes?: {
@@ -26,7 +27,8 @@ test("extension package stays VS Code only and offline first", () => {
   assert.ok(packageJson.activationEvents?.every((event) => !event.startsWith("onUri")), "extension should not expose URI/network activation");
   assert.ok(packageJson.contributes?.commands?.every((command) => command.command?.startsWith("codeforge.")), "commands should stay in the codeforge namespace");
   assert.ok(packageJson.contributes?.commands?.every((command) => !/cli/i.test(`${command.title ?? ""} ${command.category ?? ""}`)), "package should not advertise a CLI surface");
-  assert.ok(packageJson.scripts?.package?.includes("vsce package --allow-missing-repository --no-dependencies"));
+  assert.ok(packageJson.scripts?.package?.includes("vsce package --no-dependencies"), "package script should build offline with no bundled deps");
+  assert.match(packageJson.repository?.url ?? "", /github\.com\/CySpiegel\/CodeForge/, "repository metadata should be declared");
 });
 
 test("memory and skills settings are declared in configuration with safe defaults", () => {
