@@ -23,6 +23,7 @@ import { agentModeLabel, SystemPromptBuilder } from "./systemPrompt";
 import { TaskBoard } from "./taskBoard";
 import { UndoManager } from "./undoManager";
 import { approvalAcceptedText, approvalContinuationPrompt, approvalPermissionDecision, formatQuestionAnswers, invocationForApproval } from "./approvalText";
+import { buildApprovalMetadata, buildWorkerApprovalMetadata } from "./approvalMetadata";
 import { SlashCommandRouter } from "./slashCommandRouter";
 // Re-exported so existing test imports (`from agentController`) keep working after the extraction.
 export { resolveConfiguredModelId } from "./modelResolver";
@@ -34,7 +35,7 @@ import { modelStreamIdleTimeoutMs, streamWithIdleTimeout } from "./modelStream";
 // Re-exported so existing test imports (`from agentController`) keep working after the extraction.
 export { buildGitArgv } from "./gitTool";
 import { ContextBuilder, contextItemKindLabel } from "../core/contextBuilder";
-import { ContextUsage, formatBytes } from "../core/contextUsage";
+import { ContextUsage } from "../core/contextUsage";
 import { DoctorCheck, formatDoctorReport, worstDoctorStatus } from "../core/doctor";
 import { EndpointCapabilityStore } from "../core/endpointCapabilityCache";
 import {
@@ -61,7 +62,6 @@ import {
 } from "../core/mcpClient";
 import { evaluateActionPermission, permissionModeLabel } from "../core/permissions";
 import { SessionSnapshot, SessionStore } from "../core/session";
-import { classifyShellCommand } from "../core/shellSemantics";
 import {
   AgentAction,
   AgentMode,
@@ -1515,68 +1515,7 @@ export class AgentController {
   }
 
   private approvalMetadata(action: AgentAction, decision: PermissionDecision): { readonly detail?: string; readonly risk?: string } {
-    if (action.type === "mcp_call_tool") {
-      const server = this.config.getMcpServers().find((item) => item.id === action.serverId);
-      return {
-        risk: "configured MCP service tool",
-        detail: [
-          `Server: ${action.serverId}${server ? ` (${server.label})` : ""}`,
-          `Transport: ${server?.transport ?? "unknown"}`,
-          `Tool: ${action.toolName}`,
-          `Permission: ${decision.reason}`
-        ].join("\n")
-      };
-    }
-
-    if (action.type === "ask_user_question") {
-      return {
-        risk: "requires user input",
-        detail: action.questions.map((question, index) => {
-          const options = question.options.map((option) => `  - ${option.label}: ${option.description}`).join("\n");
-          return `${index + 1}. ${question.question}\n${options}`;
-        }).join("\n\n")
-      };
-    }
-
-    if (action.type === "notebook_edit_cell") {
-      return {
-        risk: "workspace notebook edit",
-        detail: [
-          `Path: ${action.path}`,
-          `Cell: ${action.index}`,
-          action.kind ? `Kind: ${action.kind}` : undefined,
-          action.language ? `Language: ${action.language}` : undefined,
-          "",
-          action.content
-        ].filter((line): line is string => line !== undefined).join("\n")
-      };
-    }
-
-    if (action.type !== "run_command") {
-      return {};
-    }
-
-    const semantics = classifyShellCommand(action.command);
-    const timeout = this.config.getCommandTimeoutSeconds();
-    const outputLimit = this.config.getCommandOutputLimitBytes();
-    return {
-      risk: [
-        semantics.summary,
-        semantics.usesNetwork ? "network-capable" : undefined,
-        semantics.usesShellExpansion ? "dynamic shell expansion" : undefined
-      ].filter((item): item is string => Boolean(item)).join("; "),
-      detail: [
-        `Command: ${action.command}`,
-        `CWD: ${action.cwd?.trim() || "."}`,
-        `Timeout: ${timeout}s`,
-        `Output limit: ${formatBytes(outputLimit)} per stream`,
-        `Permission: ${decision.reason}`,
-        `Risk: ${semantics.summary}`,
-        semantics.commandNames.length > 0 ? `Detected commands: ${semantics.commandNames.join(", ")}` : undefined,
-        semantics.usesNetwork ? "Warning: command can use network-capable tools." : undefined,
-        semantics.usesShellExpansion ? "Warning: command uses dynamic shell expansion." : undefined
-      ].filter((line): line is string => Boolean(line)).join("\n")
-    };
+    return buildApprovalMetadata(action, decision, this.config);
   }
 
   private appendDeniedOrInvalidToolResult(invocation: ToolInvocation, reason: string): void {
@@ -1684,16 +1623,7 @@ export class AgentController {
   }
 
   private workerApprovalMetadata(worker: WorkerSummary, action: AgentAction, decision: PermissionDecision): { readonly detail?: string; readonly risk?: string; readonly origin: "worker" } {
-    const base = this.approvalMetadata(action, decision);
-    return {
-      origin: "worker",
-      risk: base.risk,
-      detail: [
-        `Requested by worker: ${worker.label} (${worker.id})`,
-        `Worker task: ${worker.prompt}`,
-        base.detail
-      ].filter((line): line is string => Boolean(line)).join("\n")
-    };
+    return buildWorkerApprovalMetadata(worker, action, decision, this.config);
   }
 
   async answerQuestion(id: string, answers: Readonly<Record<string, string>>): Promise<void> {
