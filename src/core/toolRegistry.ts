@@ -5,37 +5,56 @@ import { FACT_FEEDBACK_SCHEMA, FACT_STORE_SCHEMA } from "./holographic/factTools
 import {
   AgentAction,
   AskUserQuestionAction,
-  CodeDefinitionAction,
-  CodeForgeTaskStatus,
-  CodeHoverAction,
-  CodeReferencesAction,
   EditFileAction,
   GitAction,
-  GlobFilesAction,
-  GrepTextAction,
-  ListDiagnosticsAction,
-  ListFilesAction,
   McpCallToolAction,
   NotebookEditCellAction,
   ProposePatchAction,
-  ReadFileAction,
   RunCommandAction,
-  SearchTextAction,
   SkillManageAction,
   FactStoreAction,
   ToolDefinition,
-  NotebookCellKindName,
-  QuestionOption,
-  UserQuestion,
   WriteFileAction
 } from "./types";
+import {
+  ToolValidationResult,
+  codePositionParameters,
+  invalidToolType,
+  isSafeExtensionName,
+  isSafeMcpName,
+  isSafeWorkerId,
+  numericOrUndefined,
+  optionalPositiveInteger,
+  optionalString,
+  optionalStringArray,
+  parseCodePosition,
+  parseNotebookCellKind,
+  parseQuestions,
+  parseTaskStatus,
+  validateCodePosition,
+  validateLimit,
+  validatePatch,
+  validateSearchQuery,
+  validateTaskId,
+  validateTaskIds,
+  validateTaskSubject,
+  validateWorkspaceGlob,
+  validateWorkspacePath
+} from "./toolValidation";
 
 export type ToolRisk = "read" | "search" | "automation" | "question" | "memory" | "state" | "service" | "edit" | "command";
 
-export interface ToolValidationResult {
-  readonly ok: boolean;
-  readonly message?: string;
-}
+// The validation primitives and the pure action-classification predicates now live in their own modules.
+// These re-exports keep existing importers (e.g. agentController, vscodeWorkspace) getting them from here.
+export type { ToolValidationResult };
+export { validateWorkspacePath, validateWorkspaceGlob };
+export {
+  isReadOnlyAction,
+  isLocalReadOnlyAction,
+  isInternalAutomationAction,
+  isInternalStateAction,
+  isInternalReadAction
+} from "./toolClassification";
 
 const gitOperations: readonly GitAction["operation"][] = ["status", "diff", "log", "show", "branch"];
 
@@ -1539,35 +1558,6 @@ export function validateAction(action: AgentAction): ToolValidationResult {
   return findTool(action.type)?.validate(action) ?? { ok: false, message: `Unknown tool: ${action.type}` };
 }
 
-export function isLocalReadOnlyAction(action: AgentAction): action is ListFilesAction | GlobFilesAction | ReadFileAction | SearchTextAction | GrepTextAction | ListDiagnosticsAction {
-  return action.type === "list_files"
-    || action.type === "glob_files"
-    || action.type === "read_file"
-    || action.type === "search_text"
-    || action.type === "grep_text"
-    || action.type === "list_diagnostics";
-}
-
-export function isReadOnlyAction(action: AgentAction): boolean {
-  return isLocalReadOnlyAction(action)
-    || action.type === "ask_user_question"
-    || action.type === "tool_search"
-    || action.type === "tool_list"
-    || action.type === "task_list"
-    || action.type === "task_get"
-    || action.type === "code_hover"
-    || action.type === "code_definition"
-    || action.type === "code_references"
-    || action.type === "code_symbols"
-    || action.type === "mcp_list_resources"
-    || action.type === "mcp_read_resource"
-    || action.type === "notebook_read"
-    || action.type === "open_diff"
-    || action.type === "spawn_agent"
-    || action.type === "worker_output"
-    || action.type === "git";
-}
-
 export function isConcurrencySafeAction(action: AgentAction): boolean {
   return Boolean(findTool(action.type)?.concurrencySafe);
 }
@@ -1577,275 +1567,6 @@ export function isApprovalAction(action: AgentAction): action is AskUserQuestion
   return Boolean(tool?.requiresApproval);
 }
 
-// Internal automation actions (worker orchestration) — surfaced differently from user-visible work.
-export function isInternalAutomationAction(action: AgentAction): boolean {
-  return action.type === "spawn_agent" || action.type === "worker_output";
-}
-
-// Internal task-board mutations — state bookkeeping rather than user-facing edits.
-export function isInternalStateAction(action: AgentAction): boolean {
-  return action.type === "task_create" || action.type === "task_update";
-}
-
-// Internal read/inspection actions — discovery the agent does for itself, not user-requested output.
-export function isInternalReadAction(action: AgentAction): boolean {
-  return action.type === "tool_list"
-    || action.type === "tool_search"
-    || action.type === "task_list"
-    || action.type === "task_get"
-    || action.type === "code_hover"
-    || action.type === "code_definition"
-    || action.type === "code_references"
-    || action.type === "code_symbols"
-    || action.type === "mcp_list_resources"
-    || action.type === "mcp_read_resource"
-    || action.type === "notebook_read"
-    || action.type === "skill_view"
-    || action.type === "skills_list"
-    || action.type === "fact_store"
-    || action.type === "fact_feedback";
-}
-
 export function toolSummary(action: AgentAction): string {
   return findTool(action.type)?.summarize(action) ?? action.type;
-}
-
-export function validateWorkspacePath(path: string): ToolValidationResult {
-  if (!path.trim()) {
-    return { ok: false, message: "Path must not be empty." };
-  }
-  if (path.includes("\0")) {
-    return { ok: false, message: "Path must not contain NUL bytes." };
-  }
-
-  const normalized = path.replace(/\\/g, "/");
-  if (normalized.startsWith("~")) {
-    return { ok: false, message: `Refusing to access a home-relative path: ${path}` };
-  }
-
-  const segments = normalized.split("/").filter(Boolean);
-  if (segments.some((segment) => segment === "..")) {
-    return { ok: false, message: `Refusing to access path outside the open repo folder: ${path}` };
-  }
-
-  return { ok: true };
-}
-
-export function validateWorkspaceGlob(pattern: string): ToolValidationResult {
-  if (!pattern.trim()) {
-    return { ok: false, message: "Glob pattern must not be empty." };
-  }
-  if (pattern.includes("\0")) {
-    return { ok: false, message: "Glob pattern must not contain NUL bytes." };
-  }
-  const normalized = pattern.replace(/\\/g, "/");
-  if (normalized.startsWith("/") || normalized.startsWith("~") || /^[A-Za-z]:/.test(normalized)) {
-    return { ok: false, message: `Refusing to use an absolute glob pattern: ${pattern}` };
-  }
-  const segments = normalized.split("/").filter(Boolean);
-  if (segments.some((segment) => segment === "..")) {
-    return { ok: false, message: `Refusing to use a glob outside the open repo folder: ${pattern}` };
-  }
-  return { ok: true };
-}
-
-function optionalString(value: unknown): string | undefined {
-  return typeof value === "string" ? value : undefined;
-}
-
-function numericOrUndefined(value: unknown): number | undefined {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value;
-  }
-  if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) {
-    return Number(value);
-  }
-  return undefined;
-}
-
-function optionalPositiveInteger(value: unknown): number | undefined {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    return undefined;
-  }
-  return Math.max(1, Math.floor(value));
-}
-
-function optionalStringArray(value: unknown): readonly string[] | undefined {
-  if (!Array.isArray(value)) {
-    return undefined;
-  }
-  return value.map((item) => typeof item === "string" ? item.trim() : "").filter(Boolean);
-}
-
-function isSafeMcpName(value: string): boolean {
-  return /^[A-Za-z0-9._/-]{1,160}$/.test(value) && !value.includes("..");
-}
-
-function isSafeExtensionName(value: string): boolean {
-  return /^[a-z][a-z0-9_-]{0,63}$/i.test(value);
-}
-
-function isSafeWorkerId(value: string): boolean {
-  return /^worker-\d+-[a-f0-9]+$/i.test(value);
-}
-
-function parseQuestions(value: unknown): readonly UserQuestion[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return value.map((item): UserQuestion | undefined => {
-    if (!isRecord(item) || typeof item.question !== "string" || typeof item.header !== "string" || !Array.isArray(item.options)) {
-      return undefined;
-    }
-    const options = item.options.map((option): QuestionOption | undefined => {
-      if (!isRecord(option) || typeof option.label !== "string" || typeof option.description !== "string") {
-        return undefined;
-      }
-      const parsed: QuestionOption = {
-        label: option.label,
-        description: option.description
-      };
-      const preview = optionalString(option.preview);
-      return preview === undefined ? parsed : { ...parsed, preview };
-    }).filter((option): option is QuestionOption => Boolean(option));
-    const question: UserQuestion = {
-      question: item.question,
-      header: item.header,
-      options
-    };
-    return typeof item.multiSelect === "boolean" ? { ...question, multiSelect: item.multiSelect } : question;
-  }).filter((question): question is UserQuestion => Boolean(question));
-}
-
-function parseTaskStatus(value: unknown): CodeForgeTaskStatus | undefined {
-  return value === "pending" || value === "in_progress" || value === "blocked" || value === "completed" || value === "cancelled"
-    ? value
-    : undefined;
-}
-
-function parseNotebookCellKind(value: unknown): NotebookCellKindName | undefined {
-  return value === "code" || value === "markdown" ? value : undefined;
-}
-
-function validateTaskSubject(subject: string): ToolValidationResult | undefined {
-  const trimmed = subject.trim();
-  if (!trimmed) {
-    return { ok: false, message: "Task subject must not be empty." };
-  }
-  if (trimmed.length > 240) {
-    return { ok: false, message: "Task subject must be 240 characters or fewer." };
-  }
-  return undefined;
-}
-
-function validateTaskId(taskId: string): ToolValidationResult {
-  return /^task-\d+-[a-f0-9]+$/i.test(taskId)
-    ? { ok: true }
-    : { ok: false, message: "Task id is invalid." };
-}
-
-function validateTaskIds(taskIds: readonly string[] | undefined): ToolValidationResult | undefined {
-  if (!taskIds) {
-    return undefined;
-  }
-  for (const taskId of taskIds) {
-    const result = validateTaskId(taskId);
-    if (!result.ok) {
-      return result;
-    }
-  }
-  return undefined;
-}
-
-function codePositionParameters(): Record<string, unknown> {
-  return {
-    type: "object",
-    properties: {
-      path: { type: "string" },
-      line: { type: "number" },
-      character: { type: "number" },
-      reason: { type: "string" }
-    },
-    required: ["path", "line", "character"],
-    additionalProperties: false
-  };
-}
-
-function parseCodePosition(type: CodeHoverAction["type"], input: Record<string, unknown>): CodeHoverAction | undefined;
-function parseCodePosition(type: CodeDefinitionAction["type"], input: Record<string, unknown>): CodeDefinitionAction | undefined;
-function parseCodePosition(type: CodeReferencesAction["type"], input: Record<string, unknown>): CodeReferencesAction | undefined;
-function parseCodePosition(type: CodeHoverAction["type"] | CodeDefinitionAction["type"] | CodeReferencesAction["type"], input: Record<string, unknown>): CodeHoverAction | CodeDefinitionAction | CodeReferencesAction | undefined {
-  if (typeof input.path !== "string" || typeof input.line !== "number" || typeof input.character !== "number") {
-    return undefined;
-  }
-  const line = Math.max(1, Math.floor(input.line));
-  const character = Math.max(1, Math.floor(input.character));
-  const reason = optionalString(input.reason);
-  if (type === "code_hover") {
-    return { type, path: input.path, line, character, reason };
-  }
-  if (type === "code_definition") {
-    return { type, path: input.path, line, character, reason };
-  }
-  return { type, path: input.path, line, character, includeDeclaration: undefined, reason };
-}
-
-function validateCodePosition(action: CodeHoverAction | CodeDefinitionAction | CodeReferencesAction): ToolValidationResult {
-  const path = validateWorkspacePath(action.path);
-  if (!path.ok) {
-    return path;
-  }
-  if (!Number.isInteger(action.line) || action.line < 1) {
-    return { ok: false, message: "Line must be a 1-based positive integer." };
-  }
-  if (!Number.isInteger(action.character) || action.character < 1) {
-    return { ok: false, message: "Character must be a 1-based positive integer." };
-  }
-  return { ok: true };
-}
-
-function validateSearchQuery(query: string): ToolValidationResult {
-  if (!query.trim()) {
-    return { ok: false, message: "Search query must not be empty." };
-  }
-  if (query.length > 500) {
-    return { ok: false, message: "Search query is too long." };
-  }
-  return { ok: true };
-}
-
-function validateLimit(limit: number | undefined): ToolValidationResult {
-  if (limit === undefined) {
-    return { ok: true };
-  }
-  if (!Number.isInteger(limit) || limit < 1 || limit > 1000) {
-    return { ok: false, message: "Limit must be an integer between 1 and 1000." };
-  }
-  return { ok: true };
-}
-
-function validatePatch(patch: string): ToolValidationResult {
-  try {
-    const patches = parseUnifiedDiff(patch);
-    if (patches.length === 0) {
-      return { ok: false, message: "Patch must contain at least one file diff." };
-    }
-    for (const patchFile of patches) {
-      const oldPathResult = patchFile.oldPath === "/dev/null" ? { ok: true } : validateWorkspacePath(patchFile.oldPath);
-      const newPathResult = patchFile.newPath === "/dev/null" ? { ok: true } : validateWorkspacePath(patchFile.newPath);
-      if (!oldPathResult.ok) {
-        return oldPathResult;
-      }
-      if (!newPathResult.ok) {
-        return newPathResult;
-      }
-    }
-    return { ok: true };
-  } catch (error) {
-    return { ok: false, message: error instanceof Error ? error.message : String(error) };
-  }
-}
-
-function invalidToolType(action: AgentAction, expected: AgentAction["type"]): ToolValidationResult {
-  return { ok: false, message: `Expected ${expected}, received ${action.type}.` };
 }
