@@ -160,6 +160,7 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
   private html(webview: vscode.Webview): string {
     const nonce = getNonce();
     const markdownUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "media", "markdown.js"));
+    const domUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "media", "dom.js"));
     const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "media", "main.js"));
     const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "media", "styles.css"));
     const csp = [
@@ -333,6 +334,7 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
     </footer>
   </div>
   <script nonce="${nonce}" src="${markdownUri}"></script>
+  <script nonce="${nonce}" src="${domUri}"></script>
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;

@@ -2,6 +2,23 @@
   const vscode = acquireVsCodeApi();
   // Markdown rendering lives in markdown.js (loaded first); pulled in here so the call sites are unchanged.
   const renderMarkdown = window.CodeForge.renderMarkdown;
+  // Stateless DOM/format/string helpers live in dom.js (loaded first); pulled in so call sites are unchanged.
+  const {
+    truncateStatus,
+    formatNumber,
+    numberOrFallback,
+    estimatedTokens,
+    tokensToBytes,
+    replaceOptions,
+    summarizeToolResult,
+    on,
+    setValue,
+    setChecked,
+    setDisabled,
+    splitLines,
+    splitArgs,
+    cssEscape
+  } = window.CodeForge.dom;
   const elements = {
     messages: document.getElementById("messages"),
     workersPanel: document.getElementById("workersPanel"),
@@ -679,10 +696,6 @@
     }
   }
 
-  function truncateStatus(value) {
-    return value.length > 64 ? `${value.slice(0, 61)}...` : value;
-  }
-
   function renderRunStatus() {
     if (elements.runStatusLabel) {
       elements.runStatusLabel.textContent = currentRunStatus || "Ready";
@@ -1288,10 +1301,6 @@
     return (state?.modelInfo || []).find((model) => model.id === modelId);
   }
 
-  function formatNumber(value) {
-    return new Intl.NumberFormat().format(value);
-  }
-
   function renderContextUsage(usage) {
     const safeUsage = usage || { percent: 0, label: "0 B / 0 B" };
     const percent = Math.max(0, Math.min(100, Number(safeUsage.percent) || 0));
@@ -1379,40 +1388,6 @@
     }
     lines.push("Click to compact context.");
     return lines.join("\n");
-  }
-
-  function numberOrFallback(value, fallback) {
-    return typeof value === "number" && Number.isFinite(value) ? value : fallback;
-  }
-
-  function estimatedTokens(bytes) {
-    return Math.max(0, Math.ceil((Number(bytes) || 0) / 4));
-  }
-
-  function tokensToBytes(tokens) {
-    return Math.max(0, Math.round((Number(tokens) || 0) * 4));
-  }
-
-  function replaceOptions(select, options, selectedValue) {
-    if (!select) {
-      return selectedValue || options[0]?.value || "";
-    }
-    const previous = select.value;
-    select.replaceChildren();
-    for (const option of options) {
-      const node = document.createElement("option");
-      node.value = option.value || "";
-      node.textContent = option.label || option.value || "";
-      select.append(node);
-    }
-    const optionValues = options.map((option) => option.value || "");
-    const nextValue = selectedValue && optionValues.includes(selectedValue)
-      ? selectedValue
-      : previous && optionValues.includes(previous)
-        ? previous
-        : options[0]?.value || "";
-    select.value = nextValue;
-    return nextValue;
   }
 
   function renderPermissionModePicker() {
@@ -2466,17 +2441,6 @@
     ));
   }
 
-  function summarizeToolResult(text) {
-    const firstLine = (text || "").split(/\r?\n/).find((line) => line.trim()) || "Tool result";
-    return firstLine.length > 96 ? `${firstLine.slice(0, 93)}...` : firstLine;
-  }
-
-  function on(element, type, listener) {
-    if (element) {
-      element.addEventListener(type, listener);
-    }
-  }
-
   function resizePromptInput() {
     if (!elements.input) {
       return;
@@ -2488,40 +2452,10 @@
     elements.input.style.overflowY = elements.input.scrollHeight > maxHeight ? "auto" : "hidden";
   }
 
-  function setValue(element, value) {
-    if (element) {
-      element.value = value;
-    }
-  }
-
-  function setChecked(element, value) {
-    if (element) {
-      element.checked = Boolean(value);
-    }
-  }
-
-  function setDisabled(element, value) {
-    if (element) {
-      element.disabled = Boolean(value);
-    }
-  }
-
-  function splitLines(value) {
-    return value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  }
-
-  function splitArgs(value) {
-    return String(value || "").match(/(?:"([^"]*)"|'([^']*)'|[^\s]+)/g)?.map((item) => item.replace(/^["']|["']$/g, "")) || [];
-  }
-
   function scrollMessages() {
     if (elements.messages) {
       elements.messages.scrollTop = elements.messages.scrollHeight;
     }
-  }
-
-  function cssEscape(value) {
-    return typeof CSS !== "undefined" && CSS.escape ? CSS.escape(value) : String(value).replace(/["\\]/g, "\\$&");
   }
 
   vscode.postMessage({ type: "webviewReady" });
