@@ -11,7 +11,7 @@ CodeForge uses a ports-and-adapters layout so the coding harness stays testable 
 - `src/adapters`: VS Code, filesystem, terminal, configuration, secrets, local memory/session storage, and diff-preview adapters. `worktree.ts` (`GitWorktreeManager`) is a Git worktree isolation adapter for parallel editing sub-agents — built and tested, but not yet wired into the worker runtime.
 - `src/agent`: orchestration of prompts, local context, endpoint calls, local tool loops, approvals, and execution. `workerManager.ts` runs sub-agents under a concurrency cap (`codeforge.workers.maxConcurrent`, default 3) with a start-as-others-finish queue, and is lesson/skill-aware so workers inherit relevant learned context.
 - `src/ui`: VS Code sidebar view provider and message bridge.
-- `media`: VS Code extension-view JavaScript, CSS, and icon assets.
+- `media`: the VS Code extension-view (webview) JavaScript, CSS, and icon assets. The view is split into focused, single-responsibility scripts that share a `window.CodeForge` namespace (see "Webview modules" below) rather than one monolith.
 
 ## Patterns
 
@@ -21,6 +21,15 @@ CodeForge uses a ports-and-adapters layout so the coding harness stays testable 
 - State machine discipline: sessions move through prompt, streaming, local tool, approval, execution, and idle/error states explicitly.
 - Event sourcing: sessions persist append-only JSONL records for messages, approvals, checkpoints, and resumable transcript replay.
 - Dependency injection: `extension.ts` is the composition root; core modules do not reach into global VS Code state.
+
+## Webview modules
+
+`media/` has no bundler and runs under a strict-nonce CSP (`script-src 'nonce-…'`, `default-src 'none'`), so the view is decomposed into separate `<script nonce>` files emitted in dependency order by `codeForgeViewProvider.ts`'s `html()`. Each script is its own IIFE; they share state only through a single `window.CodeForge` global, and `main.js` (loaded last) pulls the helpers in at the top of its IIFE so existing call sites stay unchanged. Two composition shapes are used:
+
+- **Pure leaves** expose a function directly (e.g. `window.CodeForge.renderMarkdown`): `markdown.js` (markdown→DOM + syntax highlight), `dom.js` (stateless DOM/format/string helpers), `inspector.js` (run-event/audit list rendering).
+- **Stateful/host-coupled sub-components** expose a `create…(deps)` factory that the view calls once with its live references (`vscode`, the `elements` map, injected helpers): `approvals.js` (`createApprovals`), `mcpEditor.js` (`createMcpEditor` — owns the MCP server-draft state), `workerList.js` (`createWorkerList`).
+
+Load order is `markdown → dom → inspector → approvals → mcpEditor → workerList → main`. `main.js` retains the cohesive core: webview state, the extension↔view message bridge, the menu/picker system, the slash-command UI, context-usage display, the chat-coupled session list, and event wiring. New view features should follow the same rule — extract a separable concern into its own `window.CodeForge` module (pure leaf if stateless, factory if it needs host state) rather than growing `main.js`. There is no build step for `media/`; validate with `node --check media/<file>.js`.
 
 ## Design Rules
 

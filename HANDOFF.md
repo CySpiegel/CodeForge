@@ -32,7 +32,9 @@ Core product (Phases 0–11) is unchanged and described in the git history. Seve
 
 6. **agentController.ts decomposition** (this session, post-v0.1.15) — pure structural refactor, described next.
 
-**Tests: 283 pass / 0 fail.** `tsc` clean, extension compiles. Run:
+7. **Webview (`media/main.js`) decomposition** (this session, post-v0.1.15) — `main.js` **2,844 → 1,824 lines (≈36%)** by extracting separable view concerns into `window.CodeForge` modules (`markdown.js`, `dom.js`, `inspector.js`, `approvals.js`, `mcpEditor.js`, `workerList.js`); the cohesive core stays in `main.js`. See "Webview decomposition" below and the "Webview modules" section in `ARCHITECTURE.md`.
+
+**Tests: 285 pass / 0 fail.** `tsc` clean, extension compiles. Run:
 ```bash
 npm run compile && npm run compile:tests && node --test out-test/test/unit/*.test.js out-test/test/integration/*.test.js
 ```
@@ -70,6 +72,23 @@ This builds on the earlier decomposition phases (also in git history): `sessionS
 **Two near-misses caught by verification (already fixed before their commits):** (1) the view provider calls `controller.undo()` directly — the full-project typecheck caught it; preserved via a thin public delegate. (2) a hand-written `formatTask` in `taskBoard.ts` diverged from the original (`Active:` vs `Active form:`, `toISOString` vs `toLocaleString`, the metadata key-count guard) — corrected to byte-match. **Lesson: when re-typing a moved body, diff it against `git show <base>:<file>` rather than trusting memory.**
 
 **Follow-up (low priority, not done):** `src/agent/workerManager.ts` keeps its own copies of `codeForgeToolSchemaMarker` + `escapeRegExp` + an inline schema-marker discovery regex; these could now import from `core/toolDiscovery.ts` to de-duplicate.
+
+## Webview decomposition (this session — structural, behavior-preserving)
+
+Same directive applied to the view layer. `media/main.js` went **2,844 → 1,824 lines (≈36%)**. `media/` has no bundler and runs under a strict-nonce CSP, so each extracted concern is its own `<script nonce>` IIFE sharing a single `window.CodeForge` global, emitted in dependency order by `codeForgeViewProvider.ts`'s `html()`; `main.js` (loaded last) pulls helpers in at the top of its IIFE so call sites are unchanged. Verified per step with `node --check` on both files + reference greps (zero leftover declarations, zero orphaned refs) + `npm run compile` + the full suite (285 tests) green at every commit.
+
+Modules (load order `markdown → dom → inspector → approvals → mcpEditor → workerList → main`):
+
+- `media/markdown.js` (326) — markdown→DOM renderer + regex syntax highlighter. Pure leaf (`window.CodeForge.renderMarkdown`). *(extracted just before this batch.)*
+- `media/dom.js` (106) — 14 stateless DOM/format/string helpers (`truncateStatus`, `formatNumber`, `on`, `setValue`, `cssEscape`, token↔byte utils, …). Pure leaf (`window.CodeForge.dom`).
+- `media/inspector.js` (69) — run-event + permission-audit list rendering. Pure leaf (`window.CodeForge.renderInspectorInto`); the thin `renderInspector` wrapper (touches the two container nodes) stays in `main.js`.
+- `media/approvals.js` (236) — approval card, ask-user-question form, per-action detail. Factory `createApprovals({ vscode, container, cssEscape })` → `addApproval`/`removeApproval`.
+- `media/mcpEditor.js` (348) — the MCP settings sub-feature. Factory `createMcpEditor({ vscode, elements, mcpStatuses, parseJsonObject })` that **owns the draft state** (drafts + selection + dirty flag) behind a small interface; the view drives it from event handlers and syncs it from settings on render (`mcpSyncFromState`/`mcpMarkClean`/`mcpSelectedId`).
+- `media/workerList.js` (98) — background-worker panel. Factory `createWorkerList({ vscode, elements, formatNumber })` → `renderWorkers`.
+
+**What stays in `main.js` (intentional — the cohesive core):** webview state, the extension↔view message bridge, the menu/picker system, the slash-command UI, context-usage display, the **session list** (it appends into the chat message flow, so it belongs with the message core), the memory list, and event wiring. The decomposition is at its natural stopping point — remaining candidates would fragment cohesive code for diminishing returns.
+
+**Pattern for future view work:** extract a separable concern into its own `window.CodeForge` module — *pure leaf* (expose the function) if stateless, *factory* (`create…(deps)` called once with live host refs) if it needs `vscode`/`elements`/state. Don't grow `main.js`. When re-typing a moved body, diff against `git show <base>:media/main.js` rather than trusting memory.
 
 ## Learning + multi-agent system
 

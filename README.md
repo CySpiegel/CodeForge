@@ -218,7 +218,7 @@ node --check media/main.js
 - `src/adapters`: VS Code, terminal, diff, config, session, memory, code-intel, notebook, and worktree adapters
 - `src/agent`: model loop, tool orchestration, permissions, sub-agent workers, learning hooks, and diagnostics
 - `src/ui`: VS Code webview provider and message bridge
-- `media`: chat UI script, styles, and extension icon
+- `media`: chat UI scripts (decomposed into `window.CodeForge` modules — markdown, DOM utils, inspector, approvals, MCP editor, worker list, and the `main.js` core), styles, and extension icon
 - `docs`: roadmap, testing notes, and local extension formats
 
 See `ARCHITECTURE.md` for implementation boundaries and design patterns.
