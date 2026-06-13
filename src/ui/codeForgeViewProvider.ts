@@ -165,6 +165,7 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
     const approvalsUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "media", "approvals.js"));
     const mcpEditorUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "media", "mcpEditor.js"));
     const workerListUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "media", "workerList.js"));
+    const slashCommandsUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "media", "slashCommands.js"));
     const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "media", "main.js"));
     const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "media", "styles.css"));
     const csp = [
@@ -343,6 +344,7 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
   <script nonce="${nonce}" src="${approvalsUri}"></script>
   <script nonce="${nonce}" src="${mcpEditorUri}"></script>
   <script nonce="${nonce}" src="${workerListUri}"></script>
+  <script nonce="${nonce}" src="${slashCommandsUri}"></script>
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;
