@@ -185,7 +185,14 @@ export class VsCodeSessionStore implements SessionStore {
 
   private async writeText(sessionId: string, text: string): Promise<void> {
     await vscode.workspace.fs.createDirectory(this.sessionsRoot());
-    await vscode.workspace.fs.writeFile(this.sessionUri(sessionId), Buffer.from(text, "utf8"));
+    // Atomic write: stage the full content in a temp file, then rename over the target. A crash mid-write
+    // can therefore never leave a truncated or zeroed session file — the previous version survives until
+    // the rename completes in one filesystem operation. A stale `.tmp` (crash between write and rename) is
+    // harmless: readers only look at `.jsonl` files and it is overwritten on the next write.
+    const target = this.sessionUri(sessionId);
+    const temp = vscode.Uri.joinPath(this.sessionsRoot(), `${sessionId}${sessionFileExtension}.tmp`);
+    await vscode.workspace.fs.writeFile(temp, Buffer.from(text, "utf8"));
+    await vscode.workspace.fs.rename(temp, target, { overwrite: true });
   }
 
   private async flushPendingWrites(): Promise<void> {
