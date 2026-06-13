@@ -105,11 +105,13 @@ CodeForge can also propose extension files from what it learns:
 
 A periodic self-audit dedups and prunes the lesson library. The **Learned** panel in the settings view lets you accept or reject proposed lessons, skills, and agents, and shows a pending-count badge. Inline chat surfaces provenance such as "Learned N…" and "Applied N learned lessons".
 
-Learning is controlled by `codeforge.learning.*` settings and can be fully disabled with `codeforge.learning.enabled`:
+Self-improvement is governed by three settings — all default **on**. To stop the agent from writing to local memory and skill files entirely, set all three to `false`:
 
-- **autonomy** (`review` | `hybrid` | `auto`, default `hybrid`): hybrid applies text lessons automatically and proposes skill files for review; review keeps everything pending in the Learned panel; auto saves lessons silently. Proposed agent files are **always review-only** and are never written without approval, even under `auto`.
-- **scope** (`split` | `repo` | `global`, default `split`): split keeps project lessons in the repo while preferences follow you across repos; repo keeps everything per-project; global shares across every project.
-- skill proposals (`skills.enabled`, default on) trigger after a procedure recurs (`skills.minRepeats`, default 3); agent proposals (`agents.enabled`) are opt-in and off by default.
+- **`codeforge.memory.enabled`** — durable curated memory (notes the agent keeps and reuses across sessions; sized by `codeforge.memory.charLimit` / `codeforge.memory.userCharLimit`).
+- **`codeforge.skills.enabled`** — capturing recurring procedures as reusable skills under `.codeforge/skills` (nudged by `codeforge.skills.creationNudgeInterval`).
+- **`codeforge.curator.enabled`** — the periodic skill-library curation pass that consolidates and archives skills (cadence via `codeforge.curator.intervalHours` / `codeforge.curator.minIdleHours`).
+
+All edits the agent proposes — including memory and skill files — are still routed through the same permission policy and approval flow as any other file change.
 
 ## Chat Commands
 

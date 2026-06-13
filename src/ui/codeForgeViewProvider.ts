@@ -1,3 +1,4 @@
+import { randomBytes } from "crypto";
 import * as vscode from "vscode";
 import { errorMessage } from "../core/guards";
 import { AgentController, AgentUiEvent } from "../agent/agentController";
@@ -399,10 +400,7 @@ function parseAgentMode(value: unknown): AgentMode | undefined {
 
 
 function getNonce(): string {
-  const possible = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-  let text = "";
-  for (let index = 0; index < 32; index++) {
-    text += possible.charAt(Math.floor(Math.random() * possible.length));
-  }
-  return text;
+  // Cryptographically-secure 32-char nonce for the webview CSP (Math.random is not suitable for a
+  // security token).
+  return randomBytes(16).toString("hex");
 }
