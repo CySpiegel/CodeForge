@@ -32,7 +32,9 @@ Core product (Phases 0–11) is unchanged and described in the git history. Seve
 
 6. **agentController.ts decomposition** (this session, post-v0.1.15) — pure structural refactor, described next.
 
-7. **Webview (`media/main.js`) decomposition** (this session, post-v0.1.15) — `main.js` **2,844 → 1,824 lines (≈36%)** by extracting separable view concerns into `window.CodeForge` modules (`markdown.js`, `dom.js`, `inspector.js`, `approvals.js`, `mcpEditor.js`, `workerList.js`); the cohesive core stays in `main.js`. See "Webview decomposition" below and the "Webview modules" section in `ARCHITECTURE.md`.
+7. **Webview (`media/main.js`) decomposition** (this session, post-v0.1.15) — `main.js` **2,844 → 1,560 lines (≈45%)** by extracting separable view concerns into `window.CodeForge` modules (`markdown.js`, `dom.js`, `inspector.js`, `approvals.js`, `mcpEditor.js`, `workerList.js`, `slashCommands.js`); the cohesive core stays in `main.js`. See "Webview decomposition" below and the "Webview modules" section in `ARCHITECTURE.md`.
+
+8. **`toolRegistry.ts` decomposition + `agentController.ts` further extraction** (this session, post-v0.1.15) — `toolRegistry.ts` **1,851 → 102 lines**: shared validators → `toolValidation.ts`, pure predicates → `toolClassification.ts`, and the 36-tool table → 10 per-domain modules under `core/tools/*` composed by spread. `agentController.ts` **2,405 → 2,277**: `approvalMetadata.ts` (approval display formatting) + `toolRequestDefinitions.ts` (per-request tool-list assembly). See `ARCHITECTURE.md` ("Tool registry" bullet + "Webview modules").
 
 **Tests: 285 pass / 0 fail.** `tsc` clean, extension compiles. Run:
 ```bash
@@ -85,8 +87,9 @@ Modules (load order `markdown → dom → inspector → approvals → mcpEditor 
 - `media/approvals.js` (236) — approval card, ask-user-question form, per-action detail. Factory `createApprovals({ vscode, container, cssEscape })` → `addApproval`/`removeApproval`.
 - `media/mcpEditor.js` (348) — the MCP settings sub-feature. Factory `createMcpEditor({ vscode, elements, mcpStatuses, parseJsonObject })` that **owns the draft state** (drafts + selection + dirty flag) behind a small interface; the view drives it from event handlers and syncs it from settings on render (`mcpSyncFromState`/`mcpMarkClean`/`mcpSelectedId`).
 - `media/workerList.js` (98) — background-worker panel. Factory `createWorkerList({ vscode, elements, formatNumber })` → `renderWorkers`.
+- `media/slashCommands.js` (315) — `/command` + `/models` autocomplete menu (owns its menu state). Factory `createSlashCommands({ elements, vscode, getState, builtInSlashCommands, resizePromptInput, onSelectModel })`. `selectModelFromPicker` stays in `main.js` (mutates app state + re-renders the model picker) and is passed in via `onSelectModel`.
 
-**What stays in `main.js` (intentional — the cohesive core):** webview state, the extension↔view message bridge, the menu/picker system, the slash-command UI, context-usage display, the **session list** (it appends into the chat message flow, so it belongs with the message core), the memory list, and event wiring. The decomposition is at its natural stopping point — remaining candidates would fragment cohesive code for diminishing returns.
+**What stays in `main.js` (intentional — the cohesive core):** webview state, the extension↔view message bridge, the menu/picker system, model selection (`selectModelFromPicker`), context-usage display, the **session list** (it appends into the chat message flow, so it belongs with the message core), the memory list, and event wiring. Remaining candidates would fragment cohesive code for diminishing returns.
 
 **Pattern for future view work:** extract a separable concern into its own `window.CodeForge` module — *pure leaf* (expose the function) if stateless, *factory* (`create…(deps)` called once with live host refs) if it needs `vscode`/`elements`/state. Don't grow `main.js`. When re-typing a moved body, diff against `git show <base>:media/main.js` rather than trusting memory.
 
