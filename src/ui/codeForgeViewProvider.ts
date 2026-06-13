@@ -161,6 +161,7 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
     const nonce = getNonce();
     const markdownUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "media", "markdown.js"));
     const domUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "media", "dom.js"));
+    const inspectorUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "media", "inspector.js"));
     const approvalsUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "media", "approvals.js"));
     const mcpEditorUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "media", "mcpEditor.js"));
     const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "media", "main.js"));
@@ -337,6 +338,7 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
   </div>
   <script nonce="${nonce}" src="${markdownUri}"></script>
   <script nonce="${nonce}" src="${domUri}"></script>
+  <script nonce="${nonce}" src="${inspectorUri}"></script>
   <script nonce="${nonce}" src="${approvalsUri}"></script>
   <script nonce="${nonce}" src="${mcpEditorUri}"></script>
   <script nonce="${nonce}" src="${scriptUri}"></script>
