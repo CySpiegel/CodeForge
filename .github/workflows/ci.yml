@@ -1,0 +1,39 @@
+name: CI
+
+# Build, type-check, and run the full offline test suite on every push and PR. The suite is hermetic
+# (ScriptedLlmProvider + fake ports — no network, no secrets), so this is the quality gate that prevents
+# a broken commit from ever reaching a release.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: Build + Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check + compile
+        run: npm run compile
+
+      - name: Run tests
+        run: npm test
