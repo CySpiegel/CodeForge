@@ -563,6 +563,7 @@
   },
   "scripts": {
     "compile": "tsc -p ./tsconfig.json",
+    "lint": "eslint src test",
     "watch": "tsc -watch -p ./",
     "compile:tests": "tsc -p ./tsconfig.test.json",
     "test": "npm run compile:tests && node --test out-test/test/unit/*.test.js out-test/test/integration/*.test.js",
@@ -571,12 +572,15 @@
     "postcompile": "node scripts/copyHolographicWasm.js"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.4",
     "@types/node": "^20.17.10",
     "@types/sql.js": "^1.4.11",
     "@types/vscode": "^1.90.0",
     "@vscode/test-electron": "^2.4.1",
     "@vscode/vsce": "^2.15.0",
+    "eslint": "^9.39.4",
     "sql.js": "^1.14.1",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.61.0"
   }
 }

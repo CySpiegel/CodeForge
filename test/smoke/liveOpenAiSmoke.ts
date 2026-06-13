@@ -27,7 +27,7 @@ async function main(): Promise<void> {
 
   console.log(`[smoke] streaming a 1-sentence response from ${model}`);
   const start = Date.now();
-  let saw = { content: 0, progress: 0, toolCalls: 0, usage: 0, done: false };
+  const saw = { content: 0, progress: 0, toolCalls: 0, usage: 0, done: false };
   let text = "";
   for await (const event of provider.streamChat({
     model,

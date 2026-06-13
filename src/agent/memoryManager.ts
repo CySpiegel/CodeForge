@@ -197,15 +197,13 @@ export class MemoryManager {
 
   private mirrorMemoryWrite(args: Record<string, unknown>, result: string): void {
     let ok = false;
-    let action: unknown;
-    let target: unknown;
     try {
       ok = Boolean((JSON.parse(result) as { success?: boolean }).success);
     } catch {
       ok = false;
     }
-    action = args.action;
-    target = args.target;
+    const action = args.action;
+    const target = args.target;
     if (!ok || (action !== "add" && action !== "replace" && action !== "remove")) {
       return;
     }
