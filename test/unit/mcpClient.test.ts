@@ -129,3 +129,88 @@ test("validates configured stdio MCP servers without network policy checks", () 
   assert.equal(status?.valid, true);
   assert.equal(status?.transport, "stdio");
 });
+
+// A minimal MCP server over stdio: read newline-delimited JSON-RPC requests, answer initialize /
+// tools/list / resources/list / tools/call. Passed to a spawned `node -e` so the StdioMcpTransport
+// runs end-to-end (spawn -> stdin write -> stdout framing -> response correlation by id).
+const mockStdioMcpServer = `
+let buf = "";
+process.stdin.on("data", (chunk) => {
+  buf += chunk;
+  let i;
+  while ((i = buf.indexOf("\\n")) >= 0) {
+    const line = buf.slice(0, i);
+    buf = buf.slice(i + 1);
+    if (!line.trim()) continue;
+    const msg = JSON.parse(line);
+    if (msg.id === undefined || msg.id === null) continue;
+    let result = {};
+    if (msg.method === "tools/list") result = { tools: [{ name: "echo", description: "Echo tool" }] };
+    else if (msg.method === "resources/list") result = { resources: [] };
+    else if (msg.method === "tools/call") result = { content: [{ type: "text", text: "stdio echo " + JSON.stringify(msg.params && msg.params.arguments) }] };
+    else result = { serverInfo: { name: "mock-stdio" } };
+    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result }) + "\\n");
+  }
+});
+`;
+
+test("stdio transport spawns a server and exchanges JSON-RPC over stdout", async () => {
+  const servers: readonly McpServerConfig[] = [
+    { id: "stdio", label: "Stdio", transport: "stdio", command: process.execPath, args: ["-e", mockStdioMcpServer] }
+  ];
+
+  const [inspection] = await inspectConfiguredMcpServers(servers, { allowlist: [] });
+  assert.equal(inspection?.error, undefined);
+  assert.equal(inspection?.tools[0]?.name, "echo");
+
+  const result = await callConfiguredMcpTool(
+    servers,
+    { allowlist: [] },
+    { type: "mcp_call_tool", serverId: "stdio", toolName: "echo", arguments: { message: "hi" } }
+  );
+  assert.match(result, /stdio echo .*"message":"hi"/);
+});
+
+test("legacy SSE transport reads the announced endpoint and correlates responses", async () => {
+  const previousFetch = globalThis.fetch;
+  const encoder = new TextEncoder();
+  let sse: ReadableStreamDefaultController<Uint8Array> | undefined;
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      sse = controller;
+      // First SSE event announces the message endpoint the client must POST to.
+      controller.enqueue(encoder.encode("event: endpoint\ndata: /messages\n\n"));
+    }
+  });
+
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    if (!init || init.method !== "POST") {
+      // GET opens the long-lived SSE stream.
+      return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+    }
+    // POST to the announced endpoint: push the matching JSON-RPC response back onto the SSE stream.
+    const msg = JSON.parse(String(init.body));
+    if (msg.id !== undefined && msg.id !== null) {
+      const result = msg.method === "tools/list"
+        ? { tools: [{ name: "sse-echo", description: "SSE echo" }] }
+        : msg.method === "resources/list"
+          ? { resources: [] }
+          : { serverInfo: { name: "mock-sse" } };
+      sse?.enqueue(encoder.encode(`data: ${JSON.stringify({ jsonrpc: "2.0", id: msg.id, result })}\n\n`));
+    }
+    return new Response(undefined, { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const [inspection] = await inspectConfiguredMcpServers(
+      [{ id: "sse", label: "Sse", transport: "sse", url: "http://127.0.0.1:9777/sse" }],
+      { allowlist: [] }
+    );
+    assert.equal(inspection?.error, undefined);
+    assert.equal(inspection?.status.valid, true);
+    assert.equal(inspection?.tools[0]?.name, "sse-echo");
+  } finally {
+    globalThis.fetch = previousFetch;
+    sse?.close();
+  }
+});
