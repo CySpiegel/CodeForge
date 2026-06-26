@@ -56,3 +56,11 @@ test("returns a retryable instruction when truncated arguments cannot be recover
   assert.match(failed.ok ? "" : failed.message, /Re-issue the read_file call/);
   assert.match(failed.ok ? "" : failed.message, /valid JSON/);
 });
+
+test("recovers a truncated JSON action-protocol envelope (non-native model path)", () => {
+  // A text-protocol model emitted {"actions":[...]} but got cut off mid-string with no closing brace.
+  // Previously this produced no candidate and silently zero actions; now it is repaired and runs.
+  const actions = parseActionsFromAssistantText("{\"actions\":[{\"type\":\"read_file\",\"path\":\"src/index.ts\",\"reason\":\"insp");
+  assert.equal(actions.length, 1);
+  assert.deepEqual(actions[0], { type: "read_file", path: "src/index.ts", reason: "insp" });
+});

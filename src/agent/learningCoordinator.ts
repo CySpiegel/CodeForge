@@ -521,7 +521,13 @@ export class LearningCoordinator {
           this.deps.emit({ type: "error", text: "Usage: /curator archive <skill>" });
           return;
         }
-        const result = JSON.parse(await skillManager.handleManage({ action: "delete", name: arg, absorbed_into: "" }));
+        const raw = await skillManager.handleManage({ action: "delete", name: arg, absorbed_into: "" });
+        let result: { success?: boolean; message?: string; error?: string };
+        try {
+          result = JSON.parse(raw);
+        } catch {
+          result = { success: false, error: "Skill archive returned malformed output." };
+        }
         this.deps.emit({ type: result.success ? "status" : "error", text: result.message ?? result.error ?? "" });
         await this.deps.publishState();
         return;

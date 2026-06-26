@@ -317,7 +317,16 @@ export class OpenAiCompatibleProvider implements LlmProvider {
       return;
     }
 
-    const chunk = JSON.parse(data) as OpenAiStreamChunk;
+    let chunk: OpenAiStreamChunk;
+    try {
+      chunk = JSON.parse(data) as OpenAiStreamChunk;
+    } catch {
+      // A partial or non-JSON SSE frame — e.g. a fragment the parser flushes after a dropped or
+      // quiet-cancelled stream, or a gateway keep-alive line — must NOT throw a raw "Unterminated
+      // string in JSON at position N" out of streamChat and discard the whole turn. Skip the frame;
+      // accumulated content and tool-call deltas are preserved on `toolCalls` across events.
+      return;
+    }
     const usage = toUsage(chunk.usage);
     if (usage) {
       yield { type: "usage", usage };

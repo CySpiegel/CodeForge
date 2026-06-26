@@ -2,6 +2,7 @@
 // learning coordinator format and detect tool errors identically (no copy-pasted variants).
 
 import { errorMessage, isRecord } from "../core/guards";
+import { parseToolArguments } from "../core/openaiToolArgs";
 // errorMessage is the shared core helper; re-exported so existing `from "./toolText"` importers keep working.
 export { errorMessage };
 
@@ -18,14 +19,12 @@ export function firstLines(value: string, limit: number): string {
   return value.split(/\r?\n/).slice(0, limit).join("\n");
 }
 
-// Parse a tool call's JSON arguments into a plain object, tolerating malformed input (returns {}).
+// Parse a tool call's JSON arguments into a plain object, tolerating malformed input. Routes through
+// the same repair the inbound tool-call parsers use, so a review/curator tool arg truncated mid-string
+// (a learned memory or skill body) is RECOVERED rather than silently dropped to {}.
 export function safeParseArgs(json: string): Record<string, unknown> {
-  try {
-    const parsed = JSON.parse(json);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
-  } catch {
-    return {};
-  }
+  const parsed = parseToolArguments(json);
+  return parsed.ok ? parsed.value : {};
 }
 
 // Heuristic: does this endpoint error mean the prompt exceeded the model's context window? Covers the

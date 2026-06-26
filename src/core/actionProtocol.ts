@@ -37,14 +37,17 @@ export { toolDefinitions };
 export function parseActionsFromAssistantText(text: string): readonly AgentAction[] {
   const candidates = extractJsonCandidates(text);
   for (const candidate of candidates) {
-    try {
-      const parsed = JSON.parse(candidate) as ActionEnvelope;
-      const actions = parseActionArray(parsed.actions);
-      if (actions.length > 0) {
-        return actions;
-      }
-    } catch {
+    // Tolerate truncated/malformed action JSON the same way native tool calls are tolerated. A local
+    // model without native tool-calling emits the {"actions":[...]} protocol as text; cut off
+    // mid-string it would otherwise parse to zero actions and the turn would silently end without
+    // running the requested tool. parseToolArguments repairs the truncated object before we read it.
+    const parsed = parseToolArguments(candidate);
+    if (!parsed.ok) {
       continue;
+    }
+    const actions = parseActionArray((parsed.value as ActionEnvelope).actions);
+    if (actions.length > 0) {
+      return actions;
     }
   }
 
@@ -91,9 +94,13 @@ function extractJsonCandidates(text: string): readonly string[] {
   }
 
   const firstBrace = text.indexOf("{");
-  const lastBrace = text.lastIndexOf("}");
-  if (firstBrace !== -1 && lastBrace > firstBrace) {
-    candidates.push(text.slice(firstBrace, lastBrace + 1));
+  if (firstBrace !== -1) {
+    const lastBrace = text.lastIndexOf("}");
+    // A complete object slice when there is a closing brace; otherwise the open-ended remainder — the
+    // model truncated mid-value and the closing brace is gone — which the repair step in
+    // parseActionsFromAssistantText completes. Without this, a truncated envelope yields no candidate
+    // at all and the action is silently dropped.
+    candidates.push(lastBrace > firstBrace ? text.slice(firstBrace, lastBrace + 1) : text.slice(firstBrace));
   }
 
   return candidates;
