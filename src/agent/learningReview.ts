@@ -1,9 +1,36 @@
 import { parseActionsFromAssistantText } from "../core/actionProtocol";
+import { LearningVerbosity } from "../core/backgroundReview";
 
 export interface ReviewToolOutcome {
   readonly output: string;
   readonly summary: string;
   readonly notice: string;
+}
+
+// Which learning notices to surface for the configured verbosity.
+//   status      — the transient "🧠 Reviewing this session…" run-status while the review runs
+//   chat        — the per-write notices (🧠/👤/🛠️) and the "📎 Applied" provenance line
+//   emptyLine   — a "🧠 Reviewed this session — nothing new." line when the review saves nothing
+//   failureLine — a "🧠 Couldn't review…" line when the review errors
+export interface LearningNoticePolicy {
+  readonly status: boolean;
+  readonly chat: boolean;
+  readonly emptyLine: boolean;
+  readonly failureLine: boolean;
+}
+
+export function learningNotices(verbosity: LearningVerbosity): LearningNoticePolicy {
+  switch (verbosity) {
+    case "silent":
+      return { status: false, chat: false, emptyLine: false, failureLine: false };
+    case "status":
+      return { status: true, chat: false, emptyLine: false, failureLine: false };
+    case "concise":
+      return { status: true, chat: true, emptyLine: false, failureLine: true };
+    case "verbose":
+    default:
+      return { status: true, chat: true, emptyLine: true, failureLine: true };
+  }
 }
 
 export function reviewWriteSucceeded(output: string): boolean {

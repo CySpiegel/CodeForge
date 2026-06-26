@@ -1,6 +1,23 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildReviewPrompt, FAILED_RUN_CAUTION, MEMORY_REVIEW_PROMPT, SKILL_REVIEW_PROMPT } from "../../src/core/backgroundReview";
+import { buildReviewPrompt, FAILED_RUN_CAUTION, MEMORY_REVIEW_PROMPT, normalizeLearningVerbosity, SKILL_REVIEW_PROMPT } from "../../src/core/backgroundReview";
+import { learningNotices } from "../../src/agent/learningReview";
+
+test("normalizeLearningVerbosity falls back to verbose for unknown values", () => {
+  assert.equal(normalizeLearningVerbosity("concise"), "concise");
+  assert.equal(normalizeLearningVerbosity("status"), "status");
+  assert.equal(normalizeLearningVerbosity("silent"), "silent");
+  assert.equal(normalizeLearningVerbosity("verbose"), "verbose");
+  assert.equal(normalizeLearningVerbosity("nonsense"), "verbose");
+  assert.equal(normalizeLearningVerbosity(undefined), "verbose");
+});
+
+test("learningNotices maps each verbosity to which notices surface", () => {
+  assert.deepEqual(learningNotices("verbose"), { status: true, chat: true, emptyLine: true, failureLine: true });
+  assert.deepEqual(learningNotices("concise"), { status: true, chat: true, emptyLine: false, failureLine: true });
+  assert.deepEqual(learningNotices("status"), { status: true, chat: false, emptyLine: false, failureLine: false });
+  assert.deepEqual(learningNotices("silent"), { status: false, chat: false, emptyLine: false, failureLine: false });
+});
 
 test("selects the memory review prompt", () => {
   const prompt = buildReviewPrompt(true, false);

@@ -3,6 +3,7 @@ import { isRecord } from "../core/guards";
 import { allowlistEntryForUrl, assertUrlAllowed, isUrlAllowed } from "../core/networkPolicy";
 import { normalizePermissionPolicy, parsePermissionRules } from "../core/permissions";
 import { CuratorSettings } from "../core/curator";
+import { LearningVerbosity, normalizeLearningVerbosity } from "../core/backgroundReview";
 import { normalizeSettingsPermissionMode } from "../core/settingsMigration";
 import { AgentMode, ContextLimits, McpServerConfig, NetworkPolicy, PermissionMode, PermissionPolicy, PermissionRule, ProviderProfile } from "../core/types";
 
@@ -17,6 +18,7 @@ export interface MemorySettings {
   readonly skillsEnabled: boolean;
   readonly skillsDigestBytes: number;
   readonly reviewMinTurns: number;
+  readonly verbosity: LearningVerbosity;
 }
 
 export class CodeForgeConfigService {
@@ -58,7 +60,8 @@ export class CodeForgeConfigService {
       skillNudgeInterval: clampNumber(this.config().get<number>("skills.creationNudgeInterval", 10), 0, 1000, 10),
       skillsEnabled: this.config().get<boolean>("skills.enabled", true),
       skillsDigestBytes: clampNumber(this.config().get<number>("skills.digestBytes", 24000), 1000, 500000, 24000),
-      reviewMinTurns: clampNumber(this.config().get<number>("review.minTurns", 2), 0, 1000, 2)
+      reviewMinTurns: clampNumber(this.config().get<number>("review.minTurns", 2), 0, 1000, 2),
+      verbosity: normalizeLearningVerbosity(this.config().get<unknown>("review.verbosity", "verbose"))
     };
   }
 

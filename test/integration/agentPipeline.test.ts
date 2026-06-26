@@ -1119,6 +1119,55 @@ test("background self-improvement review saves a memory on the turn cadence", as
   );
 });
 
+test("verbose review reports when a session yields nothing worth saving", async () => {
+  const harness = createControllerHarness({
+    mode: "agent",
+    files: {},
+    memorySettings: { nudgeInterval: 1, skillNudgeInterval: 0, reviewMinTurns: 1, verbosity: "verbose" },
+    responses: [
+      { content: "Understood." },
+      { content: "Nothing to save." }
+    ]
+  });
+
+  await harness.controller.sendPrompt("Just chatting, nothing to remember.");
+  // Previously a no-write review was completely silent (the #1 reason testers thought learning was
+  // dead). Verbose now confirms the review actually ran.
+  await waitForEvent(
+    harness.events,
+    (event) => event.type === "message" && event.role === "system" && /Reviewed this session — nothing new/.test(event.text)
+  );
+});
+
+test("silent review verbosity suppresses the learning notice but still writes", async () => {
+  const harness = createControllerHarness({
+    mode: "agent",
+    files: {},
+    memorySettings: { nudgeInterval: 1, skillNudgeInterval: 0, reviewMinTurns: 1, verbosity: "silent" },
+    responses: [
+      { content: "Understood." },
+      { toolCalls: [toolCall("memory", { action: "add", target: "user", content: "User prefers terse, bulleted answers." })] },
+      { content: "Nothing more to save." }
+    ]
+  });
+
+  await harness.controller.sendPrompt("Be terse and use bullets from now on.");
+  // Poll for the durable outcome (the write still happens in silent mode); the notice is emitted in the
+  // same step as the write, so once the memory lands the emit decision has already been made.
+  const deadline = Date.now() + 1000;
+  while (Date.now() < deadline && !harness.memory.memories.some((memory) => /terse, bulleted/.test(memory.text))) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.ok(
+    harness.memory.memories.some((memory) => memory.scope === "user" && /terse, bulleted/.test(memory.text)),
+    "the review should still persist the memory in silent mode"
+  );
+  assert.ok(
+    !harness.events.some((event) => event.type === "message" && event.role === "system" && /Learned something about you|🧠/.test(event.text)),
+    "silent verbosity should not surface a learning notice"
+  );
+});
+
 test("refreshing models warns when the selected model is no longer served by the endpoint", async () => {
   const harness = createControllerHarness({
     mode: "agent",

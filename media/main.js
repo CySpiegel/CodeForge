@@ -596,6 +596,9 @@
     } else if (message.type === "status") {
       setRunStatus(message.text);
       addStatus(message.text);
+    } else if (message.type === "runStatus") {
+      // Transient run-status only (no persistent transcript line) — used for the learning-review indicator.
+      setRunStatus(message.text);
     } else if (message.type === "toolResult") {
       addToolResult(message.text);
     } else if (message.type === "toolUse") {
@@ -794,6 +797,9 @@
     }
     if (/^Error:/.test(text)) {
       return { label: text, busy: false };
+    }
+    if (/^🧠/.test(text)) {
+      return { label: text, busy: true };
     }
     return { label: text, busy: false };
   }

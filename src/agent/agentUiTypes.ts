@@ -7,6 +7,7 @@ import { WorkerSummary } from "../core/workerTypes";
 export type AgentUiEvent =
   | { readonly type: "sessionReset" }
   | { readonly type: "status"; readonly text: string }
+  | { readonly type: "runStatus"; readonly text: string }
   | { readonly type: "message"; readonly role: "user" | "assistant" | "system"; readonly text: string }
   | { readonly type: "assistantDelta"; readonly text: string }
   | { readonly type: "assistantReasoningDelta"; readonly text: string }

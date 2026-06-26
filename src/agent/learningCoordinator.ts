@@ -17,7 +17,7 @@ import { SkillUsageReportRow, SkillUsageTracker } from "../core/skillUsage";
 import { codeForgeTools } from "../core/toolRegistry";
 import { ChatMessage, LlmProvider, LlmRequest, LlmStreamEvent, ProviderCapabilities, ToolCall, ToolDefinition } from "../core/types";
 import type { AgentUiEvent } from "./agentUiTypes";
-import { describeMemoryWrite, learningNotice, ReviewToolOutcome, reviewActionsFromText, reviewWriteSucceeded, summarizeReviewActions } from "./learningReview";
+import { describeMemoryWrite, learningNotice, LearningNoticePolicy, learningNotices, ReviewToolOutcome, reviewActionsFromText, reviewWriteSucceeded, summarizeReviewActions } from "./learningReview";
 import { MemoryManager } from "./memoryManager";
 import { errorMessage, isToolErrorText, safeParseArgs } from "./toolText";
 
@@ -47,6 +47,7 @@ export interface LearningDeps {
   getUserTurnCount(): number;
   getToolIterationCount(): number;
   getLastRunErrored(): boolean;
+  isRunning(): boolean;
 }
 
 // Owns the Hermes-style self-improvement review (distil durable memory/skills from finished runs) and
@@ -131,22 +132,37 @@ export class LearningCoordinator {
     this.reviewInFlight = true;
     this.inBackgroundReview = true;
     this.reviewSkillWritesBlocked = outcome !== "ok";
+    // Make the review observable (the #1 reason testers thought learning was dead: a review that wrote
+    // nothing emitted nothing — not even here). The verbosity setting decides how loud it is.
+    const notices = learningNotices(settings.verbosity);
+    if (notices.status) {
+      this.deps.emit({ type: "runStatus", text: "🧠 Reviewing this session…" });
+    }
     try {
       await this.deps.ensureMemoryInitialized();
-      const summary = await this.runBackgroundReview(memoryDue, reviewSkills, slice, outcome);
+      const summary = await this.runBackgroundReview(memoryDue, reviewSkills, slice, outcome, notices);
       this.lastReviewedMessageCount = this.deps.getMessages().length;
       if (summary) {
         // Per-update "learning" notices are emitted live inside runBackgroundReview as each memory,
         // user-profile, or skill write lands; here we just refresh the side panels (Learned/memory
         // list/skills) so they reflect what was just saved.
         await this.deps.publishState();
+      } else if (notices.emptyLine) {
+        this.deps.emit({ type: "message", role: "system", text: "🧠 Reviewed this session — nothing new." });
       }
     } catch (error) {
       this.deps.recordInspector("warn", "memory", "Background self-improvement review failed.", errorMessage(error));
+      if (notices.failureLine) {
+        this.deps.emit({ type: "message", role: "system", text: "🧠 Couldn't review this session for lessons — see the Inspector panel for details." });
+      }
     } finally {
       this.inBackgroundReview = false;
       this.reviewInFlight = false;
       this.reviewSkillWritesBlocked = false;
+      // Clear the transient "reviewing" indicator, but never stomp a run the user started meanwhile.
+      if (notices.status && !this.deps.isRunning()) {
+        this.deps.emit({ type: "runStatus", text: "Idle" });
+      }
     }
   }
 
@@ -173,7 +189,7 @@ export class LearningCoordinator {
     return "ok";
   }
 
-  private async runBackgroundReview(reviewMemory: boolean, reviewSkills: boolean, slice: readonly ChatMessage[], outcome: "ok" | "failed" = "ok"): Promise<string> {
+  private async runBackgroundReview(reviewMemory: boolean, reviewSkills: boolean, slice: readonly ChatMessage[], outcome: "ok" | "failed", notices: LearningNoticePolicy): Promise<string> {
     const transcript = slice
       .filter((message) => message.role !== "system")
       .map((message) => `${message.role.toUpperCase()}:\n${message.content}`)
@@ -222,7 +238,7 @@ export class LearningCoordinator {
           if (result.summary) {
             actions.push(result.summary);
           }
-          if (result.notice) {
+          if (result.notice && notices.chat) {
             this.deps.emit({ type: "message", role: "system", text: result.notice });
           }
           messages.push({ role: "tool", content: result.output, toolCallId: toolCall.id, name: toolCall.name });
@@ -237,7 +253,7 @@ export class LearningCoordinator {
         if (result.summary) {
           actions.push(result.summary);
         }
-        if (result.notice) {
+        if (result.notice && notices.chat) {
           this.deps.emit({ type: "message", role: "system", text: result.notice });
         }
       }

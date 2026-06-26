@@ -424,6 +424,7 @@ export function createControllerHarness(options: ControllerHarnessOptions): Cont
     skillsEnabled: true,
     skillsDigestBytes: 24000,
     reviewMinTurns: 2,
+    verbosity: "verbose",
     ...options.memorySettings
   };
   const config = {

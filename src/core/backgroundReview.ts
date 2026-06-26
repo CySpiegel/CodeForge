@@ -100,6 +100,19 @@ export const FAILED_RUN_CAUTION = [
   "  • If neither applies, reply exactly: Nothing to save."
 ].join("\n");
 
+// How visibly the background self-improvement (learning) review reports itself in chat. Learning runs
+// regardless; this only controls what the user sees.
+//   verbose — a transient "🧠 Reviewing…" status, every per-write notice, AND a result line when the
+//             review writes nothing ("nothing new") or fails ("couldn't review")
+//   concise — the status + per-write notices, plus a failure line, but no "nothing new" line
+//   status  — only the transient status indicator; no chat lines (writes still update the panels)
+//   silent  — no status and no chat lines
+export type LearningVerbosity = "verbose" | "concise" | "status" | "silent";
+
+export function normalizeLearningVerbosity(value: unknown): LearningVerbosity {
+  return value === "concise" || value === "status" || value === "silent" ? value : "verbose";
+}
+
 /** Select the review prompt for the cadence(s) that fired. A failed-run outcome restricts what may be saved. */
 export function buildReviewPrompt(reviewMemory: boolean, reviewSkills: boolean, outcome: "ok" | "failed" = "ok"): string {
   const base = reviewMemory && reviewSkills

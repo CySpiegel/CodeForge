@@ -367,7 +367,8 @@ export class AgentController {
       getMessages: () => this.messages,
       getUserTurnCount: () => this.userTurnCount,
       getToolIterationCount: () => this.toolIterationCount,
-      getLastRunErrored: () => this.lastRunErrored
+      getLastRunErrored: () => this.lastRunErrored,
+      isRunning: () => Boolean(this.runningAbort)
     });
     this.doctor = new DoctorService({
       config,

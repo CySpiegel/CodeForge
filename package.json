@@ -460,6 +460,24 @@
           "scope": "resource",
           "description": "Minimum user turns in a session before the background self-improvement review can run."
         },
+        "codeforge.review.verbosity": {
+          "type": "string",
+          "enum": [
+            "verbose",
+            "concise",
+            "status",
+            "silent"
+          ],
+          "enumDescriptions": [
+            "Verbose: a transient \"🧠 Reviewing this session…\" status, every learning notice (🧠 memory / 👤 user profile / 🛠️ skill), AND a result line when the review saves nothing (\"nothing new\") or fails.",
+            "Concise: the reviewing status and per-write notices, plus a line on failure, but no \"nothing new\" line.",
+            "Status only: show just the transient reviewing indicator; add no chat lines (writes still update the Learned/memory/skills panels).",
+            "Silent: no status and no chat lines; the self-improvement review still runs in the background."
+          ],
+          "default": "verbose",
+          "scope": "resource",
+          "description": "How visibly the background self-improvement (learning) review reports itself in chat — when it reviews a session and what it saves to memory/skills. Learning runs regardless; this only controls what you see."
+        },
         "codeforge.curator.enabled": {
           "type": "boolean",
           "default": true,

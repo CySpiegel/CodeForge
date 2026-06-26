@@ -57,6 +57,14 @@ test("model max output tokens defaults to 32k", () => {
   assert.equal(property.default, 32000);
 });
 
+test("learning-review verbosity is declared with safe defaults", () => {
+  const property = readPackageJson().contributes?.configuration?.properties?.["codeforge.review.verbosity"];
+  assert.ok(property, "codeforge.review.verbosity should be declared");
+  assert.equal(property.type, "string");
+  assert.equal(property.default, "verbose");
+  assert.deepEqual(property.enum, ["verbose", "concise", "status", "silent"]);
+});
+
 test("internal tool registry does not expose public web tools", () => {
   const forbiddenTools = new Set(["web_search", "fetch_url", "http_request", "browser_open"]);
   for (const tool of codeForgeTools) {
