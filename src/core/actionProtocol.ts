@@ -1,4 +1,5 @@
 import { isRecord } from "./guards";
+import { parseToolArguments } from "./openaiToolArgs";
 import { parseAction, toolDefinitions } from "./toolRegistry";
 import { AgentAction } from "./types";
 
@@ -61,19 +62,19 @@ export function parseToolActionDetailed(name: string, argumentsJson: string): To
     return { ok: false, message: "Tool call did not include a function name." };
   }
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(argumentsJson || "{}");
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    return { ok: false, message: `Arguments for ${toolName} must be valid JSON. ${detail}` };
+  // Tool-call `arguments` is a model-generated string that the OpenAI spec does not guarantee to be
+  // valid JSON; local/streamed backends frequently truncate it mid-string. Recover what we can before
+  // failing, and when it is unrecoverable return a clear, retryable instruction instead of a raw
+  // JSON.parse error so the model re-issues the call.
+  const args = parseToolArguments(argumentsJson);
+  if (!args.ok) {
+    return {
+      ok: false,
+      message: `Arguments for ${toolName} could not be parsed as a JSON object — they were missing, malformed, or truncated (e.g. a tool call cut off mid-string). Re-issue the ${toolName} call with complete, valid JSON arguments.`
+    };
   }
 
-  if (!isRecord(parsed)) {
-    return { ok: false, message: `Arguments for ${toolName} must be a JSON object.` };
-  }
-
-  const action = normalizeAction({ ...parsed, type: toolName });
+  const action = normalizeAction({ ...args.value, type: toolName });
   if (!action) {
     return { ok: false, message: `Tool ${toolName} is unknown or missing required parameters.` };
   }

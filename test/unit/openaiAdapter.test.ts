@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { ensureOpenAiToolResultPairing, OpenAiCompatibleProvider, resolveRequestMaxTokens, sanitizeToolArgumentsJson } from "../../src/core/openaiAdapter";
+import { parseToolArguments } from "../../src/core/openaiToolArgs";
 
 test("streams OpenAI-compatible chat completion chunks", async () => {
   const originalFetch = globalThis.fetch;
@@ -1036,6 +1037,38 @@ test("sanitizeToolArgumentsJson drops a dangling key with no value", () => {
 test("sanitizeToolArgumentsJson falls back to an empty object when repair is impossible", () => {
   assert.equal(sanitizeToolArgumentsJson("not json at all"), "{}");
   assert.equal(sanitizeToolArgumentsJson("{\"path\":\"src\",\"reason\":"), "{}");
+});
+
+test("parseToolArguments parses valid object arguments", () => {
+  const result = parseToolArguments("{\"path\":\"src/index.ts\",\"reason\":\"read it\"}");
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.ok ? result.value : null, { path: "src/index.ts", reason: "read it" });
+});
+
+test("parseToolArguments treats empty or whitespace arguments as an empty object", () => {
+  for (const raw of [undefined, "", "   "]) {
+    const result = parseToolArguments(raw);
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.ok ? result.value : null, {});
+  }
+});
+
+test("parseToolArguments recovers a value truncated mid-string (the read_file failure shape)", () => {
+  const result = parseToolArguments("{\"path\":\"src/core/openaiAd");
+  assert.equal(result.ok, true);
+  assert.equal(result.ok ? result.value.path : null, "src/core/openaiAd");
+});
+
+test("parseToolArguments recovers the required field when a trailing field is truncated", () => {
+  const result = parseToolArguments("{\"path\":\"src/index.ts\",\"reason\"");
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.ok ? result.value : null, { path: "src/index.ts" });
+});
+
+test("parseToolArguments reports failure when arguments cannot be recovered into an object", () => {
+  for (const raw of ["not json at all", "{\"path\":", "[1,2,3]", "\"just a string\""]) {
+    assert.equal(parseToolArguments(raw).ok, false);
+  }
 });
 
 test("resolveRequestMaxTokens returns undefined (no limit) for preference 0", () => {

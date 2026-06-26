@@ -35,3 +35,24 @@ test("reports native tool call parse errors", () => {
   assert.equal(missingRequired.ok, false);
   assert.match(missingRequired.ok ? "" : missingRequired.message, /missing required parameters/);
 });
+
+test("recovers a read_file tool call truncated mid-path instead of hard-failing", () => {
+  // The reported failure: the endpoint streamed a read_file call whose path string was cut off, so a
+  // bare JSON.parse threw "Unterminated string". The inbound parser now repairs it and executes.
+  const recovered = parseToolActionDetailed("read_file", "{\"path\":\"src/core/openaiAd");
+  assert.equal(recovered.ok, true);
+  assert.deepEqual(recovered.ok ? recovered.action : null, { type: "read_file", path: "src/core/openaiAd", reason: undefined });
+});
+
+test("recovers the required field when a trailing argument is truncated", () => {
+  const recovered = parseToolActionDetailed("read_file", "{\"path\":\"src/index.ts\",\"reason\":\"insp");
+  assert.equal(recovered.ok, true);
+  assert.deepEqual(recovered.ok ? recovered.action : null, { type: "read_file", path: "src/index.ts", reason: "insp" });
+});
+
+test("returns a retryable instruction when truncated arguments cannot be recovered", () => {
+  const failed = parseToolActionDetailed("read_file", "{\"path\":");
+  assert.equal(failed.ok, false);
+  assert.match(failed.ok ? "" : failed.message, /Re-issue the read_file call/);
+  assert.match(failed.ok ? "" : failed.message, /valid JSON/);
+});

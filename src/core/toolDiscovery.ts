@@ -1,5 +1,6 @@
 import { parseToolActionDetailed, ToolActionParseResult, toolDefinitions } from "./actionProtocol";
 import { isRecord } from "./guards";
+import { parseToolArguments } from "./openaiToolArgs";
 import { McpToolSummary } from "./mcpClient";
 import { codeForgeTools } from "./toolRegistry";
 import { AgentMode, ChatMessage, ToolCall } from "./types";
@@ -237,15 +238,12 @@ export function parseNativeToolCall(toolCall: ToolCall, mcpToolBindings: Readonl
     return parsed;
   }
 
-  let args: unknown;
-  try {
-    args = JSON.parse(toolCall.argumentsJson || "{}");
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    return { ok: false, message: `Arguments for ${toolCall.name} must be valid JSON. ${detail}` };
-  }
-  if (!isRecord(args)) {
-    return { ok: false, message: `Arguments for ${toolCall.name} must be a JSON object.` };
+  const args = parseToolArguments(toolCall.argumentsJson);
+  if (!args.ok) {
+    return {
+      ok: false,
+      message: `Arguments for ${toolCall.name} could not be parsed as a JSON object — they were missing, malformed, or truncated. Re-issue the ${toolCall.name} call with complete, valid JSON arguments.`
+    };
   }
 
   return {
@@ -254,7 +252,7 @@ export function parseNativeToolCall(toolCall: ToolCall, mcpToolBindings: Readonl
       type: "mcp_call_tool",
       serverId: binding.serverId,
       toolName: binding.toolName,
-      arguments: args,
+      arguments: args.value,
       reason: `Call MCP tool ${binding.toolName} on ${binding.serverId}`
     }
   };

@@ -19,6 +19,34 @@ export function sanitizeToolArgumentsJson(raw: string | undefined): string {
   return "{}";
 }
 
+// Inbound counterpart to sanitizeToolArgumentsJson: recover a freshly-received tool call's `arguments`
+// before executing it. Per the OpenAI tool-calling spec the model-generated `arguments` string is not
+// guaranteed to be valid JSON, and streamed local backends routinely truncate it mid-string. Try a
+// strict parse, then the same best-effort repair used on the outbound path, and only report failure
+// when the arguments cannot be recovered into a JSON object. Never throws.
+export type ToolArgumentsParse =
+  | { readonly ok: true; readonly value: Record<string, unknown> }
+  | { readonly ok: false };
+
+export function parseToolArguments(raw: string | undefined): ToolArgumentsParse {
+  const text = (raw ?? "").trim();
+  if (!text) {
+    return { ok: true, value: {} };
+  }
+  const repaired = repairTruncatedJsonObject(text);
+  for (const candidate of repaired ? [text, repaired] : [text]) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+        return { ok: true, value: parsed as Record<string, unknown> };
+      }
+    } catch {
+      // Strict parse failed; fall through to the repaired candidate, then give up.
+    }
+  }
+  return { ok: false };
+}
+
 function isJsonObjectString(text: string): boolean {
   try {
     const parsed = JSON.parse(text);
