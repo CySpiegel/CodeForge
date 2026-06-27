@@ -435,6 +435,15 @@ After Agent-mode turns, a non-blocking background review may save new memory and
 
 The review is gated by `codeforge.skills.enabled` and nudged every `codeforge.skills.creationNudgeInterval` tool iterations (default `10`). List and run the resulting skills with `/skills` and `/skill`.
 
+You can see the review happen: when it saves something it posts a short chat notice — `🧠 Learned a lesson…`, `👤 Updated your profile…`, or `🛠️ Created/Improved a skill…`. How loud this is is controlled by **`codeforge.review.verbosity`** (default `verbose`):
+
+- `verbose` — a transient `🧠 Reviewing this session…` status, every save notice, **and** a `🧠 Reviewed — nothing new` line when a review saves nothing, so you always know it ran.
+- `concise` — the status and save notices, plus a line only when a review fails; no "nothing new" line.
+- `status` — only the transient reviewing indicator; no chat lines (saves still update the memory/skills panels).
+- `silent` — no status and no chat lines; the review still runs in the background.
+
+Learning runs regardless of this setting — it only controls what you see.
+
 ### Curation
 
 A periodic curator consolidates overlapping skills and archives stale ones. It **never deletes** — archives are recoverable — and **pinned skills are exempt**. It is gated by `codeforge.curator.enabled`, with cadence from `codeforge.curator.intervalHours` (default `168` = one week) and `codeforge.curator.minIdleHours` (default `2`). Check or run it with `/curator`.

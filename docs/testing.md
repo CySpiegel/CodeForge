@@ -10,7 +10,7 @@ Run this before committing code changes:
 npm test
 ```
 
-This compiles the test project and runs the full deterministic suite (currently **300 tests pass / 0 fail**), covering:
+This compiles the test project and runs the full deterministic suite (currently **327 tests pass / 0 fail**), covering:
 
 - core unit tests
 - tool registry validation tests, plus the extracted validator/classification/approval-metadata/request-tooling unit tests (`toolValidation.ts`, `toolClassification.ts`, `approvalMetadata.ts`, `toolRequestDefinitions.ts`)

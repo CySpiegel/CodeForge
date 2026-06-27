@@ -114,6 +114,8 @@ Self-improvement is governed by three settings — all default **on**. To stop t
 - **`codeforge.skills.enabled`** — authoring and refining reusable skills under `.codeforge/skills` (nudged by `codeforge.skills.creationNudgeInterval`).
 - **`codeforge.curator.enabled`** — the periodic skill-library curation pass that consolidates and archives skills (cadence via `codeforge.curator.intervalHours` / `codeforge.curator.minIdleHours`).
 
+The review surfaces what it does live in chat (`🧠`/`👤`/`🛠️` notices when it saves a memory, profile note, or skill). Tune how much it shows with **`codeforge.review.verbosity`** (`verbose` | `concise` | `status` | `silent`, default `verbose`); in `verbose` it also reports a "Reviewed — nothing new" line so you always know the review ran. Learning runs regardless — this only controls visibility.
+
 For a durable, searchable fact store with compositional recall, set `codeforge.memory.provider` to `holographic` (default `none`); it mirrors saved memories and recalls relevant facts into each task's context, fully local.
 
 ## Chat Commands
