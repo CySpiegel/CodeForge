@@ -2,7 +2,7 @@
   "name": "codeforge",
   "displayName": "CodeForge",
   "description": "A self-hosted-first coding harness extension for Visual Studio Code.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "codeforge",
   "license": "UNLICENSED",
   "repository": {
