@@ -128,6 +128,7 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
         baseUrl: typeof message.baseUrl === "string" ? message.baseUrl : undefined,
         apiKey: typeof message.apiKey === "string" ? message.apiKey : undefined,
         model: typeof message.model === "string" ? message.model : undefined,
+        auxiliaryModel: typeof message.auxiliaryModel === "string" ? message.auxiliaryModel : undefined,
         allowlist: Array.isArray(message.allowlist) ? message.allowlist.filter((item): item is string => typeof item === "string") : undefined,
         mcpServers: Array.isArray(message.mcpServers) ? message.mcpServers : undefined,
         maxFiles: typeof message.maxFiles === "number" ? message.maxFiles : undefined,
@@ -221,6 +222,8 @@ export class CodeForgeViewProvider implements vscode.WebviewViewProvider {
               <label class="wide">API key<input id="apiKey" type="password" autocomplete="off" placeholder="Optional API key"></label>
               <label>Model<input id="modelInput" type="text" placeholder="Model ID"></label>
               <div id="modelMeta" class="settings-meta wide"></div>
+              <label class="wide">Context-compaction model<select id="auxiliaryModel"></select></label>
+              <div class="settings-meta wide">Optional. Used for CodeForge's own background turns — context compaction, the learning review, and curator — instead of your main model. Defaults to the selected model when left on “Use the selected model”.</div>
               <label class="wide">Context window tokens<input id="maxTokens" type="number" min="0" max="10000000" placeholder="Auto"></label>
               <label>Terminal command timeout seconds<input id="commandTimeout" type="number" min="5" max="1800"></label>
               <label>Model idle timeout seconds<input id="modelIdleTimeout" type="number" min="30" max="1800"></label>
@@ -370,6 +373,7 @@ interface WebviewMessage {
   readonly scope?: string;
   readonly namespace?: string;
   readonly model?: string;
+  readonly auxiliaryModel?: string;
   readonly profileId?: string;
   readonly activeProfileId?: string;
   readonly createProfile?: boolean;

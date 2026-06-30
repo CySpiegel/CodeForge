@@ -625,8 +625,46 @@ export class AgentController {
     await this.config.setModel(model);
     this.lastTokenUsage = undefined;
     this.emit({ type: "status", text: `Model set to ${model}.` });
+    // Reflect the cached context immediately for snappy feedback, then re-inspect /v1/models so the
+    // context window follows the model the user just picked. Without the re-inspect we keep whatever
+    // context was discovered for the model that happened to be loaded at connect time; when the user
+    // has not pinned a manual context size, a model with a different window stays on the stale budget
+    // (e.g. a 256k model stuck on the 30k default) and sessions compact at the wrong threshold.
+    // refreshModels re-fetches, re-resolves the selected model's contextLength, and re-emits context
+    // usage + state.
     this.emitContextUsage();
-    await this.publishState();
+    await this.refreshModels();
+    await this.autoCompactForSelectedModel();
+  }
+
+  // After the active model changes, its context window may now be smaller than the live context (the
+  // user downshifted to a smaller-context model). Compact immediately so the next turn is not forced to
+  // compact mid-request and so the ring reflects a healthy budget for the new model. No-op when a turn
+  // is already running (that turn's own before/after-request auto-compaction covers the new window),
+  // when there is nothing to compact, or when usage is still under the threshold for the new window.
+  private async autoCompactForSelectedModel(): Promise<void> {
+    if (this.runningAbort || !this.context.shouldAutoCompact()) {
+      return;
+    }
+    // Cheap, model-free pass first: trim old tool output to fit the new (smaller) budget. This often
+    // suffices on its own and shrinks the transcript before any model-driven summarization, so we never
+    // hand a huge backlog to a small model just because the user downshifted.
+    this.context.compactOldToolResults();
+    if (!this.context.shouldAutoCompact()) {
+      return;
+    }
+    const abort = new AbortController();
+    this.runningAbort = abort;
+    try {
+      const provider = await this.providerGateway.createProvider();
+      const model = await this.models.resolveModel(provider, abort.signal);
+      await this.context.autoCompactIfNeeded(provider, model, abort, "after switching to a smaller-context model");
+    } catch (error) {
+      this.emit({ type: "error", text: error instanceof Error ? error.message : String(error) });
+    } finally {
+      this.clearRunningAbort(abort);
+      this.drainQueuedWork();
+    }
   }
 
   async setAgentMode(mode: AgentMode): Promise<void> {
@@ -2159,6 +2197,7 @@ export class AgentController {
       inspector: this.inspector.summary(),
       settings: {
         agentMode,
+        auxiliaryModel: this.config.getAuxiliaryModel(),
         allowlist: networkPolicy.allowlist,
         maxFiles: contextLimits.maxFiles,
         maxTokens: contextLimits.maxTokens,

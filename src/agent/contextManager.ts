@@ -78,6 +78,15 @@ export class ContextManager {
     return this.deps.getMessages().filter((message) => message.role !== "system").length > 0;
   }
 
+  // True when the live context is at/over the auto-compact threshold, there is something to compact,
+  // and no approval is blocking. Lets a caller cheaply gate an expensive provider/model setup before
+  // deciding to compact — e.g. right after a model switch shrinks the context window.
+  shouldAutoCompact(): boolean {
+    return this.currentUsage().percent >= contextAutoCompactPercent
+      && this.deps.approvalsCount() === 0
+      && this.hasCompactableContext();
+  }
+
   // -- Compaction ---------------------------------------------------------------------------------
 
   // Run a model turn that replaces the transcript with a concise handoff summary.

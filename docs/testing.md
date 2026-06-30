@@ -10,7 +10,7 @@ Run this before committing code changes:
 npm test
 ```
 
-This compiles the test project and runs the full deterministic suite (currently **327 tests pass / 0 fail**), covering:
+This compiles the test project and runs the full deterministic suite (currently **336 tests pass / 0 fail**), covering:
 
 - core unit tests
 - tool registry validation tests, plus the extracted validator/classification/approval-metadata/request-tooling unit tests (`toolValidation.ts`, `toolClassification.ts`, `approvalMetadata.ts`, `toolRequestDefinitions.ts`)
@@ -20,6 +20,8 @@ This compiles the test project and runs the full deterministic suite (currently 
 - offline workspace index tests
 - pinned active-file context, run inspector, permission audit, edit verification, and memory-management integration tests
 - package contract checks for VS Code-only/offline-first release shape
+- settings webview layout contract (`settingsLayout.test.ts`: the `.settings-surface` grid declares one row per direct child and keeps the single flexible/scrolling track on the content pane, so the tabs row can never collapse and steal its own clicks)
+- context-window-on-model-switch tests (`contextWindowOnModelSwitch.test.ts` + `contextWindowSwitch.test.ts`: with no manual `maxTokens` override the context budget follows the selected model's discovered `contextLength`, an explicit override still wins, an unknown context falls back to the default budget, downshifting to a smaller model flags a needed compaction, selecting a model re-inspects `/v1/models` and emits a matching context-usage update, and the published state surfaces the configured context-compaction/auxiliary model for the settings selector)
 - MCP client tests
 - background self-improvement review tests (`backgroundReview.ts`) and curator tests (`curator.ts`, `curatorBackup.ts`: deterministic active → stale → archived transitions, recoverable backups, pinned-exempt archiving)
 - skill manager and skill-usage tests (`skillManager.ts`, `skillUsage.ts`, `skillIo.ts`: agent-built skill create/patch/view, `SKILL.md` rendering the loader can parse, `.usage.json` tracking, tool validation against the real registry)

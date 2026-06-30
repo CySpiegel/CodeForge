@@ -107,6 +107,7 @@ export interface AgentMcpResourceContextSummary {
 
 export interface AgentSettingsSummary {
   readonly agentMode: string;
+  readonly auxiliaryModel: string;
   readonly allowlist: readonly string[];
   readonly maxFiles: number;
   readonly maxTokens?: number;

@@ -247,7 +247,11 @@ textarea {
 
 .settings-surface {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  /* One track per direct child: header / tabs / content / actions.
+     The flexible (scrolling) track must be the content pane, not the tabs row —
+     keep the track count in sync with the children or the 1fr lands on the wrong
+     row and that row collapses to 0 in a short/narrow viewport. */
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   width: min(680px, 100%);
   max-height: min(720px, calc(100vh - 24px));
   min-height: 0;

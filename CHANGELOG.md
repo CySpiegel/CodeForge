@@ -5,6 +5,44 @@ All notable changes to CodeForge are documented here. The format is based on
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pre-1.0: minor versions mark notable
 maintenance/feature milestones, patch versions small fixes).
 
+## [0.3.0] - 2026-06-30
+
+Automatic context-window management: the context budget now follows the model you select — reflected in
+the context ring, its hover tooltip, and the compaction threshold — with a settings selector for the
+model used to compact context. Also fixes the settings tabs being unclickable in a narrow panel.
+
+### Added
+- **The context window now follows the selected model automatically.** Picking a model from the
+  front-page dropdown re-inspects `/v1/models` and applies that model's discovered context length to
+  the context ring, its hover tooltip, and the auto-compaction threshold — no need to type a value into
+  the settings "Context window tokens" field. Switching to a larger-context model raises the budget;
+  switching to a smaller-context model lowers it and, when the live context no longer fits, triggers an
+  automatic compaction so the next turn does not overflow. An explicit `maxTokens` override still wins
+  when set.
+- **Context-compaction model selector in Settings.** The settings panel now has a "Context-compaction
+  model" dropdown listing the endpoint's available models (plus "Use the selected model"), wired to
+  `codeforge.model.auxiliary` — the smaller/faster model CodeForge uses for its own background turns
+  (context compaction, the learning review, curator). Previously this was settings-file-only. This also
+  lets a drastic downshift compact with a capable model instead of the tiny model just selected.
+
+### Fixed
+- **Switching models no longer keeps a stale context budget.** Previously the context window was
+  resolved from the inspection cached at connect time, so changing models left the budget on whatever
+  was loaded first; a model whose context was unknown in that cache fell back to the 120000-byte
+  (≈30000-token) default and compacted early. Model selection now re-fetches `/v1/models` and re-resolves
+  the active model's context length.
+- **Settings tabs are clickable again in a narrow/short panel.** The settings modal's `.settings-surface`
+  is a CSS grid with four children (header, tabs, content, actions) but declared only three rows
+  (`grid-template-rows: auto minmax(0, 1fr) auto`), so the flexible/scrolling track landed on the **tabs**
+  row instead of the content pane. When the surface was height-constrained — the default VS Code sidebar,
+  made worse by the single-column `@media (max-width: 520px)` layout and by display scaling on Windows /
+  Remote-WSL — the tabs row collapsed toward `0px`; its buttons stayed visible but were overlapped by the
+  transparent content pane, which won the hit-test and swallowed the clicks (Endpoint/MCP/Permissions/
+  Memory/Inspector all looked present but did nothing). The grid now declares one row per child
+  (`auto auto minmax(0, 1fr) auto`) so the content pane is the scrolling track and the tabs row can no
+  longer collapse. This was a layout bug on every deployment, not Windows-specific. A `settingsLayout`
+  contract test pins the track-count/child-count invariant so the off-by-one cannot silently return.
+
 ## [0.2.1] - 2026-06-26
 
 Reliability release focused on imperfect local-model output — truncated streams and slightly-off

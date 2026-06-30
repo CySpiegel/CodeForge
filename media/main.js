@@ -70,6 +70,7 @@
     baseUrl: document.getElementById("baseUrl"),
     apiKey: document.getElementById("apiKey"),
     modelInput: document.getElementById("modelInput"),
+    auxiliaryModel: document.getElementById("auxiliaryModel"),
     modelMeta: document.getElementById("modelMeta"),
     maxTokens: document.getElementById("maxTokens"),
     commandTimeout: document.getElementById("commandTimeout"),
@@ -497,6 +498,7 @@
       baseUrl,
       apiKey: elements.apiKey?.value.trim() || "",
       model: elements.modelInput?.value.trim() || "",
+      auxiliaryModel: elements.auxiliaryModel?.value || "",
       allowlist: splitLines(elements.allowlist?.value || ""),
       mcpServers,
       maxTokens: Number(elements.maxTokens?.value || 0),
@@ -546,6 +548,7 @@
       renderEndpointMeta();
       renderModelMeta();
       renderModelPicker();
+      renderAuxiliaryModelOptions();
       if (isSlashCommandMenuOpen()) {
         renderSlashCommandMenu();
       }
@@ -683,6 +686,7 @@
       return;
     }
     renderEndpointFields();
+    renderAuxiliaryModelOptions();
     if (elements.maxTokens) {
       const discoveredTokens = state.selectedModelInfo?.contextLength || findModelInfo(state.selectedModel || "")?.contextLength;
       elements.maxTokens.placeholder = discoveredTokens ? `Auto (${formatNumber(discoveredTokens)})` : "Auto";
@@ -941,6 +945,26 @@
       elements.apiKey.placeholder = "Optional API key";
     }
     elements.profileLabel?.focus();
+  }
+
+  // Populate the settings "Context-compaction model" dropdown from the discovered model list, with a
+  // leading "use the selected model" choice (empty value = codeforge.model.auxiliary unset). A
+  // currently-configured id that the endpoint no longer lists stays selectable so saving does not drop
+  // it.
+  function renderAuxiliaryModelOptions() {
+    if (!elements.auxiliaryModel) {
+      return;
+    }
+    const models = state?.modelInfo || [];
+    const configured = state?.settings?.auxiliaryModel || "";
+    const options = [{ value: "", label: "Use the selected model" }];
+    for (const model of models) {
+      options.push({ value: model.id, label: model.id });
+    }
+    if (configured && !models.some((model) => model.id === configured)) {
+      options.push({ value: configured, label: `${configured} (not in current model list)` });
+    }
+    replaceOptions(elements.auxiliaryModel, options, configured);
   }
 
   function renderEndpointMeta() {

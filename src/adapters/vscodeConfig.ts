@@ -225,6 +225,9 @@ export class CodeForgeConfigService {
     if (settings.model !== undefined) {
       await this.updateRepoSetting("model", settings.model.trim());
     }
+    if (settings.auxiliaryModel !== undefined) {
+      await this.updateRepoSetting("model.auxiliary", settings.auxiliaryModel.trim());
+    }
     if (settings.allowlist !== undefined || !sameStringArray(allowlist, existingAllowlist)) {
       await config.update("network.allowlist", allowlist, vscode.ConfigurationTarget.Global);
     }
@@ -356,6 +359,7 @@ export interface CodeForgeSettingsUpdate {
   readonly baseUrl: string;
   readonly apiKey: string;
   readonly model: string;
+  readonly auxiliaryModel: string;
   readonly allowlist: readonly string[];
   readonly maxFiles: number;
   readonly maxTokens: number;
