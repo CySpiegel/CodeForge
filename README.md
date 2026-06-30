@@ -1,8 +1,8 @@
 # CodeForge
 
-CodeForge is a Visual Studio Code extension that turns a configured OpenAI-compatible LLM endpoint into a coding assistant inside your editor.
+CodeForge is a Visual Studio Code extension that turns a configured OpenAI-compatible or Anthropic Messages API LLM endpoint into a coding assistant inside your editor.
 
-It is designed for explicit endpoint control. CodeForge does not include public provider presets and keeps model traffic pointed at endpoints you configure, such as vLLM, LiteLLM, LM Studio, or a corporate/cloud OpenAI-compatible gateway.
+It is designed for explicit endpoint control. CodeForge does not include public provider presets and keeps model traffic pointed at endpoints you configure, such as vLLM, LiteLLM, LM Studio, a corporate/cloud OpenAI-compatible gateway, or the Anthropic Messages API (api.anthropic.com directly, or an Anthropic-compatible gateway such as AskSage).
 
 > **New here?** The [**User Guide**](docs/user-guide.md) walks through endpoint setup, the working and approval modes, the command surface, managing context on local models, sub-agents, memory, MCP, and troubleshooting.
 
@@ -29,25 +29,33 @@ The extension is not a CLI tool and does not use a browser or website preview wo
 
 ## Endpoint Support
 
-CodeForge talks to OpenAI API style endpoints. The endpoint implementation can be anything that follows that API shape.
+CodeForge talks to two endpoint protocols. The protocol is inferred from the endpoint's base URL — there is no separate setting.
 
-Common examples:
+**OpenAI-compatible** (the default — any endpoint that follows the OpenAI Chat Completions shape):
 
 - LM Studio: `http://127.0.0.1:1234`
 - LiteLLM: `http://127.0.0.1:4000`
 - vLLM: `http://127.0.0.1:8000`
 - custom OpenAI-compatible endpoint origins explicitly allowed when saved in settings
 
-Model discovery uses `/v1/models`. When the endpoint exposes model metadata, CodeForge uses it for context length and reasoning-model indicators. Chat requests use `/v1/chat/completions`, including native OpenAI tool calls when the selected model and server support them.
+Model discovery uses `/v1/models`; chat requests use `/v1/chat/completions`, including native OpenAI tool calls when the selected model and server support them.
+
+**Anthropic Messages API** (native `/v1/messages`). CodeForge selects this protocol when the base URL is:
+
+- the official API: `https://api.anthropic.com` (authenticated with your key via `x-api-key`)
+- an Anthropic-compatible gateway whose path ends in `/anthropic`, e.g. AskSage's `https://api.asksage.ai/server/anthropic` (authenticated with `Authorization: Bearer`)
+- a local server that serves the Messages API alongside an OpenAI API on the same origin — opt in with a `#anthropic` fragment, e.g. LM Studio's `http://127.0.0.1:1234#anthropic`
+
+Anthropic endpoints stream the native SSE format, support native tool calls, and discover models from `/v1/models` (falling back to the known Claude lineup when the endpoint omits token metadata).
 
 ## Safety Model
 
-CodeForge is local-first by default:
+CodeForge is local-first by default and never reaches a public endpoint without your explicit action:
 
 - no telemetry
-- no bundled cloud-provider presets
+- no bundled provider presets — including no cloud presets; nothing points at a public API out of the box
 - localhost and private IP ranges are allowed
-- custom endpoint origins are allowed only after you save that URL in settings
+- any other endpoint origin — including a public cloud API like `api.anthropic.com` or AskSage — is reachable only after you explicitly save that URL as an endpoint in settings (which adds its origin to the network allowlist)
 - API keys are stored in VS Code SecretStorage
 - edits, commands, MCP calls, and memory writes go through typed validation and approval policy
 - permission decisions, approvals, and tool execution are visible in the run inspector

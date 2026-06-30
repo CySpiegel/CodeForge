@@ -13,7 +13,7 @@ Keep these design constraints intact:
 - no bundled cloud-provider presets
 - no public web fetch/search tools
 - no CLI edition
-- network access limited to localhost, private IP ranges, and explicitly allowlisted on-prem hosts
+- network access limited to localhost and private IP ranges by default; any other origin (an on-prem host or a public cloud API such as api.anthropic.com / AskSage) is reachable only after the user explicitly saves it as an endpoint, which allowlists its origin
 - all file edits, commands, MCP service calls, and memory writes routed through typed tools and permission policy
 
 ## Current State (v0.1.15)

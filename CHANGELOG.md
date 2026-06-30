@@ -5,6 +5,30 @@ All notable changes to CodeForge are documented here. The format is based on
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pre-1.0: minor versions mark notable
 maintenance/feature milestones, patch versions small fixes).
 
+## [Unreleased]
+
+### Added
+- **Native Anthropic Messages API support (Phase 1).** CodeForge can now drive an Anthropic-protocol
+  endpoint in addition to OpenAI-compatible ones, reusing the existing agent loop unchanged. A new
+  `AnthropicMessagesProvider` (raw `fetch`, no SDK — the extension stays zero-runtime-dependency)
+  implements the same `LlmProvider` interface: it translates CodeForge's internal messages to the
+  `/v1/messages` shape (system prompt hoisted to the top-level `system` param; `role:"tool"` results
+  coalesced into a user turn of `tool_result` blocks; assistant tool calls emitted as `tool_use` blocks
+  with parsed object input), streams the native SSE format (`message_start` / `content_block_delta`
+  with `input_json_delta` tool-arg reassembly / `message_delta` / `message_stop`) back into the existing
+  `LlmStreamEvent` sequence, sends the required `max_tokens`, and discovers models from `/v1/models`
+  (`max_input_tokens`→context, `max_tokens`→output cap) with a Claude fallback catalogue. Extended
+  thinking is off in this phase.
+  - **No new setting** — the protocol is inferred from the endpoint base URL: the official API
+    (`https://api.anthropic.com`, authenticated via `x-api-key`); an Anthropic-compatible gateway whose
+    path ends in `/anthropic`, e.g. AskSage's `https://api.asksage.ai/server/anthropic` (authenticated
+    via `Authorization: Bearer`, base path preserved); or a local server that also serves an OpenAI API
+    on the same origin, opted in with a `#anthropic` URL fragment (e.g. LM Studio
+    `http://127.0.0.1:1234#anthropic`).
+  - Validated against a live LM Studio Anthropic endpoint (streamed text + native tool calls), with
+    offline unit tests covering the mapping, streaming, host-based auth, URL handling, discovery, and
+    protocol inference.
+
 ## [0.3.0] - 2026-06-30
 
 Automatic context-window management: the context budget now follows the model you select — reflected in

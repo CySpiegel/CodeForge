@@ -36,7 +36,7 @@ Load order is `markdown → dom → inspector → approvals → mcpEditor → wo
 
 - No Claude Code source is copied into this project.
 - Runtime dependencies are avoided unless they remove real complexity.
-- Public IP network access is blocked. CodeForge permits localhost, private IP ranges, and explicitly configured on-prem hostnames for vLLM/LiteLLM-compatible endpoints.
+- Public IP network access is blocked by default. CodeForge permits localhost and private IP ranges automatically; any other origin — an on-prem host or a public cloud API such as `api.anthropic.com` / AskSage — becomes reachable only after the user explicitly saves it as an endpoint, which allowlists its origin. The endpoint protocol (OpenAI-compatible Chat Completions vs. native Anthropic Messages API) is inferred from the base URL.
 - File writes and shell commands require user approval.
 - Shell commands run through the terminal adapter with workspace-scoped cwd validation, bounded output, cancellation, and a minimized environment.
 - Local memory is written only through the `memory` tool and the user's `/memory` command, gated by `codeforge.memory.enabled`; nothing else writes to memory.

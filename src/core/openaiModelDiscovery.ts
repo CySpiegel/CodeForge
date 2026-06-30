@@ -113,6 +113,8 @@ export function backendLabel(backend: OpenAiBackendKind): string {
       return "vLLM";
     case "openai-api":
       return "OpenAI API compatible";
+    case "anthropic":
+      return "Anthropic Messages API";
   }
 }
 

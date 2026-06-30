@@ -52,7 +52,7 @@ export interface ProviderCapabilities {
   readonly nativeToolCalls: boolean;
 }
 
-export type OpenAiBackendKind = "openai-api" | "litellm" | "vllm";
+export type OpenAiBackendKind = "openai-api" | "litellm" | "vllm" | "anthropic";
 
 export interface ModelInfo {
   readonly id: string;

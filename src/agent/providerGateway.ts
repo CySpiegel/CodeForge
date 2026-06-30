@@ -1,6 +1,8 @@
 import type { CodeForgeConfigService } from "../adapters/vscodeConfig";
 import { EndpointCapabilityStore, isFreshCapability } from "../core/endpointCapabilityCache";
+import { AnthropicMessagesProvider } from "../core/anthropicAdapter";
 import { OpenAiCompatibleProvider } from "../core/openaiAdapter";
+import { resolveProviderKind } from "../core/providerKind";
 import { LlmProvider, OpenAiEndpointInspection, ProviderCapabilities } from "../core/types";
 import type { AgentCapabilitySummary, AgentInspectorEntry } from "./agentUiTypes";
 
@@ -25,10 +27,16 @@ export class ProviderGateway {
       return this.deps.providerFactory();
     }
     const profile = await this.deps.config.getActiveProfile();
-    return new OpenAiCompatibleProvider(profile, this.deps.config.getNetworkPolicy(), {
+    const policy = this.deps.config.getNetworkPolicy();
+    const options = {
       streamCompletionGraceMs: this.deps.config.getStreamCompletionGraceSeconds() * 1000,
       maxRateLimitRetries: this.deps.config.getRateLimitRetries()
-    });
+    };
+    // The protocol is inferred from the base URL host: an api.anthropic.com (or *.anthropic.com)
+    // endpoint speaks the native Messages API, everything else the OpenAI-compatible API.
+    return resolveProviderKind(profile.baseUrl) === "anthropic"
+      ? new AnthropicMessagesProvider(profile, policy, options)
+      : new OpenAiCompatibleProvider(profile, policy, options);
   }
 
   async capabilities(provider: LlmProvider, model: string, signal: AbortSignal): Promise<ProviderCapabilities> {
