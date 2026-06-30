@@ -10,7 +10,7 @@ Run this before committing code changes:
 npm test
 ```
 
-This compiles the test project and runs the full deterministic suite (currently **366 tests pass / 0 fail**), covering:
+This compiles the test project and runs the full deterministic suite (currently **368 tests pass / 0 fail**), covering:
 
 - core unit tests
 - tool registry validation tests, plus the extracted validator/classification/approval-metadata/request-tooling unit tests (`toolValidation.ts`, `toolClassification.ts`, `approvalMetadata.ts`, `toolRequestDefinitions.ts`)
@@ -29,7 +29,8 @@ This compiles the test project and runs the full deterministic suite (currently 
 - worktree adapter tests (`GitWorktreeManager` isolating edits in a throwaway worktree and capturing a diff, plus `isAvailable` outside a git repo)
 - model-selection tests (`modelSelection.test.ts`, covering `resolveConfiguredModelId` in `agentController.ts`: alias/canonical-id matching, case/whitespace tolerance, unmatched non-empty id kept rather than swapped to `models[0]`)
 - `openaiAdapter` tests (tool-argument sanitize/repair, `resolveRequestMaxTokens` bounding, and context-length detection across LiteLLM, llama.cpp `n_ctx`/`n_ctx_train`, LM Studio `loaded_context_length`, and nested fields)
-- native Anthropic Messages API provider tests (`anthropicAdapter.test.ts`, `anthropicMessageMapper.test.ts`, `anthropicModelCatalog.test.ts`, `providerKind.test.ts`): SSE streaming → `LlmStreamEvent`, `input_json_delta` reassembly into one `toolCalls` event, usage merge, error/ping handling, host-based auth (`x-api-key` for `api.anthropic.com` vs. `Authorization: Bearer` for gateways like AskSage), base-path preservation + `/v1` collapse, the system-hoist / `role:"tool"`→`tool_result` / `tool_use` mapping, `/v1/models` parse (`max_input_tokens`/`max_tokens`) with embedding-filter + fallback catalogue, and base-URL protocol inference (host / `/anthropic` path / `#anthropic` fragment)
+- native Anthropic Messages API provider tests (`anthropicAdapter.test.ts`, `anthropicMessageMapper.test.ts`, `anthropicModelCatalog.test.ts`, `providerKind.test.ts`): SSE streaming → `LlmStreamEvent`, `input_json_delta` reassembly into one `toolCalls` event, usage merge, error/ping handling, host-based auth (`x-api-key` for `api.anthropic.com` vs. `Authorization: Bearer` for gateways like AskSage), base-path preservation + `/v1` collapse, the system-hoist / `role:"tool"`→`tool_result` / `tool_use` mapping, `/v1/models` parse (`max_input_tokens`/`max_tokens`) with embedding-filter + fallback catalogue, base-URL protocol inference (host / `/anthropic` path / `#anthropic` fragment), and a `stop_reason: "refusal"` surfacing an explanatory note
+- Anthropic full-loop integration test (`anthropicProviderLoop.test.ts`): `AgentController` drives the real `AnthropicMessagesProvider` over HTTP against a mock Anthropic server through a two-turn tool loop, asserting the hoisted system prompt + offered tools on turn 1 and the CodeForge tool result round-tripped into an Anthropic `tool_result` block keyed to the turn-1 `tool_use` id on turn 2
 - deterministic `AgentController` pipeline integration tests
 
 The integration harness uses a scripted in-memory LLM provider and fake workspace, diff, terminal, code-intel, notebook, memory, and MCP adapters. It tests CodeForge orchestration without relying on a live model.

@@ -102,6 +102,23 @@ test("thinking_delta surfaces as a reasoning event; ping is tolerated as progres
   }
 });
 
+test("a stop_reason: refusal surfaces an explanatory note instead of an empty turn", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => sseResponse([
+    { event: "message_start", data: { type: "message_start", message: { usage: { input_tokens: 12 } } } },
+    { event: "message_delta", data: { type: "message_delta", delta: { stop_reason: "refusal" }, usage: { output_tokens: 0 } } },
+    { event: "message_stop", data: { type: "message_stop" } }
+  ]);
+  try {
+    const events = await collect(provider().streamChat({ model: "claude-opus-4-8", messages: [{ role: "user", content: "hi" }] }));
+    const text = events.filter((e) => e.type === "content").map((e) => (e as { text: string }).text).join("");
+    assert.match(text, /refusal/i);
+    assert.equal(events[events.length - 1].type, "done");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("an error SSE event throws out of the turn", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => sseResponse([

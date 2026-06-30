@@ -17,17 +17,21 @@ maintenance/feature milestones, patch versions small fixes).
   with parsed object input), streams the native SSE format (`message_start` / `content_block_delta`
   with `input_json_delta` tool-arg reassembly / `message_delta` / `message_stop`) back into the existing
   `LlmStreamEvent` sequence, sends the required `max_tokens`, and discovers models from `/v1/models`
-  (`max_input_tokens`→context, `max_tokens`→output cap) with a Claude fallback catalogue. Extended
-  thinking is off in this phase.
+  (`max_input_tokens`→context, `max_tokens`→output cap) with a Claude fallback catalogue and embedding
+  filter, and surfaces an Anthropic `stop_reason: "refusal"` (a safety/classifier decline returned as a
+  normal 200 response) as an explanatory note rather than a silent empty turn. Extended thinking is off
+  in this phase.
   - **No new setting** — the protocol is inferred from the endpoint base URL: the official API
     (`https://api.anthropic.com`, authenticated via `x-api-key`); an Anthropic-compatible gateway whose
     path ends in `/anthropic`, e.g. AskSage's `https://api.asksage.ai/server/anthropic` (authenticated
     via `Authorization: Bearer`, base path preserved); or a local server that also serves an OpenAI API
     on the same origin, opted in with a `#anthropic` URL fragment (e.g. LM Studio
     `http://127.0.0.1:1234#anthropic`).
-  - Validated against a live LM Studio Anthropic endpoint (streamed text + native tool calls), with
-    offline unit tests covering the mapping, streaming, host-based auth, URL handling, discovery, and
-    protocol inference.
+  - Validated against a live LM Studio Anthropic endpoint (streamed text + native tool calls) and an
+    offline controller-level integration test that drives the full two-turn agentic tool loop over HTTP
+    against a mock Anthropic server (proving the CodeForge tool result round-trips into a `tool_result`
+    block keyed to the prior `tool_use` id), plus offline unit tests covering the mapping, streaming,
+    host-based auth, URL handling, discovery, refusal handling, and protocol inference.
 
 ## [0.3.0] - 2026-06-30
 

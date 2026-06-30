@@ -38,8 +38,14 @@ interface AnthropicStreamState {
   readonly toolBlocks: Map<number, AnthropicToolBlockState>;
   promptTokens?: number;
   completionTokens?: number;
+  stopReason?: string;
   done: boolean;
 }
+
+// Surfaced as assistant content when the API returns stop_reason: "refusal" (a successful HTTP 200 in
+// which a safety classifier or the model itself declined). Without this the turn would end with empty
+// or partial output and no explanation.
+const REFUSAL_NOTE = "\n\n⚠️ The endpoint declined this request (Anthropic stop_reason: \"refusal\"). This is a safety/classifier decline returned as a normal response, not a transport error — rephrase the request, or try a different model or endpoint.";
 
 // Native Anthropic Messages API provider. Implements the same LlmProvider contract as the
 // OpenAI-compatible provider and emits the identical LlmStreamEvent sequence the agent loop consumes,
@@ -166,6 +172,9 @@ export class AnthropicMessagesProvider implements LlmProvider {
     if (finalToolCalls.length > 0) {
       yield { type: "toolCalls", toolCalls: finalToolCalls };
     }
+    if (state.stopReason === "refusal") {
+      yield { type: "content", text: REFUSAL_NOTE };
+    }
     yield { type: "done" };
   }
 
@@ -268,6 +277,10 @@ export class AnthropicMessagesProvider implements LlmProvider {
         return;
       }
       case "message_delta": {
+        const delta = payload.delta;
+        if (isRecord(delta) && typeof delta.stop_reason === "string") {
+          state.stopReason = delta.stop_reason;
+        }
         const usage = payload.usage;
         const output = isRecord(usage) ? usage.output_tokens : undefined;
         if (typeof output === "number") {
